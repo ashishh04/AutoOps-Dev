@@ -293,7 +293,16 @@ public class StepTranslator {
         }
 
         out.append("__step_out=\"$(mktemp -t autoops-lambda-XXXXXX.json)\"\n");
-        out.append("trap 'rm -f \"$__step_out\"' EXIT\n");
+        // The CLI's own response envelope ({StatusCode, ExecutedVersion,
+        // FunctionError}) is captured rather than printed. An operator reading
+        // a run log wants the FUNCTION's answer, not the transport's receipt —
+        // but the envelope cannot simply be discarded, because FunctionError is
+        // the only signal that the function ran and threw. `aws lambda invoke`
+        // exits 0 for a handled function error: the invocation succeeded, the
+        // code failed. Without the check below that is a GREEN step for a
+        // Lambda that raised.
+        out.append("__step_meta=\"$(mktemp -t autoops-lambda-meta-XXXXXX.json)\"\n");
+        out.append("trap 'rm -f \"$__step_out\" \"$__step_meta\"' EXIT\n");
         out.append("aws lambda invoke --function-name ").append(quote(function));
 
         String region = str(raw, "region", null);
@@ -316,8 +325,16 @@ public class StepTranslator {
             out.append(" --cli-binary-format raw-in-base64-out --payload ")
                     .append(quote(payload.trim()));
         }
-        out.append(" \"$__step_out\"\n");
+        out.append(" \"$__step_out\" > \"$__step_meta\"\n");
         out.append("cat \"$__step_out\"\n");
+        // Printed AFTER the payload: the payload is the error detail, and an
+        // operator reads top-down.
+        out.append("if grep -q '\"FunctionError\"' \"$__step_meta\"; then\n");
+        out.append("    echo \"\" >&2\n");
+        out.append("    echo \"The function was invoked successfully and then FAILED "
+                + "(FunctionError) — its error response is above.\" >&2\n");
+        out.append("    exit 1\n");
+        out.append("fi\n");
     }
 
     /** HTTP-trigger call; the function key rides as the documented header. */
