@@ -371,20 +371,60 @@ public class StepTranslator {
         if (credentials == null || credentials.isEmpty()) {
             return;
         }
-        export(out, "AWS_ACCESS_KEY_ID", credentials.get("accessKeyId"));
-        export(out, "AWS_SECRET_ACCESS_KEY", credentials.get("secretAccessKey"));
-        export(out, "AWS_SESSION_TOKEN", credentials.get("sessionToken"));
-        export(out, "AWS_DEFAULT_REGION", credentials.get("region"));
-        export(out, "AWS_REGION", credentials.get("region"));
+        export(out, "AWS_ACCESS_KEY_ID", first(credentials, "accessId", "accessKey", "accessKeyId"));
+        export(out, "AWS_SECRET_ACCESS_KEY",
+                first(credentials, "secret", "secretKey", "secretAccessKey"));
+        // Some integrations are role-assumed and carry a session token. Omitting
+        // it turns a valid temporary credential into an opaque
+        // "InvalidClientTokenId" several frames from the cause.
+        export(out, "AWS_SESSION_TOKEN", first(credentials, "sessionToken", "token"));
+        export(out, "AWS_DEFAULT_REGION", first(credentials, "region"));
+        export(out, "AWS_REGION", first(credentials, "region"));
 
-        export(out, "ARM_CLIENT_ID", credentials.get("clientId"));
-        export(out, "ARM_CLIENT_SECRET", credentials.get("clientSecret"));
-        export(out, "ARM_TENANT_ID", credentials.get("tenantId"));
-        export(out, "ARM_SUBSCRIPTION_ID", credentials.get("subscriptionId"));
-        export(out, "AZURE_FUNCTION_KEY", credentials.get("functionKey"));
+        String clientId = first(credentials, "clientId");
+        String clientSecret = first(credentials, "clientSecret");
+        String tenantId = first(credentials, "tenantId");
+        String subscriptionId = first(credentials, "subscriptionId");
 
-        export(out, "GOOGLE_CREDENTIALS", credentials.get("serviceAccountJson"));
-        export(out, "GOOGLE_PROJECT", credentials.get("projectId"));
+        export(out, "ARM_CLIENT_ID", clientId);
+        export(out, "ARM_CLIENT_SECRET", clientSecret);
+        export(out, "ARM_TENANT_ID", tenantId);
+        export(out, "ARM_SUBSCRIPTION_ID", subscriptionId);
+
+        // What the Azure SDKs and Connect-AzAccount actually read. Terraform
+        // takes the ARM_ names; everything else takes these.
+        export(out, "AZURE_CLIENT_ID", clientId);
+        export(out, "AZURE_CLIENT_SECRET", clientSecret);
+        export(out, "AZURE_TENANT_ID", tenantId);
+        export(out, "AZURE_SUBSCRIPTION_ID", subscriptionId);
+        export(out, "AZURE_FUNCTION_KEY", first(credentials, "functionKey"));
+
+        export(out, "GOOGLE_CREDENTIALS",
+                first(credentials, "serviceAccount", "serviceAccountJson"));
+        export(out, "GOOGLE_PROJECT", first(credentials, "projectId"));
+    }
+
+    /**
+     * The first of several accepted spellings that is actually present.
+     *
+     * <p>Not cosmetic. The console stores an AWS key under {@code accessId} and
+     * its secret under {@code secretKey} (Integrations.jsx), while other
+     * integrations and imported definitions use {@code accessKeyId} /
+     * {@code secretAccessKey}. job-service accepted every spelling; reading only
+     * one here meant the export was silently skipped and the step failed deep
+     * inside the toolchain with "Unable to locate credentials" — a message that
+     * names neither the step nor the integration. Kept in step with
+     * {@code CloudCredentialEnv} in job-service, which is the other half of this
+     * mapping for as long as both executors exist.
+     */
+    private String first(Map<String, String> credentials, String... keys) {
+        for (String key : keys) {
+            String value = credentials.get(key);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private void export(StringBuilder out, String name, String value) {
