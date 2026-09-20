@@ -33,6 +33,24 @@ public class Workflow {
      */
     public enum Origin { TENANT, PROVIDER }
 
+    /**
+     * What this copy was delivered AS, which decides whether the customer can
+     * see it at all.
+     *
+     * <p>Workflows and agents are sold separately, but an agent can only act
+     * through automations that live in the customer's project and run with
+     * their credentials — so delivering an agent delivers the workflows it
+     * names. {@code AGENT_COMPONENT} marks those: they are withheld from the
+     * tenant's listing and refused by the tenant run path, while tool
+     * resolution over {@code /internal} still sees them.
+     *
+     * <p>A customer who later licenses one of those workflows in its own right
+     * receives a separate {@code PRODUCT} copy. Two rows, two lifecycles —
+     * revoking the agent takes its component with it and leaves the licensed
+     * one alone.
+     */
+    public enum Delivery { PRODUCT, AGENT_COMPONENT }
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -46,6 +64,10 @@ public class Workflow {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, columnDefinition = "ENUM('TENANT','PROVIDER')")
     private Origin origin = Origin.TENANT;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, columnDefinition = "ENUM('PRODUCT','AGENT_COMPONENT')")
+    private Delivery delivery = Delivery.PRODUCT;
 
     /** library_items id this was rolled out from; null for tenant-authored. */
     @Column(name = "source_id")
@@ -107,6 +129,25 @@ public class Workflow {
     /** True when the definition must never reach a tenant's browser. */
     public boolean isProviderAuthored() {
         return origin == Origin.PROVIDER;
+    }
+
+    public Delivery getDelivery() {
+        return delivery;
+    }
+
+    public void setDelivery(Delivery delivery) {
+        this.delivery = delivery;
+    }
+
+    /**
+     * True when this copy exists only to give an agent something to call.
+     *
+     * <p>The customer was not sold it, must not see it in their list, and
+     * cannot run it directly. The agent reaches it over {@code /internal},
+     * which does not consult this.
+     */
+    public boolean isAgentComponent() {
+        return delivery == Delivery.AGENT_COMPONENT;
     }
 
     public Long getSourceId() {

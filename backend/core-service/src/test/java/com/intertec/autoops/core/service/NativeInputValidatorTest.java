@@ -220,4 +220,52 @@ class NativeInputValidatorTest {
                 .isInstanceOf(CoreException.class)
                 .hasMessageContaining("Target host");
     }
+
+    // ------ argument names as a model actually spells them ------
+
+    @Test
+    void aSnakeCasedNameFindsThePascalCaseInputItMeant() {
+        // The failure this exists for: agent 9316 on 2026-09-20 sent
+        // {"region": ..., "lookback_hours": 24} against inputs declared Region
+        // and LookbackHours, was refused, and sent the IDENTICAL names on all
+        // four retries before giving up. A model regenerates a schema's keys in
+        // its own casing rather than copying them, and an error message does
+        // not teach it otherwise.
+        assertThat(validate(answers("target_host", "web-01", "disk_warn_percent", 70)))
+                .containsEntry("TargetHost", "web-01")
+                .containsEntry("DiskWarnPercent", 70L);
+    }
+
+    @Test
+    void caseAloneIsEnoughToMatch() {
+        assertThat(validate(answers("targethost", "web-01")))
+                .containsEntry("TargetHost", "web-01");
+    }
+
+    @Test
+    void aNameMatchingNoDeclaredInputIsStillRefused() {
+        // Canonicalising resolves spelling, not membership. An undeclared input
+        // stays undeclared, which is what keeps this a validator.
+        assertThatThrownBy(() -> validate(answers(
+                "TargetHost", "web-01", "sudo_password", "hunter2")))
+                .isInstanceOf(CoreException.class)
+                .hasMessageContaining("sudo_password");
+    }
+
+    @Test
+    void twoSpellingsOfOneInputAreRefusedRatherThanSilentlyDropped() {
+        // Picking a winner would discard the caller's other value in silence.
+        assertThatThrownBy(() -> validate(answers(
+                "TargetHost", "web-01", "target_host", "web-02")))
+                .isInstanceOf(CoreException.class)
+                .hasMessageContaining("both answer");
+    }
+
+    @Test
+    void aResolvedNameStillFacesItsOwnPatternCheck() {
+        // The boundary is the pattern, not the spelling of the key.
+        assertThatThrownBy(() -> validate(answers("target_host", "host; rm -rf /")))
+                .isInstanceOf(CoreException.class)
+                .hasMessageContaining("Target host");
+    }
 }

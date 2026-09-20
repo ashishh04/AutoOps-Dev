@@ -142,7 +142,7 @@ const workspaceNav = (can, clientRole) => {
       label: "Alert Channels",
       icon: "chat",
     });
-  // ONE entry: this workspace's own vendor keys. Dify is not exposed in the
+  // ONE entry: this workspace's own vendor keys. The engine is not exposed in the
   // tenant console at all — it is the workflow engine, not something a tenant
   // configures. Rides manageKeys like the rest of credential management.
   if (can("manageKeys"))
@@ -168,16 +168,34 @@ export const projectNav = (b, can) =>
       group: "Automate",
       items: [
         { to: `${b}/jobs`, label: "Jobs", icon: "list" },
-        // ONE workflow concept. Dify is the engine behind it — there is no
-        // separate "AI workflow" any more, and no native second designer.
+        // ONE automation concept, and it is the workflow. There used to be an
+        // "Agents" entry beside this one; every agent in it held exactly ONE
+        // tool, and that tool was one workflow — so the same automation was
+        // listed twice, under two names, in two databases, and a customer had
+        // to learn which of the two to press. An agent that wraps a single
+        // workflow is that workflow with a model in front of it deciding
+        // whether to call its only tool.
+        //
+        // The surface came back when that stopped being true. The shipped
+        // agents correlate two or three automations across a phase graph, and
+        // the judgement between them is the product — an RCA analyst reading
+        // an alarm board against a change timeline is not "a workflow with a
+        // model in front of it".
+        //
+        // It is also the only place they CAN appear: an agent's tool workflows
+        // are delivered as sealed components and are deliberately absent from
+        // the Workflows list, so a customer rolled out an agent would
+        // otherwise see nothing at all.
         { to: `${b}/workflows`, label: "Workflows", icon: "blocks" },
-        { to: `${b}/agents`, label: "Agents", icon: "robot" },
+        { to: `${b}/agents`, label: "AI Agents", icon: "robot" },
         { to: `${b}/schedule`, label: "Schedule", icon: "clock" },
       ],
     },
     {
       group: "Operate",
       items: [
+        { to: `${b}/alerts`, label: "Alerts", icon: "radar", end: true },
+        { to: `${b}/alerts/sources`, label: "Monitoring Sources", icon: "pulse" },
         { to: `${b}/executions`, label: "Executions", icon: "play" },
         { to: `${b}/nodes`, label: "Nodes", icon: "server" },
         { to: `${b}/integrations`, label: "Cloud", icon: "cloud" },

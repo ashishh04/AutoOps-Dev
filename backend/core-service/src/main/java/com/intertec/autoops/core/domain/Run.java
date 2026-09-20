@@ -77,8 +77,24 @@ public class Run {
     @Column(name = "cancel_requested", nullable = false)
     private boolean cancelRequested;
 
+    /** What the run DID: the engine's trace, for an operator. */
     @Column(columnDefinition = "MEDIUMTEXT")
     private String log;
+
+    /**
+     * What the run PRODUCED: the deliverable, for whoever asked for it.
+     *
+     * <p>Kept apart from {@link #log} because they have different audiences. A
+     * report workflow's customer wants the report, not a screenful of node
+     * timings and an echo of their own input above it — which is exactly what
+     * one shared field gave them.
+     *
+     * <p>Null means this run produced no document, which is the honest state
+     * for every job that restarts a service. An empty string would claim it
+     * produced one.
+     */
+    @Column(columnDefinition = "MEDIUMTEXT")
+    private String output;
 
     @Column(length = 512)
     private String error;
@@ -220,6 +236,14 @@ public class Run {
 
     public void setLog(String log) {
         this.log = log;
+    }
+
+    public String getOutput() {
+        return output;
+    }
+
+    public void setOutput(String output) {
+        this.output = output;
     }
 
     public String getError() {

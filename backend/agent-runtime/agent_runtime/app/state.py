@@ -116,6 +116,16 @@ class ToolSpecWire(BaseModel):
     input_schema: dict[str, Any] = Field(default_factory=dict)
     mutating: bool = False
 
+    #: The catalog name this tool was declared against, carried through delivery.
+    #:
+    #: ``name`` is ``workflow_<id>`` — a tenant-local number that means nothing
+    #: here — so the ref is the only way to match a result back to what the
+    #: agent's author said that tool returns. Optional because an agent rolled
+    #: out before refs were carried has none, and the failure that produces is
+    #: the safe one: no subject extraction, so a scope that enumerates nothing
+    #: and therefore reaps nothing.
+    ref: str | None = None
+
 
 class ToolCallWire(BaseModel):
     """A tool the model asked for.
@@ -247,6 +257,18 @@ class Finding(BaseModel):
     severity: Literal["info", "warning", "critical", "unknown"] = "info"
     cites: list[int] = Field(default_factory=list)
 
+    #: WHAT this finding is about, as an addressable thing rather than prose.
+    #: Optional because a finding about the estate as a whole has no single
+    #: subject — but without it the finding cannot be deduplicated across runs,
+    #: so an agent that wants its findings tracked names one.
+    subject_kind: str = ""
+    subject_id: str = ""
+
+    #: What KIND of finding, from the agent's own vocabulary. Two runs that
+    #: find the same problem have to agree on the word or they are two
+    #: findings forever.
+    finding_type: str = ""
+
 
 class PlannedAction(BaseModel):
     """A state-changing step the agent wants to take.
@@ -283,6 +305,13 @@ class AgentState(BaseModel):
     messages: list[Message] = Field(default_factory=list)
     ledger: list[Evidence] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
+
+    #: What each enumerating tool result said this run examined.
+    #:
+    #: Accumulated across reduces because a run's subjects arrive over several
+    #: boundaries — GATHER lists them, VERIFY may list more — and the coverage
+    #: claim is over everything the run saw, not over the last call.
+    extractions: list[dict[str, Any]] = Field(default_factory=list)
     planned: list[PlannedAction] = Field(default_factory=list)
 
     pending_tool_calls: list[ToolCallWire] = Field(default_factory=list)
@@ -382,7 +411,7 @@ class ReduceRequest(BaseModel):
     state: dict[str, Any] | None = None
     event: Event
     # Correlation only — this service stores nothing keyed by them. They exist
-    # so a Langfuse trace can be found from a run id and vice versa.
+    # so a run can be correlated with whatever observability is wired up.
     run_id: int | None = None
     tenant_id: str | None = None
     # Tools the allow-list named but Java could not offer. Named in the prompt
@@ -420,3 +449,38 @@ class ReduceResponse(BaseModel):
     # for this run cannot survive.
     citations: list[int] = Field(default_factory=list)
     uncited_claims: list[str] = Field(default_factory=list)
+    #: The kinds this agent's tools are declared able to enumerate.
+    #:
+    #: Sent on EVERY reduce, because it is a property of the agent rather than
+    #: of the run's progress. agent-service turns it into the run's opening
+    #: scope — one ``{"kind":"all","subject_kind":K}`` per kind — on the first
+    #: reduce and ignores it afterwards.
+    #:
+    #: Static on purpose. Building the declaration from results seen so far
+    #: would name only the kinds whose tools had run by then, and a completion
+    #: naming the rest is rejected by narrowing validation — correctly, since a
+    #: completion may not introduce a kind the run never set out to cover. Every
+    #: correlator would have failed on its second tool.
+    declared_subject_kinds: list[str] = Field(default_factory=list)
+
+    #: What the run actually examined, per kind, once it is finished.
+    #:
+    #: Present only on a terminal directive: it is the COMPLETION claim, and a
+    #: run still working has not finished examining anything. Each element
+    #: carries its own coverage verdict, so one kind failing does not cost the
+    #: others theirs.
+    subject_scope: list[dict[str, Any]] = Field(default_factory=list)
+
+    #: The ids behind every enumerated element, keyed by subject kind.
+    #:
+    #: Travels beside the scope rather than inside it because agent-service
+    #: materialises them into rows and verifies them against the digest the
+    #: scope carries — the two describing different sets is the one thing that
+    #: check exists to catch.
+    subject_ids: dict[str, list[str]] = Field(default_factory=dict)
+
+    #: The run's findings as addressable verdicts — subject, type, severity,
+    #: evidence and an idempotency key. The prose report is what a person
+    #: reads; this is what a scheduler deduplicates against so a nightly agent
+    #: stops re-filing what somebody already dismissed.
+    findings: list[dict[str, Any]] = Field(default_factory=list)

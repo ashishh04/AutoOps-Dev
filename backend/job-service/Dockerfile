@@ -101,6 +101,30 @@ RUN pip install --no-cache-dir --break-system-packages --require-hashes --no-com
 # autoops-stepN user. If that pool is ever unavailable, StepSandbox REFUSES to
 # run steps rather than fall back to uid 0. /app is root-owned and no step user
 # can write to it. (Set autoops.jobs.sandbox.enabled=false only on a dev box.)
+# The script library's shared PowerShell module, and the sample config that
+# documents every key it reads.
+#
+# Every one of the catalog's 213 automations opens by importing
+# IT-Automation-Common.psm1 from `$PSScriptRoot/../../Modules/`. Without it on
+# the host, each of them fails on its first statement — pwsh installed, runner
+# correct, automation logic never reached. ScriptLayout copies this tree into
+# each step's private workspace (never mounts it: a shared module directory
+# would be a channel between two tenants' steps, and a writable one would let a
+# step rewrite what the next step imports).
+#
+# NOT shipped: a populated Config/config.json. `Get-AutomationConfig` throws
+# without it, which ~116 of the catalog's scripts treat as fatal — that is the
+# correct behaviour and the remaining gap. A placeholder file would make those
+# scripts run against invented SMTP relays and ITSM endpoints, which is worse
+# than a clear refusal. Populating it per-run from the tenant's real notification
+# channels and connections is the next piece of work, not something to fake here.
+#
+# Kept inside this build context rather than referenced from the repo's
+# top-level Scripts/ because the context is this directory; JobServiceApplication's
+# LibraryDriftTest asserts the two copies are identical so they cannot diverge.
+COPY library /opt/autoops/library
+RUN chmod -R a+rX /opt/autoops/library
+
 WORKDIR /app
 COPY --from=build /build/target/job-service-*.jar app.jar
 ENV JAVA_OPTS="-XX:MaxRAMPercentage=75"

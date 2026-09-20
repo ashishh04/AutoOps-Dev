@@ -1,0 +1,54 @@
+{
+  "taskId": "RD-141",
+  "domain": "AWS",
+  "title": "Cost Explorer Service Delta",
+  "description": "Compares account spend per AWS service across two consecutive windows and ranks services by how much they MOVED, not by how much they cost. Read-only. Answers 'what made the bill go up', with the arithmetic done in the automation rather than estimated.",
+  "category": "Cost",
+  "runtime": "python",
+  "inputs": [
+    {
+      "variable": "WindowDays",
+      "label": "Window length (days)",
+      "type": "number",
+      "required": true,
+      "min": 1,
+      "max": 90,
+      "default": 7,
+      "help": "Each window is this many days. 7 compares last week with the week before.",
+      "consumedBy": "node"
+    },
+    {
+      "variable": "CostMetric",
+      "label": "Cost metric",
+      "type": "select",
+      "required": true,
+      "options": [
+        "UnblendedCost",
+        "AmortizedCost",
+        "NetUnblendedCost"
+      ],
+      "default": "UnblendedCost",
+      "help": "Unblended is what most accounts are billed on. Amortized spreads reserved and savings-plan charges across the period they cover.",
+      "consumedBy": "node"
+    }
+  ],
+  "nodes": [
+    {
+      "type": "pyscript",
+      "label": "Cost Explorer Service Delta",
+      "value": "\"\"\"What moved the bill. Read-only: Cost Explorer GetCostAndUsage.\n\nCompares a recent window against the window immediately before it, by service,\nand ranks services by how much they MOVED rather than by how much they cost.\nThe largest line on an AWS bill is almost never the interesting one; the line\nthat doubled is.\n\nTwo honesty constraints are built in rather than left to the prompt:\n\n* Cost Explorer's last day or two are estimates that settle later. The window\n  therefore ends YESTERDAY, and the fact is printed, so nobody reports a\n  \"drop\" that is really an incomplete day.\n* The delta is computed here, in arithmetic, and printed. A model asked to\n  subtract forty pairs of numbers will get one wrong, and a cited-but-wrong\n  figure is the worst possible output.\n\"\"\"\nimport json\nimport sys\nfrom datetime import date, timedelta\n\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError, NoCredentialsError\n\nWINDOW_DAYS = int(\"{{WindowDays}}\")\nMETRIC = \"{{CostMetric}}\"\n\nif not 1 <= WINDOW_DAYS <= 90:\n    sys.exit(\"WindowDays %d is outside 1-90.\" % WINDOW_DAYS)\nif METRIC not in (\"UnblendedCost\", \"AmortizedCost\", \"NetUnblendedCost\"):\n    sys.exit(\"CostMetric %r is not a Cost Explorer metric this audit supports.\" % METRIC)\n\n# Cost Explorer is a global service with a us-east-1 endpoint. The region here\n# is the ENDPOINT, not the region being reported on: the figures cover the\n# whole account.\nCFG = Config(retries={\"max_attempts\": 5, \"mode\": \"standard\"})\n\n\ndef totals(client, start, end):\n    \"\"\"Cost by service for a half-open [start, end) window.\"\"\"\n    by_service = {}\n    token = None\n    while True:\n        kwargs = {\n            \"TimePeriod\": {\"Start\": start.isoformat(), \"End\": end.isoformat()},\n            \"Granularity\": \"MONTHLY\" if (end - start).days > 31 else \"DAILY\",\n            \"Metrics\": [METRIC],\n            \"GroupBy\": [{\"Type\": \"DIMENSION\", \"Key\": \"SERVICE\"}],\n        }\n        if token:\n            kwargs[\"NextPageToken\"] = token\n        page = client.get_cost_and_usage(**kwargs)\n        for block in page.get(\"ResultsByTime\", []):\n            for group in block.get(\"Groups\", []):\n                name = group[\"Keys\"][0]\n                amount = float(group[\"Metrics\"][METRIC][\"Amount\"])\n                by_service[name] = by_service.get(name, 0.0) + amount\n        token = page.get(\"NextPageToken\")\n        if not token:\n            break\n    return by_service\n\n\ndef main():\n    client = boto3.client(\"ce\", region_name=\"us-east-1\", config=CFG)\n\n    # Ends yesterday: today is partial and the last settled day is the only\n    # one worth comparing against.\n    recent_end = date.today()\n    recent_start = recent_end - timedelta(days=WINDOW_DAYS)\n    prior_end = recent_start\n    prior_start = prior_end - timedelta(days=WINDOW_DAYS)\n\n    try:\n        recent = totals(client, recent_start, recent_end)\n        prior = totals(client, prior_start, prior_end)\n    except NoCredentialsError:\n        sys.exit(\"No AWS credentials reached this step. Connect an AWS account to this project.\")\n    except ClientError as exc:\n        code = exc.response.get(\"Error\", {}).get(\"Code\", \"\")\n        if code == \"AccessDeniedException\":\n            sys.exit(\"This account's credentials cannot read Cost Explorer (ce:GetCostAndUsage). \"\n                     \"Cost Explorer must also be enabled on the payer account.\")\n        sys.exit(\"Could not read Cost Explorer: %s\" % exc)\n\n    currency = \"USD\"\n    print(\"COST EXPLORER SERVICE DELTA\")\n    print(\"metric=%s currency=%s\" % (METRIC, currency))\n    print(\"recent_window=%s..%s prior_window=%s..%s (each %d days, end date exclusive)\"\n          % (recent_start, recent_end, prior_start, prior_end, WINDOW_DAYS))\n    print(\"note=the most recent day or two of Cost Explorer data are estimates and settle later\")\n    print(\"\")\n\n    services = sorted(set(recent) | set(prior))\n    rows = []\n    for name in services:\n        now = round(recent.get(name, 0.0), 2)\n        before = round(prior.get(name, 0.0), 2)\n        delta = round(now - before, 2)\n        if abs(now) < 0.01 and abs(before) < 0.01:\n            continue\n        percent = \"new\" if before < 0.01 else \"%+.1f%%\" % ((delta / before) * 100.0)\n        rows.append({\n            \"service\": name,\n            \"recent\": now,\n            \"prior\": before,\n            \"delta\": delta,\n            \"change\": percent,\n        })\n\n    rows.sort(key=lambda r: abs(r[\"delta\"]), reverse=True)\n    for row in rows:\n        print(\"service=%s recent=%.2f prior=%.2f delta=%+.2f change=%s\"\n              % (row[\"service\"], row[\"recent\"], row[\"prior\"], row[\"delta\"], row[\"change\"]))\n\n    recent_total = round(sum(r[\"recent\"] for r in rows), 2)\n    prior_total = round(sum(r[\"prior\"] for r in rows), 2)\n    movement = round(recent_total - prior_total, 2)\n    risers = [r for r in rows if r[\"delta\"] > 0]\n    fallers = [r for r in rows if r[\"delta\"] < 0]\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"recent_total=%.2f prior_total=%.2f delta=%+.2f change=%s\"\n          % (recent_total, prior_total, movement,\n             \"new\" if prior_total < 0.01 else \"%+.1f%%\" % ((movement / prior_total) * 100.0)))\n    print(\"services_up=%d services_down=%d\" % (len(risers), len(fallers)))\n    top = risers[:3]\n    if top:\n        covered = round(sum(r[\"delta\"] for r in top), 2)\n        print(\"largest_increases=%s\" % [\n            \"%s %+.2f\" % (r[\"service\"], r[\"delta\"]) for r in top\n        ])\n        print(\"those_three_explain=%.2f of the %+.2f movement\" % (covered, movement))\n    print(\"\")\n    print(\"JSON \" + json.dumps({\n        \"metric\": METRIC,\n        \"recent_window\": [recent_start.isoformat(), recent_end.isoformat()],\n        \"prior_window\": [prior_start.isoformat(), prior_end.isoformat()],\n        \"services\": rows,\n        \"recent_total\": recent_total,\n        \"prior_total\": prior_total,\n        \"delta\": movement,\n    }, sort_keys=True))\n\n\nmain()\n",
+      "retries": 0,
+      "continueOnError": false
+    }
+  ],
+  "requires": [
+    {
+      "kind": "cloud_connection",
+      "platform": "AWS",
+      "customerText": "An AWS account we can read cost data from, with Cost Explorer switched on. Cost Explorer is enabled per payer account and takes about a day to populate the first time.",
+      "permissions": [
+        "ce:GetCostAndUsage"
+      ]
+    }
+  ]
+}

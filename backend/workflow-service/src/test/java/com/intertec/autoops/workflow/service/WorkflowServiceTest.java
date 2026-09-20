@@ -97,9 +97,16 @@ class WorkflowServiceTest {
         return workflowService.createTrusted(TENANT, ACTOR, TOKEN, PROJECT, name, definition);
     }
 
-    /** A workflow delivered from the catalog: PROVIDER origin, sealed. */
+    /** A workflow delivered from the catalog in its own right: visible, runnable. */
     private Workflow rolledOut(String name, String definition) {
-        return workflowService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID, name, definition);
+        return workflowService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID, name, definition,
+                Workflow.Delivery.PRODUCT);
+    }
+
+    /** The same catalog workflow, delivered only so an agent has something to call. */
+    private Workflow rolledOutAsComponent(String name, String definition) {
+        return workflowService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID, name, definition,
+                Workflow.Delivery.AGENT_COMPONENT);
     }
 
     // ------ definition parsing and node limits ------
@@ -406,7 +413,7 @@ class WorkflowServiceTest {
         rolledOut("Card Fraud Alert Triage", "{\"nodes\":[{}]}");
 
         Workflow second = workflowService.rollOut(TENANT, ACTOR, TOKEN, PROJECT + 1, CATALOG_ID,
-                "Card Fraud Alert Triage", "{\"nodes\":[{}]}");
+                "Card Fraud Alert Triage", "{\"nodes\":[{}]}", Workflow.Delivery.PRODUCT);
 
         assertEquals(PROJECT + 1, second.getProjectId());
         assertEquals(2, workflowRepository.count());
@@ -421,5 +428,78 @@ class WorkflowServiceTest {
 
         assertNull(second.getSourceId());
         assertEquals(2, workflowRepository.count());
+    }
+
+    // ------ agent components: delivered, but not sold ------
+
+    /**
+     * The commercial line. Workflows and agents are licensed separately, but an
+     * agent can only act through automations that live in the customer's
+     * project — so rolling out an agent has to deliver them. Listing those to
+     * the customer hands them a product nobody sold them, and invites the fair
+     * question "I did not ask for this, why is it in my environment?".
+     */
+    @Test
+    void anAgentComponentIsNotListedToTheCustomer() {
+        rolledOut("Incident Postmortem Writer", "{\"nodes\":[{}]}");
+        rolledOutAsComponent("CloudTrail Change Timeline", "{\"nodes\":[{}]}");
+
+        List<Workflow> visible = workflowService.list(TENANT, PROJECT);
+
+        assertEquals(1, visible.size());
+        assertEquals("Incident Postmortem Writer", visible.get(0).getName());
+    }
+
+    /**
+     * The other half, and the one that would break the product if it were
+     * wrong: tool resolution reads the INTERNAL listing, which must return
+     * components. A component hidden from this makes the agent that needs it
+     * undeliverable.
+     */
+    @Test
+    void theInternalListingStillSeesEveryComponent() {
+        rolledOut("Incident Postmortem Writer", "{\"nodes\":[{}]}");
+        rolledOutAsComponent("CloudTrail Change Timeline", "{\"nodes\":[{}]}");
+
+        assertEquals(2, workflowService.listUnchecked(TENANT, PROJECT).size());
+    }
+
+    /**
+     * A customer who later licenses one of these workflows in its own right
+     * gets a separate copy they own. Two rows, two lifecycles — revoking the
+     * agent takes its component and leaves the licensed one alone.
+     */
+    @Test
+    void licensingAComponentLaterDeliversASeparateCopy() {
+        rolledOutAsComponent("CloudTrail Change Timeline", "{\"nodes\":[{}]}");
+
+        Workflow licensed = workflowService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID,
+                "CloudTrail Change Timeline", "{\"nodes\":[{}]}", Workflow.Delivery.PRODUCT);
+
+        assertEquals(2, workflowRepository.count());
+        assertEquals(Workflow.Delivery.PRODUCT, licensed.getDelivery());
+        // And only the licensed one is theirs to see.
+        List<Workflow> visible = workflowService.list(TENANT, PROJECT);
+        assertEquals(1, visible.size());
+        assertEquals(licensed.getId(), visible.get(0).getId());
+    }
+
+    /** A repeat of the SAME kind is still the defect the dedupe exists for. */
+    @Test
+    void theSameComponentIsNotDeliveredTwice() {
+        rolledOutAsComponent("CloudTrail Change Timeline", "{\"nodes\":[{}]}");
+
+        WorkflowException thrown = assertThrows(WorkflowException.class,
+                () -> rolledOutAsComponent("CloudTrail Change Timeline", "{\"nodes\":[{}]}"));
+
+        assertTrue(thrown.getMessage().contains("already has this workflow"));
+        assertEquals(1, workflowRepository.count());
+    }
+
+    /** Everything that predates this concept was delivered as a product. */
+    @Test
+    void aWorkflowDeliveredInItsOwnRightDefaultsToProduct() {
+        assertEquals(Workflow.Delivery.PRODUCT,
+                rolledOut("Idle Resource Inventory", "{\"nodes\":[{}]}").getDelivery());
     }
 }

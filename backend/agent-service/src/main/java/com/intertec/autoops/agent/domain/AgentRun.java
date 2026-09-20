@@ -153,6 +153,47 @@ public class AgentRun {
     @Column(name = "created_at", insertable = false, updatable = false)
     private Instant createdAt;
 
+    /**
+     * What this run claims to have covered: a JSON ARRAY of scope objects, one
+     * per subject kind.
+     *
+     * <p>Written twice — at start it is the intent, at completion it is what was
+     * actually reached, and the second write may only narrow the first. Stored
+     * as text and parsed through {@code RunScope} rather than mapped, because
+     * the shape is a closed set of forms with rules Hibernate could not enforce,
+     * and a scope that parses loosely is a claim that reaps work nobody looked
+     * at.
+     *
+     * <p>An array rather than one object because a run legitimately covers
+     * several kinds: the public exposure auditor correlates cloud resources with
+     * principals, and the chain between them is the point.
+     */
+    @Column(name = "subject_scope", columnDefinition = "JSON")
+    private String subjectScope;
+
+    /** How many subjects the run actually looked at, for the coverage gauge. */
+    @Column(name = "subjects_evaluated")
+    private Integer subjectsEvaluated;
+
+    /** How many verdicts it emitted, so a silent run is distinguishable from a clean one. */
+    @Column(name = "verdicts_emitted")
+    private Integer verdictsEmitted;
+
+    /**
+     * Whether the coverage claim can be trusted, which is NOT the same question
+     * as whether the run finished.
+     *
+     * <p>A roll-up. Coverage is decided <b>per subject kind</b> inside
+     * {@code subject_scope}, because a run that enumerated every bucket and then
+     * had its IAM call throw has real coverage of one kind and none of the
+     * other. FAILED is the exception and applies to the whole run: a claim that
+     * was refused, or a run nobody ever heard from again, grounds nothing.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "scope_status",
+            columnDefinition = "ENUM('RUNNING','COMPLETE','PARTIAL','FAILED')")
+    private ScopeStatus scopeStatus;
+
     @Column(name = "started_at")
     private Instant startedAt;
 
@@ -368,5 +409,72 @@ public class AgentRun {
 
     public void setFinishedAt(Instant finishedAt) {
         this.finishedAt = finishedAt;
+    }
+
+    public String getSubjectScope() {
+        return subjectScope;
+    }
+
+    public void setSubjectScope(String subjectScope) {
+        this.subjectScope = subjectScope;
+    }
+
+    public Integer getSubjectsEvaluated() {
+        return subjectsEvaluated;
+    }
+
+    public void setSubjectsEvaluated(Integer subjectsEvaluated) {
+        this.subjectsEvaluated = subjectsEvaluated;
+    }
+
+    public Integer getVerdictsEmitted() {
+        return verdictsEmitted;
+    }
+
+    public void setVerdictsEmitted(Integer verdictsEmitted) {
+        this.verdictsEmitted = verdictsEmitted;
+    }
+
+    public ScopeStatus getScopeStatus() {
+        return scopeStatus;
+    }
+
+    public void setScopeStatus(ScopeStatus scopeStatus) {
+        this.scopeStatus = scopeStatus;
+    }
+
+    /**
+     * Whether any of this run's coverage could drive a reap.
+     *
+     * <p>A screen, not the decision. <b>The per-element coverage verdict inside
+     * {@code subject_scope} is what decides whether a given subject kind
+     * reaps</b>; this only says the run is worth opening. PARTIAL qualifies
+     * because it means <i>mixed</i>: a run whose IAM call threw still has real
+     * coverage of every bucket it enumerated, and discarding that every time one
+     * dimension flakes throws away most of the coverage the estate produces.
+     *
+     * <p>Deliberately positive — a status added later is excluded until somebody
+     * decides otherwise, rather than inheriting permission to resolve findings.
+     */
+    public boolean hasUsableCoverage() {
+        return scopeStatus == ScopeStatus.COMPLETE || scopeStatus == ScopeStatus.PARTIAL;
+    }
+
+    /**
+     * The run-level roll-up of per-element coverage. See {@link #getScopeStatus()}.
+     *
+     * <p><b>A summary for indexing and for reading, never the authority.</b> The
+     * coverage verdict on each element of {@code subject_scope} decides whether
+     * that kind reaps.
+     */
+    public enum ScopeStatus {
+        /** The run declared a scope and is still working through it. */
+        RUNNING,
+        /** Every declared kind reached COMPLETE. */
+        COMPLETE,
+        /** Mixed — some kinds complete, some partial or skipped. */
+        PARTIAL,
+        /** The claim was refused, or the run was abandoned. Nothing reaps. */
+        FAILED
     }
 }

@@ -44,7 +44,7 @@ public class Approval {
     /**
      * The run-input values the requester supplied, as a JSON object, or null
      * when the target declares none. Parked here because approving replays the
-     * run from this row alone — without them, an approved Dify workflow would
+     * run from this row alone — without them, an approved workflow would
      * execute with an empty form.
      */
     @Column(columnDefinition = "TEXT")

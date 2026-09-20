@@ -43,7 +43,6 @@ import argparse
 import json
 import os
 import pathlib
-import re
 import sys
 import urllib.error
 import urllib.request
@@ -275,7 +274,14 @@ def sql_for(payload):
     idempotent AND preserves the row id — delivered tenant copies point back at
     it through `source_id`, so re-inserting would orphan every rollout.
     """
-    esc = lambda s: (s or "").replace("\\", "\\\\").replace("'", "''")
+    def esc(value):
+        """MySQL string-literal escaping: backslash first, then the quote.
+
+        Order matters — escaping the quote first would then have its own
+        backslash doubled by the second pass.
+        """
+        return (value or "").replace("\\", "\\\\").replace("'", "''")
+
     title = esc(payload["title"])
     kind = payload["type"].upper()
     description = esc(payload["description"])

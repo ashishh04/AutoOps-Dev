@@ -1,0 +1,37 @@
+-- A verdict about a subject its own run never claimed to have examined.
+--
+-- THE FAILURE THIS CATCHES, WHICH NOTHING ELSE DOES. Scope is about to be
+-- derived generically from tool output across all eight agents at once, which
+-- removes the incremental rollout that would otherwise have caught an
+-- extraction bug on agent one instead of agent eight. The soak rule covers
+-- DURATION — 35 days of clean counters — and duration is useless against an
+-- extraction that is wrong the same way everywhere: all eight declare scopes,
+-- all eight attribute their verdicts, coverage gap reads zero, and every scope
+-- describes a smaller set than the run actually examined.
+--
+-- A uniformly wrong extraction produces uniformly clean counters. That is the
+-- hole.
+--
+-- The concrete shape of it is already visible. `reduce._absorb` compacts tool
+-- output before anything else sees it, eliding the middle of a long result. An
+-- inventory of 1200 volumes compacted to 200 yields subject_id_count 200, a
+-- valid digest over those 200, and a COMPLETE enumerated scope that passes
+-- every coherence check there is — then reaps the other 1000 findings on the
+-- next run, because no scope ever claimed to cover them.
+--
+-- THE INVARIANT THAT DOES NOT DEPEND ON THE EXTRACTION BEING RIGHT: a verdict
+-- about volume vol-900 from a run whose scope enumerates 200 volumes not
+-- including vol-900 is a CONTRADICTION. The run demonstrably examined vol-900 —
+-- it has an opinion about it — and its own coverage claim says it did not. That
+-- can be detected without knowing what the correct scope was, which is exactly
+-- the property needed here, because if we knew the correct scope we would not
+-- need the extraction.
+--
+-- Refused rather than counted-and-stored, and the asymmetry is deliberate.
+-- Storing it means a finding no scope covers, which can never be reaped
+-- correctly and will sit in the backlog forever. Refusing it loses a finding
+-- that the next run re-emits once the extraction is fixed. Recoverable loss
+-- beats permanent wrong state, and a loud refusal beats a quiet one.
+
+ALTER TABLE verdict_attribution_daily
+    ADD COLUMN out_of_scope BIGINT NOT NULL DEFAULT 0 AFTER unscoped;

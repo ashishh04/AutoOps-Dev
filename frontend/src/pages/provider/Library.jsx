@@ -53,7 +53,7 @@ function prettyDefinition(definition) {
  * <p>The operating brief is deliberately absent: it is the product, it is
  * withheld from customers, and it is long. Open the card to read it.
  */
-function AgentCards({ agents, loading, onOpen, onRollOut, page, pageSize, total, onPageChange }) {
+function AgentCards({ agents, loading, onOpen, onEdit, onRollOut, page, pageSize, total, onPageChange }) {
   if (loading) {
     return (
       <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -111,7 +111,14 @@ function AgentCards({ agents, loading, onOpen, onRollOut, page, pageSize, total,
                 <span className="text-xs text-slate-500">
                   {a.rollouts ?? 0} rollout{(a.rollouts ?? 0) === 1 ? "" : "s"}
                 </span>
-                <div onClick={(e) => e.stopPropagation()}>
+                <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                  {/* An agent is EDITABLE in the catalog even though the
+                      delivered copies are sealed: this is the original, and
+                      the alternative was re-authoring the JSON file and
+                      re-running publish.py to fix a typo in a persona. */}
+                  <SmallButton icon="pencil" onClick={() => onEdit(a)}>
+                    Edit
+                  </SmallButton>
                   <SmallButton
                     icon="bolt"
                     variant="primary"
@@ -273,7 +280,7 @@ export default function ProviderLibrary() {
               New agent
             </SmallButton>
             {/* Designing and OFFERING are two acts. "New workflow" opens the
-                Dify designer; this puts an already-published one in the
+                workflow designer; this puts an already-published one in the
                 catalog, which is what makes it rollable. */}
             <SmallButton
               icon="cloud"
@@ -362,6 +369,7 @@ export default function ProviderLibrary() {
           agents={visibleFiltered}
           loading={loading}
           onOpen={setSelectedItem}
+          onEdit={(a) => navigate(`/provider/library/agent/${a.id}`)}
           onRollOut={setRolloutItem}
           page={currentPage}
           pageSize={pageSize}
@@ -452,7 +460,18 @@ export default function ProviderLibrary() {
                       </SmallButton>
                     </div>
                   ) : (
-                    <div onClick={(e) => e.stopPropagation()}>
+                    <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                      {/* Only agents: a workflow's definition is a node graph
+                          with no editor behind it yet, so an Edit button there
+                          would open nothing. */}
+                      {r.type === "agent" && (
+                        <SmallButton
+                          icon="pencil"
+                          onClick={() => navigate(`/provider/library/agent/${r.id}`)}
+                        >
+                          Edit
+                        </SmallButton>
+                      )}
                       <SmallButton
                         icon="bolt"
                         variant="primary"

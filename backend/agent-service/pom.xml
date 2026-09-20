@@ -142,6 +142,26 @@
             <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!--
+            Integration tests only, and the reason is specific: @DataJpaTest
+            builds its schema from Hibernate's DDL, NOT from Flyway. Every unit
+            test in this module therefore validates a schema no environment
+            ever runs, and a migration can be wrong in ways all 71 of them pass.
+            V6 proved it: green locally, error 1071 on the real database.
+
+            Version is managed by spring-boot-dependencies.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>mysql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -149,6 +169,24 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!--
+                *IT tests run in `verify`, never in `test`. They pull a real
+                MySQL image and take tens of seconds, which is the wrong price
+                to pay on every save and the right one to pay on every push —
+                and CI already runs `mvn verify` for this module.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

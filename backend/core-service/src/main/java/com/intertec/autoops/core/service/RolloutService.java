@@ -181,11 +181,96 @@ public class RolloutService {
         }
     }
 
+    /** What a workflow delivered in its own right is. Visible and runnable. */
+    private static final String PRODUCT = "PRODUCT";
+
+    /**
+     * What a workflow delivered ONLY because an agent names it is. Hidden from
+     * the customer's list and refused by the tenant run path — see the V4
+     * migration in workflow-service for why that distinction exists at all.
+     */
+    private static final String AGENT_COMPONENT = "AGENT_COMPONENT";
+
+    /**
+     * Delivers, as sealed components, every workflow this agent names that the
+     * project does not already hold.
+     *
+     * <p><b>Why this happens automatically.</b> An agent can only act through
+     * automations that live in the customer's project and run with their
+     * credentials under their approval gates — so an agent's tools have to be
+     * delivered. Making the provider deliver them by hand first meant reading a
+     * refusal, working out which catalog rows those refs are, and performing
+     * three rollouts in an order they had to know, to deliver one product.
+     *
+     * <p>They go in as {@link #AGENT_COMPONENT}, which is what keeps the
+     * commercial line intact: the customer bought an agent, so they get an
+     * agent. The workflows underneath it are not listed to them and cannot be
+     * run on their own. If they later license one in its own right, it arrives
+     * as a separate PRODUCT copy alongside — two rows, two lifecycles.
+     *
+     * <p>A workflow the project ALREADY holds is left exactly as it is,
+     * whichever kind it is. A customer who has licensed one of these workflows
+     * must not have it quietly resealed as a component by rolling out an agent.
+     */
+    private void deliverComponents(JsonNode tools, Target target, Project project,
+                                   String actor, String accessToken) {
+        Map<String, Long> present = deliveredByRef(target, project);
+        Map<String, LibraryItem> catalogue = null;
+
+        for (JsonNode tool : tools) {
+            String ref = tool.path("ref").asText(null);
+            if (ref == null || ref.isBlank() || present.containsKey(ref)) {
+                continue;
+            }
+            if (catalogue == null) {
+                catalogue = publishedWorkflowsByRef();
+            }
+            LibraryItem source = catalogue.get(ref);
+            if (source == null) {
+                // Left for resolveTools to report by name, with the other
+                // missing refs, rather than failing on the first one.
+                continue;
+            }
+            workflowClient.rollOut(target.tenantId(), actor, accessToken, project.getId(),
+                    source.getId(), source.getTitle(), source.getDefinition(), AGENT_COMPONENT);
+            log.info("Delivered {} to tenant {} project {} as an agent component",
+                    ref, target.tenantId(), project.getId());
+        }
+    }
+
+    /** Every catalog workflow, keyed by the stable ref an agent names it by. */
+    private Map<String, LibraryItem> publishedWorkflowsByRef() {
+        Map<String, LibraryItem> found = new HashMap<>();
+        for (LibraryItem item : libraryRepository.findByTenantIdIsNullOrderByCreatedAtDesc()) {
+            if (item.getType() != LibraryItem.Type.WORKFLOW) {
+                continue;
+            }
+            String ref = refIn(item.getDefinition());
+            if (ref != null) {
+                found.putIfAbsent(ref, item);
+            }
+        }
+        return found;
+    }
+
+    /** The refs this project already holds, whatever they were delivered as. */
+    private Map<String, Long> deliveredByRef(Target target, Project project) {
+        Map<String, Long> byRef = new HashMap<>();
+        for (WorkflowClient.WorkflowView delivered
+                : workflowClient.listByProject(target.tenantId(), project.getId())) {
+            String ref = refIn(delivered.definition());
+            if (ref != null) {
+                byRef.put(ref, delivered.id());
+            }
+        }
+        return byRef;
+    }
+
     private Long rollOutWorkflow(LibraryItem item, Target target, Project project,
                                  String actor, String accessToken) {
         WorkflowClient.WorkflowView created = workflowClient.rollOut(target.tenantId(), actor,
                 accessToken, project.getId(), item.getId(), item.getTitle(),
-                item.getDefinition());
+                item.getDefinition(), PRODUCT);
         return created != null ? created.id() : null;
     }
 
@@ -218,6 +303,10 @@ public class RolloutService {
             throw CoreException.badRequest("invalid_definition",
                     "This agent's definition is not valid JSON");
         }
+        // Deliver what the agent needs BEFORE resolving its allow-list. The
+        // customer bought an agent; the automations underneath it are part of
+        // that product, not a separate purchase they have to make first.
+        deliverComponents(spec.path("tools"), target, project, actor, accessToken);
         String tools = resolveTools(spec.path("tools"), target, project);
         boolean python = "PYTHON".equalsIgnoreCase(text(spec, "kind", null));
         AgentClient.RolledOutAgent created = agentClient.rollOut(target.tenantId(), actor,
@@ -258,15 +347,11 @@ public class RolloutService {
             return null;
         }
 
-        // One listing serves every ref in the allow-list.
-        Map<String, Long> byRef = new HashMap<>();
-        for (WorkflowClient.WorkflowView delivered
-                : workflowClient.listByProject(target.tenantId(), project.getId())) {
-            String ref = refIn(delivered.definition());
-            if (ref != null) {
-                byRef.put(ref, delivered.id());
-            }
-        }
+        // Re-read AFTER deliverComponents, so the copies it just delivered are
+        // in the map. This listing is the internal one, which returns sealed
+        // components as well as products — a component hidden from it would
+        // make the agent that needs it undeliverable.
+        Map<String, Long> byRef = deliveredByRef(target, project);
 
         ArrayNode resolved = objectMapper.createArrayNode();
         List<String> missing = new ArrayList<>();
@@ -293,6 +378,16 @@ public class RolloutService {
             ObjectNode entry = resolved.addObject();
             entry.put("type", "WORKFLOW");
             entry.put("id", id);
+            // Carried through for the same reason `mutating` is: the delivered
+            // id is tenant-specific and meaningless to anything that reasons
+            // about the agent, while the ref is the stable name its AUTHOR
+            // declared against. The runtime needs it to match a tool result
+            // back to what the author said that tool returns — a subject kind
+            // and where to find the ids — which nothing in a workflow's own
+            // definition records. Absent means no subject extraction, which is
+            // the safe way for this to be wrong: a scope that enumerates
+            // nothing reaps nothing.
+            entry.put("ref", ref);
             // Carried through delivery because the phased runtime hides
             // state-changing tools from the phase that is still gathering
             // evidence, and only the agent's AUTHOR knows which is which —
@@ -306,9 +401,15 @@ public class RolloutService {
         }
 
         if (!missing.isEmpty()) {
+            // Unreachable in the normal path: deliverComponents has already put
+            // every named workflow in the project. It survives because this
+            // method is the last thing standing between a customer and an agent
+            // whose tool resolves to nothing, and "the catalog no longer
+            // publishes that ref" is a real way to get here.
             throw CoreException.badRequest("tool_not_delivered",
-                    "Roll out " + String.join(", ", missing) + " to this project first — "
-                            + "this agent cannot work without it");
+                    "This agent needs " + String.join(", ", missing)
+                            + ", which the catalog does not publish. Publish the missing "
+                            + "automation, then roll the agent out again.");
         }
         return resolved.toString();
     }

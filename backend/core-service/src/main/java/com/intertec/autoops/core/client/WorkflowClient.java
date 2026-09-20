@@ -50,7 +50,34 @@ public class WorkflowClient {
      * to these call sites, minus the JPA machinery.
      */
     public record WorkflowView(Long id, String tenantId, Long projectId, String name,
-                               String definition, int nodeCount, boolean enabled) {
+                               String definition, int nodeCount, boolean enabled,
+                               String delivery) {
+
+        /**
+         * A view with no delivery stated, which is treated as a product.
+         *
+         * <p>Matches what an older workflow-service sends and what every
+         * caller that has no opinion means. Keeping it as a constructor rather
+         * than making every call site say "PRODUCT" also keeps the default in
+         * one place, next to the reasoning for it.
+         */
+        public WorkflowView(Long id, String tenantId, Long projectId, String name,
+                            String definition, int nodeCount, boolean enabled) {
+            this(id, tenantId, projectId, name, definition, nodeCount, enabled, "PRODUCT");
+        }
+
+        /**
+         * True when this copy exists only so an agent has something to call.
+         *
+         * <p>Defaults to false when the field is absent, which is what an
+         * older workflow-service sends. That is the safe direction for the
+         * skew: a component briefly behaving like a product is a visible
+         * automation, where the reverse would make a delivered agent's tool
+         * unrunnable.
+         */
+        public boolean isAgentComponent() {
+            return "AGENT_COMPONENT".equals(delivery);
+        }
     }
 
     /** Empty ONLY when workflow-service says 404. */
@@ -177,12 +204,13 @@ public class WorkflowClient {
      * would plant a workflow across a tenant boundary.
      */
     public WorkflowView rollOut(String tenantId, String actor, String accessToken, Long projectId,
-                                Long sourceId, String name, String definition) {
+                                Long sourceId, String name, String definition, String delivery) {
         try {
             return workflowRestClient.post()
                     .uri("/internal/projects/{projectId}/workflows/rollout"
-                                    + "?tenantId={tenantId}&actor={actor}&sourceId={sourceId}",
-                            projectId, tenantId, actor, sourceId)
+                                    + "?tenantId={tenantId}&actor={actor}&sourceId={sourceId}"
+                                    + "&delivery={delivery}",
+                            projectId, tenantId, actor, sourceId, delivery)
                     .header("X-Internal-Token", internalToken)
                     .header("X-Access-Token", accessToken)
                     .body(Map.of("name", name, "definition", definition == null ? "" : definition))

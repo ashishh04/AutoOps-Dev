@@ -104,7 +104,7 @@ const ICONS = {
   eye: Eye,
   "eye-slash": EyeSlash,
   warning: Warning,
-  // Dify designer glyphs — one per node type so the palette and canvas can
+  // Workflow designer glyphs — one per node type so a palette and canvas can
   // tell node types apart at a glance (unknown names fall back to Lightning).
   stop: Stop,
   chat: ChatCircle,

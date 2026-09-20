@@ -38,6 +38,10 @@ public interface WorkflowRepository extends JpaRepository<Workflow, Long> {
 
     boolean existsByProjectIdAndName(Long projectId, String name);
 
+    /** Name uniqueness within one delivery kind — see {@code doCreate}. */
+    boolean existsByProjectIdAndNameAndDelivery(Long projectId, String name,
+                                                Workflow.Delivery delivery);
+
     /**
      * Rollout de-dupe: a project holds at most one delivered copy of a given
      * catalog item. Scoped to the project rather than the tenant on purpose —
@@ -49,4 +53,19 @@ public interface WorkflowRepository extends JpaRepository<Workflow, Long> {
      * the same source past it.
      */
     boolean existsByProjectIdAndSourceId(Long projectId, Long sourceId);
+
+    /**
+     * Whether this project already holds this catalog item delivered THIS WAY.
+     *
+     * <p>Narrower than {@link #existsByProjectIdAndSourceId} on purpose: a
+     * sealed agent component and a separately licensed copy of the same
+     * catalog workflow are two legitimate rows, and only a repeat of the same
+     * KIND is a duplicate.
+     */
+    boolean existsByProjectIdAndSourceIdAndDelivery(Long projectId, Long sourceId,
+                                                    Workflow.Delivery delivery);
+
+    /** The tenant-visible listing: everything except sealed agent components. */
+    List<Workflow> findByProjectIdAndTenantIdAndDeliveryOrderByCreatedAtDesc(
+            Long projectId, String tenantId, Workflow.Delivery delivery);
 }

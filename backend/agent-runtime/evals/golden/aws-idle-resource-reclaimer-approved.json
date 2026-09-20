@@ -1,0 +1,257 @@
+{
+  "name": "Idle resource reclaimer — inventory, propose, human approves, verify",
+  "_why": [
+    "The full eight-phase lifecycle, and the only case in this suite that",
+    "changes anything. It pins the sequence an operator actually sees:",
+    "",
+    "  1  TRIAGE -> GATHER parks holding the INVENTORY (read-only)",
+    "  2  results -> HYPOTHESIZE -> PLAN -> GATE parks holding the RECLAIM,",
+    "     and the run is reported in phase ACT because a human now owns it",
+    "  3  APPROVED comes back -> ACT -> VERIFY parks holding the inventory AGAIN",
+    "  4  results -> REPORT, with the deletion proved by absence, not by exit code",
+    "",
+    "Two things here would be silent regressions anywhere else. The gated call",
+    "carries the automation's REAL argument names — PLAN is shown the schema,",
+    "and without that a model invents 'region'/'volumes' and every gated action",
+    "fails input validation on arrival. And VERIFY re-runs the read-only",
+    "inventory rather than trusting the reclaim's own success line."
+  ],
+  "agent": {
+    "ref": "aws.idle_resource_reclaimer",
+    "version": "1.0.0",
+    "model": "claude-sonnet-5",
+    "vendor": "ANTHROPIC"
+  },
+  "tools": [
+    {
+      "name": "workflow_51",
+      "description": "Lists unattached EBS volumes, unassociated elastic IPs and stopped instances in one region, with age, tags and an indicative monthly cost per item. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Region": { "type": "string", "description": "Region" },
+          "MinimumAgeDays": { "type": "number", "description": "Minimum age (days)" }
+        },
+        "required": ["Region", "MinimumAgeDays"]
+      },
+      "mutating": false
+    },
+    {
+      "name": "workflow_52",
+      "description": "Deletes named unattached EBS volumes after taking and CONFIRMING a recovery snapshot of each. Report-only unless Execute is true. Acts only on the exact volume ids supplied.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Region": { "type": "string", "description": "Region" },
+          "VolumeIds": { "type": "string", "description": "Volume ids" },
+          "Reason": { "type": "string", "description": "Reason" },
+          "MinimumAgeDays": { "type": "number", "description": "Minimum age (days)" },
+          "ExcludeTagKey": { "type": "string", "description": "Protection tag" },
+          "SnapshotWaitSeconds": { "type": "number", "description": "Snapshot wait (seconds)" },
+          "Execute": { "type": "boolean", "description": "Execute" },
+          "SkipSnapshot": { "type": "boolean", "description": "Skip the recovery snapshot" }
+        },
+        "required": [
+          "Region",
+          "VolumeIds",
+          "Reason",
+          "MinimumAgeDays",
+          "ExcludeTagKey",
+          "SnapshotWaitSeconds"
+        ]
+      },
+      "mutating": true
+    }
+  ],
+  "steps": [
+    {
+      "event": {
+        "kind": "START",
+        "input": "Reclaim what is safe to reclaim in us-east-1. The staging fleet was decommissioned last quarter."
+      },
+      "script": [
+        {
+          "type": "structured",
+          "schema": "TriageOut",
+          "value": {
+            "restated": "Find unattached EBS volumes in us-east-1 that are genuinely abandoned and reclaim only those.",
+            "observations_needed": [
+              "The current inventory of unattached volumes, with age, tags and size"
+            ],
+            "can_proceed": true,
+            "reason": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "Taking the inventory first. Nothing is proposed until I have seen it.",
+          "tool_calls": [
+            {
+              "name": "workflow_51",
+              "args": { "Region": "us-east-1", "MinimumAgeDays": 7 },
+              "id": "toolu_inv1"
+            }
+          ],
+          "input_tokens": 1240,
+          "output_tokens": 54
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "GATHER",
+        "tool_calls": ["workflow_51"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "toolu_inv1",
+            "ok": true,
+            "evidence_id": 900,
+            "content": "IDLE RESOURCE INVENTORY\nregion=us-east-1 minimum_age_days=7\ncost_estimate_basis=published us-east-1 list prices; indicative only, not billing data\n\nUNATTACHED_VOLUME volume_id=vol-0a1b2c3d4e5f67890 size_gb=100 type=gp3 az=us-east-1a age_days=412 encrypted=yes snapshot_of_origin=none est_monthly_usd_list_price=8.0 name_tag= owner_tag=\nUNATTACHED_VOLUME volume_id=vol-0b2c3d4e5f6789012 size_gb=100 type=gp3 az=us-east-1a age_days=388 encrypted=yes snapshot_of_origin=none est_monthly_usd_list_price=8.0 name_tag=staging-web-01 owner_tag=\nUNATTACHED_VOLUME volume_id=vol-0c3d4e5f67890123a size_gb=60 type=gp2 az=us-east-1b age_days=355 encrypted=yes snapshot_of_origin=none est_monthly_usd_list_price=6.0 name_tag=staging-db-01 owner_tag=\nUNATTACHED_VOLUME volume_id=vol-0d4e5f6789012345b size_gb=500 type=gp3 az=us-east-1a age_days=120 encrypted=yes snapshot_of_origin=none est_monthly_usd_list_price=40.0 name_tag=warehouse-scratch owner_tag=data-platform\nUNATTACHED_VOLUME volume_id=vol-0e5f67890123456cd size_gb=200 type=gp3 az=us-east-1c age_days=9 encrypted=yes snapshot_of_origin=none est_monthly_usd_list_price=16.0 name_tag= owner_tag=\n\nSUMMARY\nunattached_volumes=5 total_gb=960 est_monthly_usd_list_price=78.00\nunassociated_eips=0 est_monthly_usd_list_price=0.00\nstopped_instances=0 (the instances are free; their attached disks are not)\ncombined_est_monthly_usd_list_price=78.00"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "The inventory is in. I have what I need to decide.",
+          "input_tokens": 2100,
+          "output_tokens": 16
+        },
+        {
+          "type": "structured",
+          "schema": "HypothesisOut",
+          "value": {
+            "findings": [
+              {
+                "summary": "Three volumes are genuinely abandoned: vol-0a1b2c3d4e5f67890, vol-0b2c3d4e5f6789012 and vol-0c3d4e5f67890123a have been unattached for a year or more and two of them carry decommissioned staging names.",
+                "severity": "warning",
+                "cites": [900]
+              },
+              {
+                "summary": "vol-0d4e5f6789012345b is tagged to the data-platform team, so it needs their sign-off rather than a deletion, despite being the largest single cost here.",
+                "severity": "info",
+                "cites": [900]
+              },
+              {
+                "summary": "vol-0e5f67890123456cd was detached 9 days ago, which is short enough to be a migration in progress rather than waste.",
+                "severity": "info",
+                "cites": [900]
+              }
+            ],
+            "need_more": false,
+            "collect": ""
+          }
+        },
+        {
+          "type": "structured",
+          "schema": "PlanOut",
+          "value": {
+            "actions": [
+              {
+                "tool": "workflow_52",
+                "arguments": {
+                  "Region": "us-east-1",
+                  "VolumeIds": "vol-0a1b2c3d4e5f67890,vol-0b2c3d4e5f6789012,vol-0c3d4e5f67890123a",
+                  "Reason": "Reclaiming disks from the staging fleet decommissioned last quarter",
+                  "MinimumAgeDays": 30,
+                  "ExcludeTagKey": "autoops:protect",
+                  "SnapshotWaitSeconds": 600,
+                  "Execute": true
+                },
+                "intent": "Delete the three volumes that have been unattached for over a year, after taking a confirmed recovery snapshot of each.",
+                "blast_radius": "260 GB across three EBS volumes in us-east-1 is deleted. Nothing is attached to them, so no running workload is interrupted. Any data on them is reachable afterwards only through the recovery snapshots.",
+                "rollback": "One retained snapshot per volume, taken and confirmed complete before each deletion. A volume can be recreated from its snapshot; recreating it does NOT reattach it to anything or restore whatever was using it. Once the snapshots are also deleted there is no way back.",
+                "cites": [900]
+              }
+            ],
+            "do_nothing_reason": ""
+          }
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "ACT",
+        "tool_calls": ["workflow_52"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "gate-1-workflow_52",
+            "ok": true,
+            "evidence_id": 901,
+            "decision": "APPROVED",
+            "decided_by": "Priya Nair",
+            "content": "UNUSED EBS VOLUME RECLAIM\nregion=us-east-1 mode=EXECUTE targets=3\nminimum_age_days=30 protection_tag=autoops:protect snapshot=required\nreason=Reclaiming disks from the staging fleet decommissioned last quarter\n\nvolume_id=vol-0a1b2c3d4e5f67890 action=deleted size_gb=100 type=gp3 az=us-east-1a age_days=412 snapshot_id=snap-0abc1 recovery_snapshot=snap-0abc1\nvolume_id=vol-0b2c3d4e5f6789012 action=deleted size_gb=100 type=gp3 az=us-east-1a age_days=388 snapshot_id=snap-0abc2 recovery_snapshot=snap-0abc2\nvolume_id=vol-0c3d4e5f67890123a action=deleted size_gb=60 type=gp2 az=us-east-1b age_days=355 snapshot_id=snap-0abc3 recovery_snapshot=snap-0abc3\n\nSUMMARY\nmode=EXECUTE deleted=3 skipped=0 failed=0\nreclaimed_gb=260"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "Re-running the inventory to confirm the volumes are actually gone.",
+          "tool_calls": [
+            {
+              "name": "workflow_51",
+              "args": { "Region": "us-east-1", "MinimumAgeDays": 7 },
+              "id": "toolu_inv2"
+            }
+          ],
+          "input_tokens": 2600,
+          "output_tokens": 48
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "VERIFY",
+        "tool_calls": ["workflow_51"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "toolu_inv2",
+            "ok": true,
+            "evidence_id": 902,
+            "content": "IDLE RESOURCE INVENTORY\nregion=us-east-1 minimum_age_days=7\ncost_estimate_basis=published us-east-1 list prices; indicative only, not billing data\n\nUNATTACHED_VOLUME volume_id=vol-0d4e5f6789012345b size_gb=500 type=gp3 az=us-east-1a age_days=120 encrypted=yes snapshot_of_origin=none est_monthly_usd_list_price=40.0 name_tag=warehouse-scratch owner_tag=data-platform\nUNATTACHED_VOLUME volume_id=vol-0e5f67890123456cd size_gb=200 type=gp3 az=us-east-1c age_days=9 encrypted=yes snapshot_of_origin=none est_monthly_usd_list_price=16.0 name_tag= owner_tag=\n\nSUMMARY\nunattached_volumes=2 total_gb=700 est_monthly_usd_list_price=56.00\nunassociated_eips=0 est_monthly_usd_list_price=0.00\nstopped_instances=0 (the instances are free; their attached disks are not)\ncombined_est_monthly_usd_list_price=56.00"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "Confirmed — none of the three appear in the fresh inventory.",
+          "input_tokens": 3000,
+          "output_tokens": 20
+        },
+        {
+          "type": "reply",
+          "text": "**Three abandoned volumes deleted and confirmed gone; two were deliberately left alone.**\n\n| Volume | Size | Idle | Recovery snapshot |\n| --- | --- | --- | --- |\n| vol-0a1b2c3d4e5f67890 | 100 GB | 412 days | snap-0abc1 [e:901] |\n| vol-0b2c3d4e5f6789012 | 100 GB | 388 days | snap-0abc2 [e:901] |\n| vol-0c3d4e5f67890123a | 60 GB | 355 days | snap-0abc3 [e:901] |\n\nVerified by re-running the inventory: none of the three appear in it any more [e:902].\n\nLeft alone on purpose:\n\n- vol-0d4e5f6789012345b is tagged to the data-platform team, so it needs their sign-off rather than a deletion — and at 500 GB it is the largest single item on the list [e:900].\n- vol-0e5f67890123456cd was detached 9 days ago, which is short enough to be a migration in progress [e:900].\n\nThe inventory total fell from 78.00 to 56.00 [e:900][e:902]. Those are published us-east-1 list prices rather than this customer's negotiated rate, so treat them as the size of the prize and not as a billing figure.\n\nNext step: the three recovery snapshots are retained. Delete them once someone is satisfied nothing on those disks was needed.",
+          "input_tokens": 3400,
+          "output_tokens": 330
+        }
+      ],
+      "expect": {
+        "directive": "FINISH",
+        "phase": "DONE",
+        "tool_calls": [],
+        "citations": [901, 902, 900],
+        "has_uncited": false,
+        "output_contains": [
+          "snap-0abc1",
+          "data-platform",
+          "migration in progress",
+          "list prices"
+        ]
+      }
+    }
+  ]
+}

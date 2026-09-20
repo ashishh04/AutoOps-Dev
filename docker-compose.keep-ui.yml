@@ -1,0 +1,71 @@
+# ============================================================
+# TEMPORARY — opens Keep's own console for an operator, to configure the
+# monitoring providers that feed the alert plane. Mirrors
+# docker-compose.rundeck-ui.yml, for the same reason and with the same rules.
+#
+# Bound to 127.0.0.1, NOT 0.0.0.0. Keep's console is the white-label boundary:
+# docker-compose.keep.yml gives keep-backend no host port precisely so that
+# nothing outside the compose network reaches it. Loopback + an SSH tunnel
+# keeps that intact — the ports exist only for someone already on the box.
+#
+# Reach it from your laptop with:
+#     ssh -L 13000:localhost:13000 -L 18080:localhost:18080 -L 16001:localhost:16001 ubuntu@<host>
+# then open http://localhost:13000 and log in with KEEP_ADMIN_USER /
+# KEEP_ADMIN_PASSWORD from ./.env.
+#
+# NEXT_PUBLIC_API_URL and PUSHER_HOST must match how the BROWSER reaches those
+# services, not how the compose network does — the Next.js bundle runs on your
+# laptop. Left at http://keep-backend:8080 every XHR resolves a hostname that
+# exists only inside the network and the console loads empty. API_URL is the
+# server-side counterpart and correctly stays on the internal name.
+#
+# Append AFTER docker-compose.keep.yml in COMPOSE_FILE. Remove when done.
+# ============================================================
+services:
+  keep-backend:
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      # Re-enabled only for the console's live updates; the base overlay turns
+      # this off because nothing else consumes it.
+      PUSHER_DISABLED: "false"
+      PUSHER_APP_ID: "1"
+      PUSHER_APP_KEY: ${KEEP_PUSHER_APP_KEY:-keepappkey}
+      PUSHER_APP_SECRET: ${KEEP_PUSHER_APP_SECRET:-keepappsecret}
+      PUSHER_HOST: keep-websocket
+      PUSHER_PORT: "6001"
+
+  keep-websocket:
+    image: quay.io/soketi/soketi:1.4-16-debian
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:16001:6001"
+    environment:
+      SOKETI_DEFAULT_APP_ID: "1"
+      SOKETI_DEFAULT_APP_KEY: ${KEEP_PUSHER_APP_KEY:-keepappkey}
+      SOKETI_DEFAULT_APP_SECRET: ${KEEP_PUSHER_APP_SECRET:-keepappsecret}
+      SOKETI_USER_AUTHENTICATION_TIMEOUT: "3000"
+
+  keep-frontend:
+    image: us-central1-docker.pkg.dev/keephq/keep/keep-ui:0.54.3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:13000:3000"
+    environment:
+      AUTH_TYPE: DB
+      NEXTAUTH_SECRET: ${KEEP_NEXTAUTH_SECRET:-dev-keep-nextauth-secret-change-me}
+      NEXTAUTH_URL: http://localhost:13000
+      # server-side (container -> container)
+      API_URL: http://keep-backend:8080
+      # browser-side (your laptop, through the tunnel)
+      NEXT_PUBLIC_API_URL: http://localhost:18080
+      PUSHER_HOST: localhost
+      PUSHER_PORT: "16001"
+      PUSHER_APP_KEY: ${KEEP_PUSHER_APP_KEY:-keepappkey}
+      # Keep's hosted analytics/error reporting. Off: this console is operating
+      # a customer's alert stream.
+      POSTHOG_KEY: ""
+      POSTHOG_HOST: ""
+      NEXT_PUBLIC_SENTRY_DSN: ""
+    depends_on:
+      - keep-backend

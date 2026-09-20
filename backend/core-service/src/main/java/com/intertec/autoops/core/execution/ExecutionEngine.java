@@ -3,7 +3,6 @@ package com.intertec.autoops.core.execution;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.intertec.autoops.core.client.DifyAppClient;
 import com.intertec.autoops.core.config.CoreProperties;
 import com.intertec.autoops.core.domain.Run;
 import com.intertec.autoops.core.domain.RunStatus;
@@ -47,8 +46,8 @@ public class ExecutionEngine {
     private final StepExecutor stepExecutor;
     private final ObjectMapper objectMapper;
     private final CoreProperties properties;
-    /** Decides whether a run is ours to walk or Dify's to execute. */
-    private final com.intertec.autoops.core.service.DifyWorkflowService difyWorkflows;
+    /** The native replacement: a node graph executed on agent-runtime. */
+    private final com.intertec.autoops.core.service.NativeWorkflowService nativeWorkflows;
     /** Nullable: slice tests have no MeterRegistry; prod wires Prometheus. */
     private final MeterRegistry meterRegistry;
     /** Nullable in slice tests that don't import it; failures then go unannounced. */
@@ -60,7 +59,7 @@ public class ExecutionEngine {
                            StepExecutor stepExecutor,
                            ObjectMapper objectMapper,
                            CoreProperties properties,
-                           com.intertec.autoops.core.service.DifyWorkflowService difyWorkflows,
+                           com.intertec.autoops.core.service.NativeWorkflowService nativeWorkflows,
                            ObjectProvider<MeterRegistry> meterRegistry,
                            ObjectProvider<com.intertec.autoops.core.service.NotificationService> notificationService,
                            ObjectProvider<com.intertec.autoops.core.service.LifecycleNotifier> lifecycleNotifier) {
@@ -68,7 +67,7 @@ public class ExecutionEngine {
         this.stepExecutor = stepExecutor;
         this.objectMapper = objectMapper;
         this.properties = properties;
-        this.difyWorkflows = difyWorkflows;
+        this.nativeWorkflows = nativeWorkflows;
         this.meterRegistry = meterRegistry.getIfAvailable();
         this.notificationService = notificationService.getIfAvailable();
         this.lifecycleNotifier = lifecycleNotifier.getIfAvailable();
@@ -106,13 +105,12 @@ public class ExecutionEngine {
 
         StringBuilder logText = new StringBuilder();
 
-        // A workflow whose definition names a Dify slug is executed BY Dify —
-        // one call, not a walk of local steps. Checked before parseSteps
-        // because such a definition has no `nodes[]` at all, so the step walk
-        // would find nothing and report a vacuous success.
-        String difySlug = difyWorkflows.slugIn(run.getDefinition());
-        if (difySlug != null) {
-            executeViaDify(run, difySlug, logText);
+        // A native workflow graph is handed WHOLE to the runtime — one call,
+        // not a walk of local steps. Checked before parseSteps because such a
+        // definition has no `steps[]` at all, so the step walk would find
+        // nothing and report a vacuous success.
+        if (nativeWorkflows.isNative(run.getDefinition())) {
+            executeViaRuntime(run, logText);
             return;
         }
 
@@ -206,45 +204,43 @@ public class ExecutionEngine {
         }
     }
 
-    /**
-     * Hands the whole run to Dify and records the single outcome.
-     *
-     * <p><b>Not cancellable mid-flight.</b> Dify owns the execution once the
-     * call is made, so {@code cancel_requested} can only be honoured before it
-     * starts. That is stated in the log rather than left for someone to
-     * discover — a Cancel button that silently does nothing is worse than one
-     * that explains itself.
-     *
-     * <p>Step counters are set to 1 so a progress bar reads 0/1 then 1/1. The
-     * alternative, 0/0, renders as an empty bar for the entire run.
-     */
     /** "2m 59s" reads better in a run log than "179322". */
     private static String humanDuration(long millis) {
         long seconds = Math.max(0, millis / 1000);
         return seconds < 60 ? seconds + "s" : (seconds / 60) + "m " + (seconds % 60) + "s";
     }
 
-    private void executeViaDify(Run run, String slug, StringBuilder logText) {
+    /**
+     * Hands the whole run to the native workflow runtime and records the
+     * outcome.
+     *
+     * <p>The per-node log lines, the mid-run saves that keep a polling run
+     * screen moving, and the reload-before-write that stops a stale save
+     * clobbering a cancel are all behaviour an operator depends on, and none of
+     * it is specific to which engine is behind the call.
+     *
+     * <p><b>Not cancellable mid-flight.</b> The runtime owns execution once the
+     * call is made. Said in the log rather than left to be discovered — a
+     * Cancel button that silently does nothing is worse than one that explains
+     * itself.
+     */
+    private void executeViaRuntime(Run run, StringBuilder logText) {
         Map<String, Object> inputs = readInputs(run.getInputs());
         run.setStepTotal(1);
-        logText.append("Running Dify workflow '").append(slug).append("'\n");
-        inputs.forEach((name, value) ->
-                logText.append("    input ").append(name).append(" = ").append(value).append('\n'));
-        if (inputs.isEmpty()) {
-            logText.append("    (no inputs)\n");
-        }
+        // The TRACE only — no banner naming the engine, and no echo of the
+        // inputs. The engine is an implementation detail a customer never asked
+        // about, and the inputs are the text they just typed: replaying a
+        // 400-word meeting transcript back at them pushed the actual report a
+        // screenful down the page. Both are already on the run row
+        // (`runs.inputs`) for anyone who needs them.
         try {
-            // Each node is written to the log AS IT HAPPENS, and the row is
-            // saved with it. That save is the whole point: the run screen polls
-            // this row, so without it a twenty-minute workflow shows a
-            // motionless spinner and an operator reasonably concludes it has
-            // hung. With it they see "Market Research Agent ✓ (2m 59s)" arrive
-            // one line at a time.
             java.util.concurrent.atomic.AtomicInteger done =
                     new java.util.concurrent.atomic.AtomicInteger();
 
-            DifyAppClient.RunOutcome outcome = difyWorkflows.run(slug, inputs, run.getTenantId(),
-                    (title, finished, index, elapsedMs, failed) -> {
+            com.intertec.autoops.core.client.WorkflowRuntimeClient.RunOutcome outcome =
+                    nativeWorkflows.run(run.getId(), run.getTenantId(), run.getProjectId(),
+                            run.getDefinition(),
+                            inputs, (title, finished, index, elapsedMs, failed) -> {
                         if (finished) {
                             logText.append("    ").append(failed ? "✗ " : "✓ ").append(title);
                             if (elapsedMs != null) {
@@ -255,9 +251,9 @@ public class ExecutionEngine {
                             logText.append("    → ").append(title).append(" …\n");
                         }
                         int completed = finished ? done.incrementAndGet() : done.get();
-                        // Written straight to the repository rather than through
-                        // the entity in hand: this runs mid-workflow, and the
-                        // in-memory Run is not the row the UI is reading.
+                        // Written straight to the repository: this runs
+                        // mid-workflow, and the in-memory Run is not the row
+                        // the UI is reading.
                         runRepository.findById(run.getId()).ifPresent(live -> {
                             if (!live.getStatus().isTerminal()) {
                                 live.setStepCompleted(completed);
@@ -267,39 +263,41 @@ public class ExecutionEngine {
                             }
                         });
                     });
+
             if (outcome.totalSteps() != null) {
-                logText.append("    Dify ran ").append(outcome.totalSteps()).append(" node(s)\n");
+                logText.append("    ").append(outcome.totalSteps()).append(" node(s)\n");
             }
-            // The report itself, as prose — not the raw outputs JSON. Dumping
-            // that object verbatim put escaped HTML and literal newlines on
-            // screen with the answer buried inside it. See DifyOutputs.
-            String readable = DifyOutputs.readable(outcome.outputs());
-            if (readable != null && !readable.isBlank()) {
-                logText.append('\n').append(readable).append('\n');
-            }
-            // Reload: the row may have been cancelled while Dify was working,
-            // and a stale save here would clobber that flag.
+            // The report as prose, not the raw outputs JSON — dumping that
+            // object verbatim put escaped HTML on screen with the answer buried
+            // inside it. See RunOutputs.
+            String readable = RunOutputs.readable(outcome.outputs());
+
             Run current = runRepository.findById(run.getId()).orElse(run);
             current.setStepTotal(1);
             current.setStepCompleted(outcome.success() ? 1 : 0);
+            // The deliverable goes to `output`, the trace stays in `log`. They
+            // shared one field and the customer got both at once — node timings
+            // and an echo of their own input above the document they asked for,
+            // then the document again because finish() appended it a second
+            // time. Two audiences, two fields.
+            current.setOutput(readable == null || readable.isBlank() ? null : readable);
             current.setLog(logText.toString());
             if (current.isCancelRequested()) {
-                logText.append("Cancel arrived after Dify had started — the workflow ran to "
+                logText.append("Cancel arrived after the workflow had started — it ran to "
                         + "completion.\n");
                 current.setLog(logText.toString());
             }
-            // The run's OUTPUT is the report, not a sentence about the report.
-            // "Dify reported the workflow succeeded" told a reader nothing the
-            // status badge did not, and it was appended after the report as
-            // though it were part of it.
             finish(current, outcome.success() ? RunStatus.SUCCEEDED : RunStatus.FAILED,
-                    outcome.error(), outcome.success() ? readable : null);
+                    outcome.error(), null);
         } catch (Exception ex) {
-            // A transport or key failure, as opposed to a workflow that ran and
-            // failed. Both end the run, but only this one is an AutoOps problem.
-            log.error("Dify run {} (slug {}) could not be dispatched", run.getId(), slug, ex);
+            // A transport failure, as opposed to a workflow that ran and
+            // failed. Both end the run; only this one is an AutoOps problem.
+            log.error("Workflow run {} could not be dispatched to the runtime", run.getId(), ex);
             Run current = runRepository.findById(run.getId()).orElse(run);
-            logText.append("Could not reach Dify: ").append(ex.getMessage()).append('\n');
+            // The exception already names the cause. Prefixing it again
+            // produced "Could not reach the workflow runtime: Could not reach
+            // the workflow runtime: …" in the run log an operator reads.
+            logText.append(ex.getMessage()).append('\n');
             current.setLog(logText.toString());
             finish(current, RunStatus.FAILED, ex.getMessage(), null);
         }

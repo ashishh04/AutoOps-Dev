@@ -118,8 +118,12 @@ class RolloutToolResolutionTest {
 
         assertThat(rollOut().delivered()).isEqualTo(1);
         // 501 is this customer's copy — nothing like the provider's own id.
-        assertThat(deliveredTools())
-                .isEqualTo("[{\"type\":\"WORKFLOW\",\"id\":501,\"mutating\":true}]");
+        // The ref rides along beside it: the id is what the customer RUNS, the
+        // ref is what the agent's author DECLARED, and the runtime needs the
+        // second to match a tool result back to what that tool returns.
+        assertThat(deliveredTools()).isEqualTo(
+                "[{\"type\":\"WORKFLOW\",\"id\":501,"
+                        + "\"ref\":\"RD-079-linux-server-health-check\",\"mutating\":true}]");
     }
 
     @Test
@@ -139,8 +143,31 @@ class RolloutToolResolutionTest {
         givenDelivered(88L, "RD-079-a");
 
         rollOut();
+        assertThat(deliveredTools()).isEqualTo(
+                "[{\"type\":\"WORKFLOW\",\"id\":88,\"ref\":\"RD-079-a\",\"mutating\":true}]");
+    }
+
+    /**
+     * The ref survives delivery, which is the only reason the runtime can tell
+     * what a tool returns.
+     *
+     * <p>The delivered {@code id} is tenant-local and means nothing outside this
+     * project; the tool name the model sees is derived from it. Without the ref
+     * there is no stable handle joining a tool result back to what the agent's
+     * author declared about it — and subject extraction, which is what a
+     * coverage scope is built from, has nothing to key on.
+     */
+    @Test
+    void theRefIsCarriedThroughDeliveryBesideTheId() {
+        givenCatalogAgent("[{\"type\":\"WORKFLOW\",\"ref\":\"RD-136-idle-resource-inventory\","
+                + "\"mutating\":false}]");
+        givenDelivered(77L, "RD-136-idle-resource-inventory");
+
+        rollOut();
         assertThat(deliveredTools())
-                .isEqualTo("[{\"type\":\"WORKFLOW\",\"id\":88,\"mutating\":true}]");
+                .contains("\"ref\":\"RD-136-idle-resource-inventory\"")
+                .contains("\"id\":77")
+                .contains("\"mutating\":false");
     }
 
     @Test
@@ -157,6 +184,66 @@ class RolloutToolResolutionTest {
         assertThat(result.deliveries().get(0).error()).contains("RD-079-missing");
         verify(agentClient, never()).rollOut(anyString(), anyString(), any(), anyLong(),
                 anyLong(), anyString(), any(), any(), any(), any(), any(), any());
+    }
+
+    // ------------------------------------- components: delivered, not sold ---
+
+    /** A catalog workflow the provider has published, carrying its stable ref. */
+    private void givenPublishedWorkflow(Long id, String ref, String title) {
+        LibraryItem workflow = mock(LibraryItem.class);
+        when(workflow.getId()).thenReturn(id);
+        when(workflow.getTitle()).thenReturn(title);
+        when(workflow.getType()).thenReturn(LibraryItem.Type.WORKFLOW);
+        when(workflow.getDefinition()).thenReturn("{\"ref\":\"" + ref + "\",\"nodes\":[]}");
+        when(libraryRepository.findByTenantIdIsNullOrderByCreatedAtDesc())
+                .thenReturn(List.of(workflow));
+    }
+
+    /**
+     * Rolling out an agent delivers the automations it needs, sealed.
+     *
+     * <p>Workflows and agents are licensed separately, but an agent can only
+     * act through automations that live in the customer's project — so they
+     * have to arrive. They arrive as AGENT_COMPONENT, which is what keeps the
+     * commercial line: the customer bought an agent, so they see an agent.
+     */
+    @Test
+    void anAgentsMissingToolsAreDeliveredAsSealedComponents() {
+        givenCatalogAgent("[{\"type\":\"WORKFLOW\",\"ref\":\"RD-210-alarms\"}]");
+        givenPublishedWorkflow(267L, "RD-210-alarms", "CloudWatch Alarm State Audit");
+        // Empty before delivery; present after — the service re-reads the
+        // listing between delivering components and resolving the allow-list.
+        when(workflowClient.listByProject("acme", 9L)).thenReturn(
+                List.of(),
+                List.of(new WorkflowClient.WorkflowView(601L, "acme", 9L, "CloudWatch Alarm State Audit",
+                        "{\"ref\":\"RD-210-alarms\",\"nodes\":[]}", 0, true, "AGENT_COMPONENT")));
+
+        RolloutService.RolloutResult result = rollOut();
+
+        assertThat(result.delivered()).isEqualTo(1);
+        verify(workflowClient).rollOut(eq("acme"), anyString(), any(), eq(9L), eq(267L),
+                eq("CloudWatch Alarm State Audit"), anyString(), eq("AGENT_COMPONENT"));
+        // And the agent's allow-list points at the copy that was just delivered.
+        assertThat(deliveredTools()).contains("601");
+    }
+
+    /**
+     * A workflow the customer already holds is left exactly as it is.
+     *
+     * <p>If they licensed it in its own right, rolling out an agent that
+     * happens to use it must not quietly reseal it as a component and take it
+     * out of their list.
+     */
+    @Test
+    void aWorkflowTheProjectAlreadyHoldsIsNotRedelivered() {
+        givenCatalogAgent("[{\"type\":\"WORKFLOW\",\"ref\":\"RD-210-alarms\"}]");
+        givenPublishedWorkflow(267L, "RD-210-alarms", "CloudWatch Alarm State Audit");
+        givenDelivered(601L, "RD-210-alarms");
+
+        assertThat(rollOut().delivered()).isEqualTo(1);
+
+        verify(workflowClient, never()).rollOut(anyString(), anyString(), any(), anyLong(),
+                anyLong(), anyString(), anyString(), anyString());
     }
 
     // ------------------------------------------- mutability, and the shape ---

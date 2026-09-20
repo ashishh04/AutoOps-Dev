@@ -5,7 +5,6 @@ import com.intertec.autoops.core.config.CoreProperties;
 import com.intertec.autoops.core.domain.Run;
 import com.intertec.autoops.core.domain.RunTargetType;
 import com.intertec.autoops.core.repo.RunRepository;
-import com.intertec.autoops.core.service.DifyWorkflowService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 
@@ -30,7 +29,8 @@ class ExecutionEngineSubstitutionTest {
     private ExecutionEngine engine() {
         ObjectProvider<Object> empty = mock(ObjectProvider.class);
         return new ExecutionEngine(mock(RunRepository.class), mock(StepExecutor.class),
-                new ObjectMapper(), new CoreProperties(), mock(DifyWorkflowService.class),
+                new ObjectMapper(), new CoreProperties(),
+                mock(com.intertec.autoops.core.service.NativeWorkflowService.class),
                 (ObjectProvider) empty, (ObjectProvider) empty, (ObjectProvider) empty);
     }
 

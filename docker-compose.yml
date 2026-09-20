@@ -138,6 +138,15 @@ services:
       JOB_SERVICE_URL: http://job-service:8084
       JOB_INTERNAL_TOKEN: ${JOB_INTERNAL_TOKEN:-dev-internal-token}
       SUBSCRIPTION_INTERNAL_TOKEN: ${SUBSCRIPTION_INTERNAL_TOKEN:-dev-internal-token}
+      # agent-runtime executes NATIVE workflow graphs (the Dify replacement).
+      # Deliberately NOT a depends_on: a workflow run failing because the
+      # runtime is down must not also stop jobs, projects and approvals from
+      # working — core-service reports the outage on the run instead.
+      AGENT_RUNTIME_URL: http://agent-runtime:8089
+      AGENT_RUNTIME_INTERNAL_TOKEN: ${AGENT_RUNTIME_INTERNAL_TOKEN:-dev-internal-token}
+      # The model a workflow's llm node uses when its definition names none.
+      # Empty is valid: a graph with no llm node needs no model at all.
+      RUNTIME_DEFAULT_MODEL: ${RUNTIME_DEFAULT_MODEL:-}
       # Cloud credential encryption at rest (set a strong secret in ./.env).
       CLOUD_CRED_KEY: ${CLOUD_CRED_KEY:-dev-cloud-cred-key}
       # Workflow definitions live in workflow-service now; the run engine,
@@ -168,18 +177,6 @@ services:
       RUNDECK_SERVICE_URL: http://rundeck-service:8090
       RUNDECK_INTERNAL_TOKEN: ${RUNDECK_INTERNAL_TOKEN:-dev-internal-token}
       CONSOLE_BASE_URL: ${CONSOLE_BASE_URL:-http://localhost:5173}
-      # Dify is the workflow engine. Set both in ./.env — until then the
-      # bridge answers 503 and the designer says Dify is not connected.
-      DIFY_BASE_URL: ${DIFY_BASE_URL:-}
-      DIFY_API_KEY: ${DIFY_API_KEY:-}
-      # Service API keys, one per published workflow: slug=app-…,slug2=app-…
-      # A single variable on purpose — the per-workflow DIFY_WF_<SLUG> form
-      # core-service also accepts would need an edit here for every workflow
-      # added, which is exactly the friction that stops workflows shipping.
-      DIFY_WORKFLOW_KEYS: ${DIFY_WORKFLOW_KEYS:-}
-      # Blocking workflow runs outlast any console read; see application.yml.
-      DIFY_RUN_TIMEOUT: ${DIFY_RUN_TIMEOUT:-20m}
-      DIFY_READ_TIMEOUT: ${DIFY_READ_TIMEOUT:-30s}
       # Shared secret workflow-service and agent-service must present on
       # this service's own /internal/** endpoints.
       CORE_INTERNAL_TOKEN: ${CORE_INTERNAL_TOKEN:-dev-internal-token}
@@ -255,7 +252,6 @@ services:
       # The kill switch. Set false to send every run back to this service's own
       # Java chat adapters — the loop that shipped before agent-runtime existed.
       AGENT_RUNTIME_ENABLED: ${AGENT_RUNTIME_ENABLED:-true}
-      # Must outlast DIFY_RUN_TIMEOUT on core-service.
       AGENT_TOOL_TIMEOUT: ${AGENT_TOOL_TIMEOUT:-25m}
       # Must outlast the slowest single reduce, not the slowest tool.
       AGENT_RUNTIME_READ_TIMEOUT: ${AGENT_RUNTIME_READ_TIMEOUT:-15m}
@@ -292,14 +288,33 @@ services:
   agent-runtime:
     build: ./backend/agent-runtime
     environment:
+      # The ONE call agent-runtime makes back into the control plane: a
+      # workflow's `job` node asking core-service to dispatch an automation.
+      # It executes nothing itself — core-service still owns credentials, the
+      # approvals gate and the audit trail.
+      AGENT_RUNTIME_CORE_BASE_URL: http://core-service:8083
+      AGENT_RUNTIME_CORE_INTERNAL_TOKEN: ${CORE_INTERNAL_TOKEN:-dev-internal-token}
       AGENT_RUNTIME_INTERNAL_TOKEN: ${AGENT_RUNTIME_INTERNAL_TOKEN:-dev-internal-token}
       AGENT_RUNTIME_MAX_TOKENS: ${AGENT_RUNTIME_MAX_TOKENS:-4096}
-      # Tracing is opt-in and never fails a run: with these unset the runtime
-      # logs a warning once and carries on untraced.
-      AGENT_RUNTIME_LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
-      AGENT_RUNTIME_LANGFUSE_HOST: http://langfuse:3000
-      AGENT_RUNTIME_LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
-      AGENT_RUNTIME_LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # LangSmith tracing. Opt-in, off by default, and it never fails a run:
+      # with the switch on and no key the runtime logs one warning and carries
+      # on untraced. One trace per reduce with each phase nested inside it; a
+      # run's several reduces are stitched into one LangSmith thread by the run
+      # id, so an investigation that parked on an approval for two days is
+      # still one conversation rather than four unrelated traces.
+      AGENT_RUNTIME_LANGSMITH_ENABLED: ${LANGSMITH_ENABLED:-false}
+      AGENT_RUNTIME_LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      # One project per environment. A staging run sitting beside a production
+      # one in the same trace list is how an investigation reaches the wrong
+      # conclusion about which build did what.
+      AGENT_RUNTIME_LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-autoops-agents}
+      # Override for LangSmith's EU host or a self-hosted instance. Where a
+      # customer's infrastructure detail may be sent is a contractual question,
+      # not a default.
+      AGENT_RUNTIME_LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      # Trace the shape without the content: phases, timings, token counts and
+      # errors are kept; message bodies and tool output never leave the process.
+      AGENT_RUNTIME_LANGSMITH_HIDE_IO: ${LANGSMITH_HIDE_IO:-false}
     ports:
       # 8089, not 8088 — plugin-service already publishes 8088.
       - "8089:8089"
@@ -456,6 +471,14 @@ services:
       AGENT_SERVICE_URL: http://agent-service:8087
       PLUGIN_SERVICE_URL: http://plugin-service:8088
       RUNDECK_SERVICE_URL: http://rundeck-service:8090
+      # Belongs HERE, not in docker-compose.keep.yml, even though alert-service
+      # only runs when that overlay is active. The gateway's route defaults to
+      # ${ALERT_SERVICE_URL:http://localhost:8091}, and localhost inside this
+      # container is the GATEWAY — so an unset value does not disable the route,
+      # it makes the gateway call itself and answer 500 on every alerts page.
+      # Pointing at the real service name fails honestly (connection refused)
+      # when the overlay is off, instead of misleadingly.
+      ALERT_SERVICE_URL: http://alert-service:8091
       VOICE_SERVICE_URL: http://voice-agent:8085
       AUTH_JWKS_URI: http://auth-service:8081/oauth2/jwks
       CORS_ALLOWED_ORIGINS: http://localhost:5173,http://localhost:3000
@@ -492,50 +515,6 @@ services:
       api-gateway:
         condition: service_healthy
 
-  # ---------------------------------------------------------------------
-  # Tracing. Behind the "tracing" profile, so a plain `docker compose up`
-  # does not pay for it:  docker compose --profile tracing up -d
-  #
-  # Langfuse needs Postgres and MySQL cannot serve it, so this is a second
-  # database engine in the stack. That is the honest cost of the profile, and
-  # the reason it is opt-in rather than always-on. Nothing in the platform
-  # depends on it: agent-runtime treats tracing as best-effort and runs
-  # untraced when it is absent.
-  # ---------------------------------------------------------------------
-  langfuse-db:
-    image: postgres:16-alpine
-    profiles: ["tracing"]
-    environment:
-      POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse}
-      POSTGRES_DB: langfuse
-    volumes:
-      - langfuse-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langfuse"]
-      interval: 10s
-      retries: 12
-      start_period: 20s
-
-  langfuse:
-    image: langfuse/langfuse:2
-    profiles: ["tracing"]
-    environment:
-      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse}@langfuse-db:5432/langfuse
-      NEXTAUTH_URL: http://localhost:3001
-      # Dev defaults. Both MUST be replaced outside local use: NEXTAUTH_SECRET
-      # signs session cookies and SALT keys the API-key hashes, so a shared
-      # default means anyone who has read this file can mint a session.
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-langfuse-secret-change-me}
-      SALT: ${LANGFUSE_SALT:-dev-langfuse-salt-change-me}
-      TELEMETRY_ENABLED: "false"
-    ports:
-      - "3001:3000"
-    depends_on:
-      langfuse-db:
-        condition: service_healthy
-
 volumes:
   mysql-data:
   rundeck-data:
-  langfuse-data:

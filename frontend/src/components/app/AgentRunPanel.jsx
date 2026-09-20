@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import Icon from "../Icon";
+import ModalPortal from "./ModalPortal";
 import { agentRuns } from "../../lib/api";
 import { fmtDate } from "../../lib/format";
 
@@ -20,6 +20,9 @@ import { fmtDate } from "../../lib/format";
 
 /** How often to re-read a live run. Fast enough to feel live, slow enough not to hammer. */
 const POLL_MS = 2500;
+
+// How many polls may fail in a row before the panel admits it is not live.
+const STALL_AFTER = 3;
 
 const STATUS_STYLES = {
   PENDING: "border-slate-300 bg-slate-100 text-slate-600",
@@ -73,10 +76,13 @@ const STEP_LABELS = {
  * that verbatim would be unreadable; showing nothing would hide the reasoning.
  * So the model's own words are pulled out and the rest is dropped.
  */
-function readModelStep(step) {
+function readModelStep(step, nameFor = (id) => id) {
   try {
     const parsed = JSON.parse(step.response || "{}");
-    const calls = (parsed.toolCalls || []).map((c) => c.name).filter(Boolean);
+    const calls = (parsed.toolCalls || [])
+      .map((c) => c.name)
+      .filter(Boolean)
+      .map(nameFor);
     return {
       text: parsed.text || "",
       calls,
@@ -87,9 +93,29 @@ function readModelStep(step) {
   }
 }
 
-const StepRow = ({ step }) => {
+/**
+ * Maps a tool's internal identifier to the automation's actual name.
+ *
+ * <p>The model is offered tools as `workflow_9231` / `job_14` — an id is the
+ * only thing guaranteed unique and stable enough to bind a call to a target.
+ * That is an implementation detail of how the agent is wired, and printing it
+ * to the customer both means nothing to them and advertises the numbering of
+ * their automations. Every TOOL_CALL step already carries the real name
+ * alongside its type and target id, so the run itself supplies the dictionary.
+ */
+export function toolNamesById(steps) {
+  const names = {};
+  for (const step of steps || []) {
+    if (step.toolType && step.toolTargetId && step.toolName) {
+      names[`${step.toolType.toLowerCase()}_${step.toolTargetId}`] = step.toolName;
+    }
+  }
+  return (id) => names[id] || id;
+}
+
+const StepRow = ({ step, nameFor }) => {
   const [open, setOpen] = useState(false);
-  const model = step.kind === "MODEL_CALL" ? readModelStep(step) : null;
+  const model = step.kind === "MODEL_CALL" ? readModelStep(step, nameFor) : null;
   const body = model ? model.text : step.response;
   const hasBody = !!(body && body.trim());
 
@@ -166,6 +192,11 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
   const live = useRef(null);
   live.current = openRun && !openRun.finished ? openRun.id : null;
 
+  // Consecutive failed polls. A ref rather than state: it changes on a timer
+  // and must not itself cause a render.
+  const misses = useRef(0);
+  const [stalled, setStalled] = useState(false);
+
   const loadHistory = useCallback(async () => {
     try {
       const rows = await agentRuns.listForAgent(agent.id);
@@ -187,7 +218,7 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
   // open, unfinished run — cheaper and simpler than tearing an interval down
   // and building it back up on every status change.
   useEffect(() => {
-    const tick = setInterval(async () => {
+    const pull = async () => {
       const id = live.current;
       if (!id) return;
       try {
@@ -197,11 +228,23 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
         // flight, and overwriting that would yank the panel out from under them.
         setOpenRun((current) => (current && current.id === fresh.id ? fresh : current));
         setRuns((rows) => rows.map((r) => (r.id === fresh.id ? { ...r, ...fresh } : r)));
+        misses.current = 0;
+        setStalled(false);
       } catch {
-        // A single failed poll is not worth an error banner over a run that
-        // is still perfectly fine; the next tick retries.
+        // One failed poll is noise — a dropped connection, a token being
+        // refreshed — and the next tick usually succeeds. Several in a row is
+        // different: the panel is then showing a snapshot while implying it is
+        // live, and the customer's only way to find out is to reload the page.
+        // Which is exactly what they should not have to do.
+        misses.current += 1;
+        if (misses.current >= STALL_AFTER) setStalled(true);
       }
-    }, POLL_MS);
+    };
+
+    // Once straight away. Waiting a full interval before the first pull is how
+    // a run that has already produced a step looks frozen on open.
+    pull();
+    const tick = setInterval(pull, POLL_MS);
     return () => clearInterval(tick);
   }, []);
 
@@ -245,11 +288,15 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
     }
   };
 
-  return createPortal(
-    <div className="fixed inset-0 z-[90] flex justify-end">
-      <div className="absolute inset-0 bg-slate-900/25 backdrop-blur-md" onClick={onClose} />
-
-      <aside className="rw-pop relative flex h-full w-full max-w-2xl flex-col border-l border-slate-200 bg-[#ffffff] shadow-2xl">
+  return (
+    <ModalPortal layerClass="z-[90] items-center p-4" onClose={onClose}>
+      {/* Centred, and sized to its CONTENT rather than to the window.
+          As a full-height right-hand drawer this was half the viewport wide
+          with the run history stranded against two thirds of a column of
+          whitespace — the emptier the agent, the worse it looked, which is
+          exactly backwards. max-h caps it on a long history; the flex column
+          keeps the header still and scrolls only the middle. */}
+      <div className="rw-pop relative z-10 flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
         <header className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-5">
           <div className="min-w-0">
             <h2 className="truncate text-base font-semibold text-slate-900">{agent.name}</h2>
@@ -267,7 +314,7 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
           </button>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           {!agent.enabled && (
             <p className="mb-4 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-700">
               This agent is paused. Resume it before asking it to do anything.
@@ -369,18 +416,37 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
               <p className="mt-5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                 What it did
               </p>
+              {stalled && !openRun.finished && (
+                <p className="mt-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-700">
+                  Not updating right now — still trying. The run itself is
+                  unaffected; this panel will catch up on its own.
+                </p>
+              )}
+
               {openRun.steps === null ? (
                 <div className="mt-2 h-20 animate-pulse rounded-xl bg-slate-100" />
               ) : openRun.steps.length === 0 ? (
                 <p className="mt-2 text-xs text-slate-500">
-                  Nothing yet — it has not finished its first step.
+                  {openRun.finished
+                    ? "It finished without recording a step."
+                    : // Named as waiting rather than empty. The first model
+                      // call can take twenty seconds, and "Nothing yet" on a
+                      // motionless panel reads as broken rather than busy.
+                      "Working on the first step — this can take a few seconds."}
                 </p>
               ) : (
-                <ul className="mt-1">
-                  {openRun.steps.map((s) => (
-                    <StepRow key={s.id} step={s} />
-                  ))}
-                </ul>
+                (() => {
+                  // Built once per render, not once per row: every row shares
+                  // the same dictionary and the list is re-rendered on poll.
+                  const nameFor = toolNamesById(openRun.steps);
+                  return (
+                    <ul className="mt-1">
+                      {openRun.steps.map((s) => (
+                        <StepRow key={s.id} step={s} nameFor={nameFor} />
+                      ))}
+                    </ul>
+                  );
+                })()
               )}
 
               {canRun && !openRun.finished && (
@@ -404,9 +470,16 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
                   ))}
                 </div>
               ) : runs.length === 0 ? (
-                <p className="mt-2 text-xs text-slate-500">
-                  This agent has not been run yet.
-                </p>
+                <div className="mt-2 flex flex-col items-center gap-2 rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+                    <Icon name="chat" size={16} />
+                  </span>
+                  <p className="text-sm text-slate-500">This agent has not been run yet.</p>
+                  <p className="max-w-xs text-xs text-slate-400">
+                    Describe what you want it to look into above, and its runs will collect
+                    here.
+                  </p>
+                </div>
               ) : (
                 <ul className="mt-2 space-y-2">
                   {runs.map((r) => (
@@ -433,8 +506,7 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
             </section>
           )}
         </div>
-      </aside>
-    </div>,
-    document.body,
+      </div>
+    </ModalPortal>
   );
 }

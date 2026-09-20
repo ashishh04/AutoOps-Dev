@@ -1,0 +1,56 @@
+{
+  "taskId": "RD-149",
+  "domain": "AWS",
+  "title": "S3 Public Access Audit",
+  "description": "Lists every S3 bucket in the account with its public access block, ACL grants, bucket-policy public status, default encryption and versioning. Read-only. Use it to find buckets readable by the internet, and to inventory buckets and their regions.",
+  "category": "Security",
+  "runtime": "python",
+  "inputs": [
+    {
+      "variable": "Region",
+      "label": "Region",
+      "type": "string",
+      "required": true,
+      "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$",
+      "help": "The region the API calls are made from. Bucket listing covers the whole account regardless of what you choose here.",
+      "consumedBy": "node",
+      "default": "us-east-1",
+      "placeholder": "us-east-1"
+    },
+    {
+      "variable": "BucketNamePrefix",
+      "label": "Bucket name prefix",
+      "type": "string",
+      "required": false,
+      "pattern": "^[a-z0-9.\\-]{0,63}$",
+      "help": "Leave blank to audit every bucket. Supply a prefix to narrow a large estate.",
+      "consumedBy": "node",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "type": "pyscript",
+      "label": "S3 Public Access Audit",
+      "value": "\"\"\"S3 public-exposure audit. Read-only: every call is a List/Get.\n\nReports, per bucket, the four things that together decide whether an object in\nit can be read by the internet: the public access block, the ACL, the bucket\npolicy's own public verdict, and — because it is the question always asked\nnext — encryption and versioning.\n\nA bucket is not \"public\" because one of these is set. It is public because of a\nCHAIN, and reporting the parts separately is what lets the agent say which\nchain is complete.\n\"\"\"\nimport json\nimport re\nimport sys\n\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError, NoCredentialsError\n\nREGION = \"{{Region}}\"\nPREFIX = \"{{BucketNamePrefix}}\"\n\nif not re.fullmatch(r\"[a-z0-9-]{1,32}\", REGION):\n    sys.exit(\"Region %r is not an AWS region name.\" % REGION)\nif PREFIX and not re.fullmatch(r\"[a-z0-9.\\-]{0,63}\", PREFIX):\n    sys.exit(\"BucketNamePrefix %r is not a valid bucket-name prefix.\" % PREFIX)\n\nCFG = Config(retries={\"max_attempts\": 5, \"mode\": \"standard\"})\nPUBLIC_URIS = (\n    \"http://acs.amazonaws.com/groups/global/AllUsers\",\n    \"http://acs.amazonaws.com/groups/global/AuthenticatedUsers\",\n)\n\n\ndef soft(call, *absent_codes):\n    \"\"\"Runs a Get that is ALLOWED to be absent, and says which absence it was.\n\n    An unconfigured feature and a denied permission are different findings and\n    must not collapse into one. The first is the customer's posture; the second\n    is our own access. An audit that reports \"not encrypted\" when it merely\n    could not look is worse than one that says it could not look.\n    \"\"\"\n    try:\n        return call(), None\n    except ClientError as exc:\n        code = exc.response.get(\"Error\", {}).get(\"Code\", \"Unknown\")\n        if code in absent_codes:\n            return None, None\n        return None, code\n\n\ndef main():\n    s3 = boto3.client(\"s3\", region_name=REGION, config=CFG)\n    try:\n        buckets = s3.list_buckets().get(\"Buckets\", [])\n    except NoCredentialsError:\n        sys.exit(\"No AWS credentials reached this step. Connect an AWS account to this project.\")\n    except ClientError as exc:\n        sys.exit(\"Could not list buckets: %s\" % exc)\n\n    names = sorted(b[\"Name\"] for b in buckets)\n    if PREFIX:\n        names = [n for n in names if n.startswith(PREFIX)]\n\n    print(\"S3 PUBLIC ACCESS AUDIT\")\n    print(\"queried_from_region=%s buckets_examined=%d\" % (REGION, len(names)))\n    if PREFIX:\n        print(\"filtered_to_prefix=%s\" % PREFIX)\n    print(\"\")\n\n    rows = []\n    for name in names:\n        row = {\"bucket\": name}\n\n        located, err = soft(lambda: s3.get_bucket_location(Bucket=name))\n        row[\"region\"] = \"unreadable(%s)\" % err if err else (\n            (located or {}).get(\"LocationConstraint\") or \"us-east-1\"\n        )\n\n        blocked, err = soft(\n            lambda: s3.get_public_access_block(Bucket=name),\n            \"NoSuchPublicAccessBlockConfiguration\",\n        )\n        if err:\n            row[\"public_access_block\"] = \"unreadable(%s)\" % err\n        elif blocked is None:\n            # ABSENT is not the same as \"off by default\". With no block config\n            # at all, an ACL or a policy granting the world IS honoured.\n            row[\"public_access_block\"] = \"ABSENT\"\n        else:\n            cfg = blocked[\"PublicAccessBlockConfiguration\"]\n            on = [k for k, v in sorted(cfg.items()) if v]\n            row[\"public_access_block\"] = (\n                \"all4\" if len(on) == 4 else \"partial:\" + \",\".join(on or [\"none\"])\n            )\n\n        acl, err = soft(lambda: s3.get_bucket_acl(Bucket=name))\n        if err:\n            row[\"acl_public\"] = \"unreadable(%s)\" % err\n        else:\n            grants = [\n                g for g in acl.get(\"Grants\", [])\n                if g.get(\"Grantee\", {}).get(\"URI\") in PUBLIC_URIS\n            ]\n            row[\"acl_public\"] = \"no\" if not grants else \"YES:\" + \",\".join(sorted(\n                \"%s=%s\" % (g[\"Grantee\"][\"URI\"].rsplit(\"/\", 1)[-1], g.get(\"Permission\", \"?\"))\n                for g in grants\n            ))\n\n        status, err = soft(lambda: s3.get_bucket_policy_status(Bucket=name), \"NoSuchBucketPolicy\")\n        if err:\n            row[\"policy_public\"] = \"unreadable(%s)\" % err\n        elif status is None:\n            row[\"policy_public\"] = \"no-policy\"\n        else:\n            row[\"policy_public\"] = \"YES\" if status[\"PolicyStatus\"][\"IsPublic\"] else \"no\"\n\n        enc, err = soft(\n            lambda: s3.get_bucket_encryption(Bucket=name),\n            \"ServerSideEncryptionConfigurationNotFoundError\",\n        )\n        if err:\n            row[\"encryption\"] = \"unreadable(%s)\" % err\n        elif enc is None:\n            row[\"encryption\"] = \"NONE\"\n        else:\n            algos = sorted({\n                r[\"ApplyServerSideEncryptionByDefault\"][\"SSEAlgorithm\"]\n                for r in enc[\"ServerSideEncryptionConfiguration\"][\"Rules\"]\n                if \"ApplyServerSideEncryptionByDefault\" in r\n            })\n            row[\"encryption\"] = \",\".join(algos) or \"NONE\"\n\n        ver, err = soft(lambda: s3.get_bucket_versioning(Bucket=name))\n        row[\"versioning\"] = \"unreadable(%s)\" % err if err else (ver or {}).get(\"Status\", \"Disabled\")\n\n        rows.append(row)\n        print(\" \".join(\"%s=%s\" % (k, v) for k, v in row.items()))\n\n    exposed = [\n        r for r in rows\n        if str(r.get(\"acl_public\", \"\")).startswith(\"YES\") or r.get(\"policy_public\") == \"YES\"\n    ]\n    unblocked = [\n        r for r in rows\n        if r.get(\"public_access_block\") == \"ABSENT\"\n        or str(r.get(\"public_access_block\", \"\")).startswith(\"partial\")\n    ]\n    unencrypted = [r for r in rows if r.get(\"encryption\") == \"NONE\"]\n    unreadable = sorted({\n        str(v) for r in rows for v in r.values() if str(v).startswith(\"unreadable(\")\n    })\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"buckets_total=%d\" % len(rows))\n    print(\"buckets_public_via_acl_or_policy=%d %s\" % (len(exposed), [r[\"bucket\"] for r in exposed]))\n    print(\"buckets_without_full_public_access_block=%d %s\"\n          % (len(unblocked), [r[\"bucket\"] for r in unblocked]))\n    print(\"buckets_unencrypted=%d %s\" % (len(unencrypted), [r[\"bucket\"] for r in unencrypted]))\n    if unreadable:\n        # Named so the agent reports \"I could not check X\" rather than treating\n        # our own missing permission as a clean result.\n        print(\"checks_denied_or_failed=%s\" % unreadable)\n    print(\"\")\n    print(\"JSON \" + json.dumps({\"region\": REGION, \"buckets\": rows}, sort_keys=True))\n\n\nmain()\n",
+      "retries": 0,
+      "continueOnError": false
+    }
+  ],
+  "requires": [
+    {
+      "kind": "cloud_connection",
+      "platform": "AWS",
+      "customerText": "An AWS account we can read from. The access we need is read-only — nothing in this check can change anything.",
+      "permissions": [
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketAcl",
+        "s3:GetBucketPolicyStatus",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketLocation"
+      ]
+    }
+  ]
+}

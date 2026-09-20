@@ -1,0 +1,43 @@
+-- ============================================================
+-- What a run PRODUCED, kept apart from what it DID.
+--
+-- Until now both lived in `runs.log`, and the result is what a customer saw:
+--
+--     Running workflow 'meeting-actions'
+--         input notes = Weekly delivery sync, ADNOC account — ...
+--         input tone = Direct
+--         → Start …
+--         ✓ Start (0s)
+--         → Actions and Email Writer …
+--         ✓ Actions and Email Writer (1m 5s)
+--         3 node(s)
+--
+--     ## Decisions
+--     - Migration cutover moved to 28th ...
+--
+-- The engine's bookkeeping and the deliverable, in one blob, in that order —
+-- so the document a customer actually wanted was below a screenful of node
+-- timings and a verbatim echo of their own input. It also made the report
+-- appear TWICE: the log already held it, and `finish()` appended it again as a
+-- suffix.
+--
+-- These are two different things with two different audiences. The log is for
+-- an operator asking "what happened, and where did it stop". The output is for
+-- the person who asked for a report and wants the report. Neither is served by
+-- being concatenated with the other.
+--
+-- MEDIUMTEXT, matching `log`: a report is prose and can be long, and a column
+-- that silently truncates the deliverable would be worse than not having one.
+-- NULL means "this run produced no document", which is the honest state for
+-- every job that restarts a service — not every run has an output, and an
+-- empty string would claim it produced one.
+--
+-- Existing rows are left NULL rather than back-filled by splitting the old
+-- log. Guessing where the trace ends and the report begins across thousands of
+-- historical runs would silently mangle some of them, and a wrong answer in
+-- history is worse than an honest gap: those runs render exactly as they
+-- always have, from `log`.
+-- ============================================================
+
+ALTER TABLE runs
+    ADD COLUMN output MEDIUMTEXT NULL AFTER log;

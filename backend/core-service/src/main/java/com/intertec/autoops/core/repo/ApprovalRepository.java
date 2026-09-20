@@ -16,6 +16,10 @@ public interface ApprovalRepository extends JpaRepository<Approval, Long> {
 
     List<Approval> findTop200ByTenantIdAndProjectIdOrderByCreatedAtDesc(String tenantId, Long projectId);
 
+    /** Windowed, for the platform timeline — the same shape RunRepository uses. */
+    List<Approval> findTop200ByTenantIdAndProjectIdAndCreatedAtGreaterThanEqualOrderByCreatedAtDesc(
+            String tenantId, Long projectId, java.time.Instant since);
+
     boolean existsByTargetTypeAndTargetIdAndTenantIdAndStatus(
             RunTargetType targetType, Long targetId, String tenantId, ApprovalStatus status);
 

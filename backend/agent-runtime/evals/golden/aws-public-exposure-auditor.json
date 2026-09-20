@@ -1,0 +1,190 @@
+{
+  "name": "Public exposure auditor — three audits in one turn, correlated into a chain",
+  "_why": [
+    "Pins the read-only four-phase shape end to end: TRIAGE decides the work,",
+    "GATHER asks for all three audits in ONE turn and parks, HYPOTHESIZE reasons",
+    "with no tools at all, and REPORT ships with every factual line cited.",
+    "",
+    "The single-turn fan-out is the behaviour worth protecting. The three audits",
+    "are independent, so asking for them one at a time triples the wall-clock of",
+    "a run for no extra information — and a prompt edit that makes the model",
+    "serialise them would otherwise be invisible until someone timed a real run.",
+    "",
+    "It also pins that the run FINISHes with no uncited claims: the report below",
+    "is written the way the persona asks for, and if the evidence heuristic ever",
+    "starts flagging an honest 'could not read' caveat, this fails."
+  ],
+  "agent": {
+    "ref": "aws.public_exposure_auditor",
+    "version": "1.0.0",
+    "model": "claude-sonnet-5",
+    "vendor": "ANTHROPIC"
+  },
+  "tools": [
+    {
+      "name": "workflow_31",
+      "description": "Lists every S3 bucket in the account with its public access block, ACL grants, bucket-policy public status, default encryption and versioning. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Region": { "type": "string", "description": "Region" },
+          "BucketNamePrefix": { "type": "string", "description": "Bucket name prefix" }
+        },
+        "required": ["Region"]
+      },
+      "mutating": false
+    },
+    {
+      "name": "workflow_32",
+      "description": "Finds every security-group rule open to 0.0.0.0/0 or ::/0 in one region, and reports what is actually attached behind each one. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Region": { "type": "string", "description": "Region" },
+          "PortFilter": { "type": "string", "description": "Only these ports" }
+        },
+        "required": ["Region"]
+      },
+      "mutating": false
+    },
+    {
+      "name": "workflow_33",
+      "description": "Reads the account's IAM credential report and reports access-key age, last use, MFA status and console access per principal. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "MaxKeyAgeDays": { "type": "number", "description": "Key age threshold (days)" },
+          "UnusedAfterDays": { "type": "number", "description": "Unused threshold (days)" }
+        },
+        "required": ["MaxKeyAgeDays", "UnusedAfterDays"]
+      },
+      "mutating": false
+    }
+  ],
+  "steps": [
+    {
+      "event": {
+        "kind": "START",
+        "input": "Audit the eu-west-1 account for anything reachable from the internet."
+      },
+      "script": [
+        {
+          "type": "structured",
+          "schema": "TriageOut",
+          "value": {
+            "restated": "Find what in the eu-west-1 account is reachable from the internet, and what an attacker could do once there.",
+            "observations_needed": [
+              "Which buckets are public, and whether a block or a policy makes them so",
+              "Which security-group rules are open to the world, and what is attached behind them",
+              "Which principals hold stale or unused credentials"
+            ],
+            "can_proceed": true,
+            "reason": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "Collecting all three audits together.",
+          "tool_calls": [
+            { "name": "workflow_31", "args": { "Region": "eu-west-1" }, "id": "toolu_s3" },
+            { "name": "workflow_32", "args": { "Region": "eu-west-1" }, "id": "toolu_sg" },
+            {
+              "name": "workflow_33",
+              "args": { "MaxKeyAgeDays": 90, "UnusedAfterDays": 30 },
+              "id": "toolu_iam"
+            }
+          ],
+          "input_tokens": 1180,
+          "output_tokens": 96
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "GATHER",
+        "tool_calls": ["workflow_31", "workflow_32", "workflow_33"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "toolu_s3",
+            "ok": true,
+            "evidence_id": 501,
+            "content": "S3 PUBLIC ACCESS AUDIT\nqueried_from_region=eu-west-1 buckets_examined=6\n\nbucket=customer-invoices region=eu-west-1 public_access_block=ABSENT acl_public=no policy_public=YES encryption=AES256 versioning=Enabled\nbucket=app-logs region=eu-west-1 public_access_block=all4 acl_public=no policy_public=no-policy encryption=unreadable(AccessDenied) versioning=Disabled\n\nSUMMARY\nbuckets_total=6\nbuckets_public_via_acl_or_policy=1 ['customer-invoices']\nbuckets_without_full_public_access_block=1 ['customer-invoices']\nbuckets_unencrypted=0 []\nchecks_denied_or_failed=['unreadable(AccessDenied)']"
+          },
+          {
+            "call_id": "toolu_sg",
+            "ok": true,
+            "evidence_id": 502,
+            "content": "SECURITY GROUP INGRESS AUDIT\nregion=eu-west-1 security_groups_examined=14\n\ngroup_id=sg-0f1e2d3c4b5a69780 group_name=bastion vpc=vpc-1 protocol=tcp ports=22 open_to=0.0.0.0/0 notorious_ports_opened=22(SSH) attached_to_count=1 attached_to=interface/ELB app/prod-lb public_ip=203.0.113.10\ngroup_id=sg-0aaabbbccc111222 group_name=legacy-db vpc=vpc-1 protocol=tcp ports=3306 open_to=0.0.0.0/0 notorious_ports_opened=3306(MySQL) attached_to_count=0 attached_to=nothing\n\nSUMMARY\nworld_open_rules_total=2\nworld_open_rules_with_something_behind_them=1\nworld_open_rules_on_notorious_ports_with_something_behind_them=1 ['sg-0f1e2d3c4b5a69780']\nworld_open_rules_on_groups_attached_to_nothing=1 ['sg-0aaabbbccc111222']"
+          },
+          {
+            "call_id": "toolu_iam",
+            "ok": true,
+            "evidence_id": 503,
+            "content": "IAM CREDENTIAL HYGIENE AUDIT\nprincipals_examined=9 key_age_threshold_days=90 unused_threshold_days=30\n\nuser=deploy-bot mfa=NO console_password=no key1_age_days=412 key1_last_used_days=NEVER key1_last_used_service=n/a\nuser=alice mfa=NO console_password=enabled password_last_used_days=2\n\nSUMMARY\nprincipals_total=9\nusers_with_a_key_older_than_threshold=1 ['deploy-bot']\nusers_with_an_old_key_that_is_also_unused=1 ['deploy-bot']\nusers_with_console_access_and_no_mfa=1 ['alice']\nroot_account mfa=yes has_active_keys=no"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "All three audits returned. I have what I need.",
+          "input_tokens": 2400,
+          "output_tokens": 18
+        },
+        {
+          "type": "structured",
+          "schema": "HypothesisOut",
+          "value": {
+            "findings": [
+              {
+                "summary": "customer-invoices is readable by the internet: its bucket policy grants public access and no public access block is in force to override it.",
+                "severity": "critical",
+                "cites": [501]
+              },
+              {
+                "summary": "sg-0f1e2d3c4b5a69780 opens SSH to the whole internet and has a live internet-facing load balancer attached.",
+                "severity": "critical",
+                "cites": [502]
+              },
+              {
+                "summary": "deploy-bot holds an access key 412 days old that has never been used — the cheapest item here to remove, because nothing depends on it.",
+                "severity": "warning",
+                "cites": [503]
+              },
+              {
+                "summary": "sg-0aaabbbccc111222 opens MySQL to the world but is attached to nothing, so it is housekeeping rather than an exposure.",
+                "severity": "info",
+                "cites": [502]
+              }
+            ],
+            "need_more": false,
+            "collect": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "**One bucket is readable by the internet, and the account holds a credential that would let an attacker keep moving.**\n\n- `customer-invoices` is public: its bucket policy grants public access, and its public access block is ABSENT so nothing overrides that grant [e:501].\n- Security group `sg-0f1e2d3c4b5a69780` opens SSH to the whole internet and has an internet-facing load balancer attached [e:502].\n- The IAM user `deploy-bot` holds an access key 412 days old that has never been used [e:503].\n\nThe chain that matters: the open SSH rule is a way in, and `deploy-bot`'s unused key is a credential that would survive a password reset.\n\nDo first:\n\n- Remove `deploy-bot`'s access key. Nothing has ever called it, so removing it breaks nothing.\n- Put the public access block back on `customer-invoices`, then take the public statement out of its bucket policy. Both are needed; either alone leaves the grant in place.\n\nLower priority: `sg-0aaabbbccc111222` opens MySQL to the world but is attached to nothing, so it is tidying rather than exposure [e:502].\n\nNot checked: the encryption configuration on one bucket could not be read, so its encryption state is unknown.",
+          "input_tokens": 3100,
+          "output_tokens": 280
+        }
+      ],
+      "expect": {
+        "directive": "FINISH",
+        "phase": "DONE",
+        "tool_calls": [],
+        "citations": [501, 502, 503],
+        "has_uncited": false,
+        "output_contains": [
+          "customer-invoices",
+          "sg-0f1e2d3c4b5a69780",
+          "deploy-bot",
+          "attached to nothing"
+        ]
+      }
+    }
+  ]
+}

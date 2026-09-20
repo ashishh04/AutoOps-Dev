@@ -33,7 +33,23 @@ const TABS = [
 const STEP_TYPES = [
   { id: "agent", label: "Agent Command", icon: "robot", category: "AI Agent" },
   { id: "command", label: "Command", icon: "terminal", category: "System" },
+  // Runs a script this workspace holds in its library, by reference. The body
+  // is never copied into the job: core-service resolves the reference when the
+  // run is queued, so the job always runs the current script and the run's
+  // snapshot records exactly which one it was.
+  {
+    id: "library",
+    label: "Library Script",
+    icon: "book",
+    category: "Scripting",
+  },
   { id: "script", label: "Script", icon: "doc", category: "Scripting" },
+  {
+    id: "powershell",
+    label: "PowerShell",
+    icon: "terminal",
+    category: "Scripting",
+  },
   {
     id: "pyscript",
     label: "Python Script",
@@ -81,6 +97,7 @@ const STEP_HINTS = {
   command: "Shell command, e.g.  df -h && systemctl status app",
   agent: "Command run on the job agent, e.g.  uptime",
   script: "Multi-line shell script…",
+  powershell: "PowerShell (pwsh). Cross-platform modules — AWS.Tools, Az, PowerCLI, Microsoft.Graph — are available.",
   pyscript: "Python code…  print('hello')",
   ssh: "user@host command, e.g.  deploy@10.0.0.5 systemctl restart app",
   rest: "URL or METHOD URL, e.g.  POST https://api.example.com/deploy",
@@ -101,6 +118,12 @@ export default function CreateJob() {
   const b = `/app/projects/${pid}`;
 
   const [tab, setTab] = useState("Details");
+  // The scripts this workspace owns — what a "Library Script" step can point
+  // at. Catalog rows are deliberately absent: a reference resolves against
+  // owned rows only, so offering one here would produce a step that fails at
+  // run time with "not in this workspace". Import it first.
+  const [scripts, setScripts] = useState([]);
+  const [scriptsError, setScriptsError] = useState(null);
   const [name, setName] = useState("");
   const [group, setGroup] = useState("");
   const [description, setDescription] = useState("");
@@ -159,6 +182,33 @@ export default function CreateJob() {
       });
     }
   }, [jid, isEdit, pushToast]);
+
+  useEffect(() => {
+    // Scripts this workspace owns — authored here, or imported from the
+    // catalog and adapted. Failure is quiet: the picker below shows an empty
+    // state that points at the library, which is more useful than a toast
+    // about a list the author may not even be about to use.
+    api
+      .listLibrary()
+      .then((rows) =>
+        setScripts(
+          // Lower-cased before comparing: the API serialises the enum with
+          // `name().toLowerCase()`, so this arrives as "script". Comparing
+          // against "SCRIPT" matched nothing and every workspace looked empty
+          // however many scripts it owned.
+          (rows || []).filter(
+            (r) => r.owned && String(r.type).toLowerCase() === "script",
+          ),
+        ),
+      )
+      .catch((e) => {
+        // Not silent. The picker's empty state says "import one from the
+        // library", which is a lie when the list simply failed to load — and
+        // it sends the author off to fix a problem they do not have.
+        setScripts([]);
+        setScriptsError(e.message || "Could not load your scripts");
+      });
+  }, []);
 
   useEffect(() => {
     // The workspace's installed alert channels, for the Notifications tab.
@@ -513,12 +563,101 @@ export default function CreateJob() {
                           </button>
                         </div>
                         <div className="ml-9 mr-1 space-y-2">
-                          {["script", "pyscript", "terraform", "kubernetes", "awslambda", "azurefn"].includes(st.id) ? (
+                          {st.id === "library" ? (
+                            // A reference, not a body. The script stays in the
+                            // library and this step names it; core-service
+                            // resolves it when the run is queued.
+                            scriptsError ? (
+                              <p className="rounded-md border border-dashed border-red-200 bg-red-50 px-3 py-2.5 text-[11px] leading-relaxed text-red-800">
+                                Could not load your scripts — {scriptsError}.
+                                This is not the same as having none; reload the
+                                page rather than importing anything.
+                              </p>
+                            ) : scripts.length === 0 ? (
+                              <p className="rounded-md border border-dashed border-amber-200 bg-amber-50 px-3 py-2.5 text-[11px] leading-relaxed text-amber-800">
+                                This workspace has no scripts yet. Import one
+                                from the{" "}
+                                <Link
+                                  to="/app/library"
+                                  className="font-medium underline"
+                                >
+                                  library
+                                </Link>{" "}
+                                — or write your own — and it will appear here.
+                              </p>
+                            ) : (
+                              <>
+                                <select
+                                  aria-label="Library script"
+                                  value={st.libraryItemId || ""}
+                                  onChange={(e) => {
+                                    const id = e.target.value;
+                                    const picked = scripts.find(
+                                      (x) => String(x.id) === id,
+                                    );
+                                    updateStepField(
+                                      st.key,
+                                      "libraryItemId",
+                                      id ? Number(id) : undefined,
+                                    );
+                                    // Name the step after the script unless the
+                                    // author has already renamed it themselves.
+                                    if (picked && !st.labelEdited) {
+                                      updateStepField(
+                                        st.key,
+                                        "label",
+                                        picked.title,
+                                      );
+                                    }
+                                  }}
+                                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-800 outline-none focus:border-slate-300 focus:ring-1 focus:ring-slate-300"
+                                >
+                                  <option value="">Choose a script…</option>
+                                  {scripts.map((sc) => (
+                                    <option key={sc.id} value={sc.id}>
+                                      {sc.category} — {sc.title}
+                                    </option>
+                                  ))}
+                                </select>
+                                {st.libraryItemId ? (
+                                  // Library scripts are param() scripts — 119 of
+                                  // the catalog's 213 declare a mandatory
+                                  // parameter, and pwsh runs -NonInteractive, so
+                                  // a missing one fails the step rather than
+                                  // prompting.
+                                  <>
+                                    <input
+                                      type="text"
+                                      aria-label="Script arguments"
+                                      placeholder="Arguments, e.g.  -Endpoint example.com -WarnDays 30"
+                                      value={st.args || ""}
+                                      onChange={(e) =>
+                                        updateStepField(st.key, "args", e.target.value)
+                                      }
+                                      className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm font-mono text-slate-800 outline-none focus:border-slate-300 focus:ring-1 focus:ring-slate-300"
+                                    />
+                                    <p className="text-[11px] leading-relaxed text-slate-500">
+                                      Passed to the script as parameters. Quote a
+                                      value containing spaces. Job inputs written
+                                      as <code>{"{{Name}}"}</code> are substituted
+                                      before the run starts.
+                                    </p>
+                                  </>
+                                ) : (
+                                  <p className="text-[11px] text-slate-500">
+                                    A step with no script chosen stops the run
+                                    before anything executes, rather than being
+                                    skipped.
+                                  </p>
+                                )}
+                              </>
+                            )
+                          ) : ["script", "powershell", "pyscript", "terraform", "kubernetes", "awslambda", "azurefn"].includes(st.id) ? (
                             <textarea
                               placeholder={STEP_HINTS[st.id] || `Enter ${st.label.toLowerCase()}...`}
                               value={st.value || ""}
                               onChange={(e) => updateStepValue(st.key, e.target.value)}
-                              rows={st.id === "terraform" || st.id === "kubernetes" ? 5 : 3}
+                              rows={["terraform", "kubernetes", "powershell"].includes(st.id) ? 6 : 3}
                               className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm font-mono text-slate-800 outline-none focus:border-slate-300 focus:ring-1 focus:ring-slate-300"
                             />
                           ) : (

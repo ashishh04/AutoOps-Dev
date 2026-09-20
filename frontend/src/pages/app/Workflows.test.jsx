@@ -2,10 +2,12 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Running a provider-authored workflow is a two-step conversation: the console
-// asks the workflow what it needs, then asks the person. The workflow declares
-// its own form (Dify's start-node variables), so the console cannot know
-// whether to show a dialog until it has asked.
+// Running a provider-authored workflow is a three-step conversation: the
+// console asks whether this WORKSPACE can run it at all, then asks the workflow
+// what it needs, then asks the person. The readiness step exists because a
+// rolled-out workflow was built against the PROVIDER'S workspace — different AI
+// connections, different jobs — and discovering that by pressing Run reads as
+// "this automation is broken" rather than "it is not set up yet".
 
 const storeState = { can: () => true, pushToast: vi.fn() };
 vi.mock("../../store/store", async () => {
@@ -24,7 +26,12 @@ vi.mock("../../lib/useCollection", () => ({
   useCollection: () => ({ rows, loading: false, error: null, reload }),
 }));
 
-const apiMock = { workflowInputs: vi.fn(), runWorkflow: vi.fn(), setWorkflowEnabled: vi.fn() };
+const apiMock = {
+  workflowReadiness: vi.fn(),
+  workflowInputs: vi.fn(),
+  runWorkflow: vi.fn(),
+  setWorkflowEnabled: vi.fn(),
+};
 vi.mock("../../lib/api", () => ({ api: apiMock }));
 
 const { default: Workflows } = await import("./Workflows");
@@ -53,12 +60,69 @@ beforeEach(() => {
   storeState.pushToast.mockClear();
   storeState.can = () => true;
   reload.mockClear();
+  // Readiness is asked FIRST on every run, before the input dialog. Ready by
+  // default here; the blocked path has its own cases below.
+  apiMock.workflowReadiness.mockReset().mockResolvedValue({ ready: true, blockers: [] });
   apiMock.workflowInputs.mockReset();
   apiMock.runWorkflow.mockReset().mockResolvedValue({ id: 7 });
   rows = [workflow()];
 });
 
 describe("running a rolled-out workflow", () => {
+  it("still runs when the readiness check itself is unreachable", async () => {
+    // Readiness improves the MESSAGE; it is not a gate. Letting it throw made
+    // an unroutable endpoint block every workflow in the product — a far worse
+    // failure than a run that starts and then explains itself.
+    apiMock.workflowReadiness.mockRejectedValue(new Error("404 not found"));
+    apiMock.workflowInputs.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Run$/ }));
+
+    await waitFor(() => expect(apiMock.runWorkflow).toHaveBeenCalled());
+    expect(screen.queryByText(/Before you can run/)).not.toBeInTheDocument();
+  });
+
+  it("says what is missing instead of starting a run that would fail", async () => {
+    apiMock.workflowReadiness.mockResolvedValue({
+      ready: false,
+      blockers: [{
+        kind: "model_not_set",
+        title: "Choose an AI model",
+        detail: "This workspace has not chosen a default AI model.",
+        action: "Open AI Providers",
+        href: "/app/settings/ai-providers",
+      }],
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Run$/ }));
+
+    expect(await screen.findByText(/Before you can run/)).toBeInTheDocument();
+    expect(screen.getByText("Choose an AI model")).toBeInTheDocument();
+    // Actionable: the screen that fixes it, not just the complaint.
+    expect(screen.getByRole("link", { name: /Open AI Providers/ }))
+      .toHaveAttribute("href", "/app/settings/ai-providers");
+    // Nothing was started, and no form was asked for.
+    expect(apiMock.runWorkflow).not.toHaveBeenCalled();
+    expect(apiMock.workflowInputs).not.toHaveBeenCalled();
+  });
+
+  it("checks readiness before asking the person for anything", async () => {
+    // Order matters: filling in a form and THEN being told the workspace
+    // cannot run it wastes the person's time and reads as a broken automation.
+    apiMock.workflowReadiness.mockResolvedValue({ ready: false, blockers: [] });
+    apiMock.workflowInputs.mockResolvedValue([
+      { variable: "host", label: "Host", type: "text", required: true },
+    ]);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Run$/ }));
+
+    await screen.findByText(/Before you can run/);
+    expect(apiMock.workflowInputs).not.toHaveBeenCalled();
+  });
+
   it("runs straight away when the workflow asks for nothing", async () => {
     apiMock.workflowInputs.mockResolvedValueOnce([]);
     renderPage();
@@ -133,13 +197,13 @@ describe("running a rolled-out workflow", () => {
   });
 
   it("surfaces a failure to read the input schema", async () => {
-    apiMock.workflowInputs.mockRejectedValueOnce(new Error("Dify is unreachable"));
+    apiMock.workflowInputs.mockRejectedValueOnce(new Error("the workflow runtime is unreachable"));
     renderPage();
 
     fireEvent.click(screen.getByText("Run"));
 
     await waitFor(() =>
-      expect(storeState.pushToast).toHaveBeenCalledWith("Dify is unreachable", "red"),
+      expect(storeState.pushToast).toHaveBeenCalledWith("the workflow runtime is unreachable", "red"),
     );
     expect(apiMock.runWorkflow).not.toHaveBeenCalled();
   });

@@ -23,6 +23,20 @@ import { fmtDate } from "../../lib/format";
  * crucially — the full tool allow-list bounding what it may touch, and holds
  * the kill switch. It cannot rewrite the persona, and the server would refuse
  * if it tried.
+ *
+ * <p><b>Why this page exists again.</b> It was deleted when every agent in the
+ * catalog wrapped exactly ONE workflow: the same automation was then listed
+ * twice under two names, and a customer had to learn which of the two to press.
+ * The note left behind in AppLayout said the surface comes back "when an agent
+ * is something a workflow is not: several tools, a phase graph, a decision
+ * worth a model making". That is now true — the shipped agents correlate two or
+ * three automations across a phase graph, and the judgement between them is the
+ * product.
+ *
+ * <p>It is also now the ONLY place they can appear. An agent's tool workflows
+ * are delivered as sealed components and are deliberately absent from the
+ * Workflows list, so without this page a customer who has been rolled out an
+ * agent sees nothing at all.
  */
 export default function AgentsHub() {
   const { pid } = useParams();

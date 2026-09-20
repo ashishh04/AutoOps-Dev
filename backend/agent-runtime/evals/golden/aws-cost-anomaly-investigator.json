@@ -1,0 +1,169 @@
+{
+  "name": "Cost anomaly investigator — attributes what it can and names the gap",
+  "_why": [
+    "The behaviour this agent exists for is the sentence most cost tooling will",
+    "not write: 'the idle volumes account for about half of the increase, and",
+    "the rest is not explained by anything these two checks can see'.",
+    "",
+    "An investigator that closes that gap with a confident attribution gets",
+    "somebody to delete the wrong thing, so the report below is pinned for",
+    "saying so out loud. It is also pinned for quoting the automation's own",
+    "arithmetic rather than re-deriving it, and for carrying the basis with",
+    "every cost estimate — 'published us-east-1 list prices', not the",
+    "customer's negotiated rate."
+  ],
+  "agent": {
+    "ref": "aws.cost_anomaly_investigator",
+    "version": "1.0.0",
+    "model": "claude-sonnet-5",
+    "vendor": "ANTHROPIC"
+  },
+  "tools": [
+    {
+      "name": "workflow_41",
+      "description": "Compares account spend per AWS service across two consecutive windows and ranks services by how much they MOVED. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "WindowDays": { "type": "number", "description": "Window length (days)" },
+          "CostMetric": {
+            "type": "string",
+            "enum": ["UnblendedCost", "AmortizedCost", "NetUnblendedCost"],
+            "description": "Cost metric"
+          }
+        },
+        "required": ["WindowDays", "CostMetric"]
+      },
+      "mutating": false
+    },
+    {
+      "name": "workflow_42",
+      "description": "Lists unattached EBS volumes, unassociated elastic IPs and stopped instances in one region, with age, tags and an indicative monthly cost per item. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Region": { "type": "string", "description": "Region" },
+          "MinimumAgeDays": { "type": "number", "description": "Minimum age (days)" }
+        },
+        "required": ["Region", "MinimumAgeDays"]
+      },
+      "mutating": false
+    }
+  ],
+  "steps": [
+    {
+      "event": {
+        "kind": "START",
+        "input": "Our AWS bill jumped this week. Why?"
+      },
+      "script": [
+        {
+          "type": "structured",
+          "schema": "TriageOut",
+          "value": {
+            "restated": "Explain the week-on-week increase in the AWS bill and attribute it to resources where possible.",
+            "observations_needed": [
+              "Per-service spend for this week against last week",
+              "An inventory of idle resources that could account for a storage increase"
+            ],
+            "can_proceed": true,
+            "reason": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "Taking the cost delta and the idle inventory together — neither answers this alone.",
+          "tool_calls": [
+            {
+              "name": "workflow_41",
+              "args": { "WindowDays": 7, "CostMetric": "UnblendedCost" },
+              "id": "toolu_ce"
+            },
+            {
+              "name": "workflow_42",
+              "args": { "Region": "us-east-1", "MinimumAgeDays": 7 },
+              "id": "toolu_idle"
+            }
+          ],
+          "input_tokens": 1090,
+          "output_tokens": 72
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "GATHER",
+        "tool_calls": ["workflow_41", "workflow_42"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "toolu_ce",
+            "ok": true,
+            "evidence_id": 601,
+            "content": "COST EXPLORER SERVICE DELTA\nmetric=UnblendedCost currency=USD\nrecent_window=2026-09-12..2026-09-19 prior_window=2026-09-05..2026-09-12 (each 7 days, end date exclusive)\nnote=the most recent day or two of Cost Explorer data are estimates and settle later\n\nservice=EC2 - Other recent=592.60 prior=410.20 delta=+182.40 change=+44.5%\nservice=Amazon Bedrock recent=74.10 prior=0.00 delta=+74.10 change=new\nservice=Amazon EC2 recent=1189.30 prior=1204.80 delta=-15.50 change=-1.3%\n\nSUMMARY\nrecent_total=1856.00 prior_total=1615.00 delta=+241.00 change=+14.9%\nservices_up=2 services_down=1\nlargest_increases=['EC2 - Other +182.40', 'Amazon Bedrock +74.10']\nthose_three_explain=256.50 of the +241.00 movement"
+          },
+          {
+            "call_id": "toolu_idle",
+            "ok": true,
+            "evidence_id": 602,
+            "content": "IDLE RESOURCE INVENTORY\nregion=us-east-1 minimum_age_days=7\ncost_estimate_basis=published us-east-1 list prices; indicative only, not billing data\n\nSUMMARY\nunattached_volumes=38 total_gb=3410 est_monthly_usd_list_price=92.40\nunassociated_eips=4 est_monthly_usd_list_price=14.40\nstopped_instances=6 (the instances are free; their attached disks are not)\ncombined_est_monthly_usd_list_price=106.80"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "Both returned. I can attribute part of the movement and not all of it.",
+          "input_tokens": 2250,
+          "output_tokens": 20
+        },
+        {
+          "type": "structured",
+          "schema": "HypothesisOut",
+          "value": {
+            "findings": [
+              {
+                "summary": "EC2 - Other rose 182.40 week on week, which is the largest single movement on the bill.",
+                "severity": "warning",
+                "cites": [601]
+              },
+              {
+                "summary": "The 38 unattached volumes are a standing cost of roughly 92.40 a month at list price — about half the EC2-Other increase, and not enough to explain it on their own.",
+                "severity": "warning",
+                "cites": [601, 602]
+              },
+              {
+                "summary": "Amazon Bedrock is entirely new spend: nothing in the prior window, 74.10 in this one. That is a change somebody made, not waste.",
+                "severity": "info",
+                "cites": [601]
+              }
+            ],
+            "need_more": false,
+            "collect": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "**EC2-Other is what moved the bill, and the idle volumes explain about half of it [e:601].**\n\n| Service | Prior | Recent | Change |\n| --- | --- | --- | --- |\n| EC2 - Other | 410.20 | 592.60 | +182.40 [e:601] |\n| Amazon Bedrock | 0.00 | 74.10 | new [e:601] |\n| Amazon EC2 | 1204.80 | 1189.30 | -15.50 [e:601] |\n\nAccount spend went from 1615.00 to 1856.00, a movement of +241.00 [e:601].\n\nWhat the inventory accounts for:\n\n- 38 unattached EBS volumes, 3,410 GB in total, at roughly 92.40 a month on published us-east-1 list prices [e:602].\n- That is about half the EC2-Other increase. The rest is not explained by anything these two checks can see — EC2-Other also carries snapshots, NAT gateway data processing and provisioned IOPS, and neither tool breaks those out.\n\nAmazon Bedrock is new spend rather than waste: it was not billed at all in the prior window and is 74.10 in this one [e:601]. Somebody turned it on, and they will know why.\n\nSmall items, aggregated: 4 unassociated elastic IPs at about 14.40 a month between them [e:602]. Worth reclaiming alongside something else; not worth a change window of their own.\n\nOne caveat on the figures: the last day or two of Cost Explorer data are estimates that settle later, and the inventory's costs are list prices rather than your negotiated rate.\n\nNext step: the unattached volumes are a standing cost rather than the cause of this week's movement, so reclaiming them will not reverse it. To close the unexplained remainder you would need spend grouped by usage type rather than by service, which is not something these two automations produce.",
+          "input_tokens": 3050,
+          "output_tokens": 360
+        }
+      ],
+      "expect": {
+        "directive": "FINISH",
+        "phase": "DONE",
+        "tool_calls": [],
+        "citations": [601, 602],
+        "has_uncited": false,
+        "output_contains": [
+          "not explained by anything these two checks can see",
+          "list prices rather than your negotiated rate",
+          "grouped by usage type"
+        ]
+      }
+    }
+  ]
+}

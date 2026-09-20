@@ -78,13 +78,13 @@ public class AutomationClient {
         }
     }
 
-    /** One field of a Dify workflow's published input form. */
+    /** One field of a workflow's published input form. */
     public record InputField(String variable, String label, String type, boolean required,
                              List<String> options) {
     }
 
     /**
-     * @param error non-null when the workflow's Dify key is missing or
+     * @param error non-null when the workflow's form could not be read —
      *              revoked — the tool is then left OUT of the model's list
      *              rather than offered and failing on first use
      */
@@ -134,7 +134,7 @@ public class AutomationClient {
      * <p>Unreachable core is reported as an {@code error}, not as an empty
      * form. An empty form means "this workflow takes no arguments", and a
      * model told that about a workflow that actually needs three would call it
-     * with none and get a confusing failure — or worse, a Dify run that
+     * with none and get a confusing failure — or worse, a run that
      * succeeds with every variable unset.
      */
     @SuppressWarnings("unchecked")

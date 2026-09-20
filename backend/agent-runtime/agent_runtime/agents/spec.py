@@ -28,6 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_runtime.app.extraction import SubjectSource
 from agent_runtime.app.state import Phase
 
 
@@ -52,6 +53,18 @@ class ToolRef:
     type: str  # "WORKFLOW" | "JOB"
     ref: str
     mutating: bool = True
+
+    #: Where this tool's output carries subject ids, if it enumerates any.
+    #:
+    #: A TUPLE because one tool can return several lists: ``RD-136`` yields
+    #: unattached volumes, unassociated elastic IPs and stopped instances from a
+    #: single call, and all three are ``cloud_resource``.
+    #:
+    #: Empty is the safe default and the common case — a tool nobody declared
+    #: subjects for contributes none, so the run's scope is narrower than
+    #: reality, which reaps less rather than more. Same failure direction as
+    #: ``mutating`` defaulting to True.
+    subjects: tuple[SubjectSource, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,3 +148,31 @@ class AgentSpec:
     @property
     def version(self) -> str:
         return self.manifest.version
+
+    def declared_subject_kinds(self) -> tuple[str, ...]:
+        """Every subject kind this agent's tools are declared able to enumerate.
+
+        **This, and not what the tools have returned so far, is what a run
+        declares at its start** — and getting that wrong would have failed every
+        correlator.
+
+        ``aws.public_exposure_auditor`` runs the S3 audit, then the security
+        group audit, then IAM. If the declaration were built from results seen so
+        far it would name only ``cloud_resource`` after the first two, the
+        completion would name ``cloud_resource`` and ``principal``, and
+        ``RunScope.checkNarrows`` would reject it — correctly, because a
+        completion may never introduce a kind the run did not set out to cover.
+        The declaration would have been wrong, not the validation.
+
+        Read statically it is honest and available at run start: these are the
+        kinds the run intends to cover, each as ``{"kind":"all"}``, and
+        completion narrows them to what was actually enumerated. Which is also
+        the answer to whether scope declaration can happen at run start — the
+        INTENT can, because it comes from the agent rather than from the estate.
+        """
+        kinds: list[str] = []
+        for tool in self.manifest.tools:
+            for source in tool.subjects:
+                if source.subject_kind not in kinds:
+                    kinds.append(source.subject_kind)
+        return tuple(kinds)

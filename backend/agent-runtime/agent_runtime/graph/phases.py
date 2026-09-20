@@ -72,11 +72,33 @@ class TriageOut(BaseModel):
 
 
 class FindingOut(BaseModel):
-    """One conclusion drawn from the observations, and what it rests on."""
+    """One conclusion drawn from the observations, and what it rests on.
+
+    ``subject_*`` and ``finding_type`` are what make a finding survive across
+    runs: they are hashed into an idempotency key, so tomorrow's run recognises
+    today's finding instead of filing it again. Optional, because a conclusion
+    about the estate as a whole genuinely has no single subject — and a model
+    forced to invent one would produce a key that is stable and wrong.
+    """
 
     summary: str
     severity: Literal["info", "warning", "critical", "unknown"] = "info"
     cites: list[int] = Field(default_factory=list)
+    subject_kind: str = Field(
+        default="",
+        description="What the finding is about: cloud_resource, service, alert_rule, "
+                    "principal, account. Empty when it is about the estate as a whole.",
+    )
+    subject_id: str = Field(
+        default="",
+        description="The identifier of that thing, exactly as the observation gave it — "
+                    "vol-0a1b2c3d, an ARN, a UPN, a bucket name. Never a description.",
+    )
+    finding_type: str = Field(
+        default="",
+        description="A short stable slug for this KIND of finding, reused verbatim across "
+                    "runs: idle_resource, public_bucket, stale_credential, repeated_failure.",
+    )
 
 
 class HypothesisOut(BaseModel):
@@ -358,6 +380,9 @@ def hypothesize(graph_state: GraphState) -> GraphStateUpdate:
         Finding(
             summary=item.summary,
             severity=item.severity,
+            subject_kind=item.subject_kind,
+            subject_id=item.subject_id,
+            finding_type=item.finding_type,
             # An id the run never issued is dropped here rather than carried
             # into the report, where it would have to be caught again.
             cites=[value for value in item.cites if value in known],
@@ -382,7 +407,7 @@ def plan(graph_state: GraphState) -> GraphStateUpdate:
     state.visit(Phase.PLAN)
 
     mutating = [spec for spec in ctx.toolbox.specs if spec.mutating]
-    catalogue = "\n".join(f"- {spec.name}: {spec.description}" for spec in mutating)
+    catalogue = "\n\n".join(_render_tool(spec) for spec in mutating)
 
     result: PlanOut = ctx.structured(
         Phase.PLAN,
@@ -620,6 +645,43 @@ def respond(graph_state: GraphState) -> GraphStateUpdate:
 
 
 # ------------------------------------------------------------ rendering ---
+
+
+def _render_tool(spec) -> str:
+    """One mutating tool, WITH its argument contract.
+
+    This exists because PLAN is the one phase that has to produce arguments
+    without being bound to the tool. GATHER calls tools directly, so every
+    provider sends it the real JSON schema through ``bind_tools`` and the model
+    can see what each one takes. PLAN emits a structured PlanOut instead, and
+    ``gate`` then hands ``action.arguments`` to Java verbatim.
+
+    Given only a name and a description, a model invents plausible argument
+    names — ``region``, ``volumes``, ``dry_run`` — and NativeInputValidator
+    fails closed on an undeclared field. Every gated action would fail on
+    arrival, complaining about a form the model had never been shown. The
+    contract has to travel with the proposal.
+    """
+    schema = spec.input_schema or {}
+    properties = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+
+    lines = [f"- {spec.name}: {spec.description}"]
+    if not properties:
+        lines.append("  arguments: none")
+        return "\n".join(lines)
+
+    lines.append("  arguments:")
+    for name, field in properties.items():
+        parts = [str(field.get("type", "string"))]
+        if field.get("enum"):
+            parts.append("one of " + ", ".join(str(option) for option in field["enum"]))
+        parts.append("required" if name in required else "optional")
+        description = field.get("description") or ""
+        lines.append(
+            f"    {name} ({'; '.join(parts)})" + (f" - {description}" if description else "")
+        )
+    return "\n".join(lines)
 
 
 def _render_findings(state: AgentState) -> str:

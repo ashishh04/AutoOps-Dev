@@ -157,7 +157,7 @@ class AgentToolboxTest {
         assertTrue(description.contains("takes no arguments"));
     }
 
-    /** A Dify workflow's published form becomes the tool's arguments. */
+    /** A workflow's published form becomes the tool's arguments. */
     @Test
     void exposesAWorkflowsInputFormAsTheToolSchema() {
         when(toolTargets.findWorkflow(TENANT, 3L))
@@ -182,12 +182,12 @@ class AgentToolboxTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> region = (Map<String, Object>) properties.get("region");
         // A select's options ARE the contract; stating them beats a failure
-        // inside Dify that the model cannot act on.
+        // inside the engine that the model cannot act on.
         assertEquals(List.of("emea", "apac"), region.get("enum"));
     }
 
     /**
-     * A workflow whose Dify key is missing or revoked is left OUT rather than
+     * A workflow whose form cannot be read is left OUT rather than
      * offered. A tool the model can see is one it will eventually call, and
      * one that fails on every call burns steps and teaches it nothing.
      */
@@ -196,12 +196,12 @@ class AgentToolboxTest {
         when(toolTargets.findWorkflow(TENANT, 3L))
                 .thenReturn(Optional.of(new ToolTargetClient.Target(3L, PROJECT, "Reset password")));
         when(automations.workflowInputs(TENANT, 3L)).thenReturn(
-                new AutomationClient.WorkflowInputs(List.of(), "No Dify key configured"));
+                new AutomationClient.WorkflowInputs(List.of(), "the form could not be read"));
 
         AgentToolbox.Toolbox built = toolbox.build(agent("[{\"type\":\"WORKFLOW\",\"id\":3}]"));
 
         assertTrue(built.isEmpty());
-        assertTrue(built.skipped().getFirst().contains("No Dify key configured"));
+        assertTrue(built.skipped().getFirst().contains("the form could not be read"));
     }
 
     /** Corrupt JSON must leave the agent powerless, not unbounded. */
@@ -246,6 +246,44 @@ class AgentToolboxTest {
 
         assertFalse(built.resolve("workflow_3").mutating());
         assertFalse(built.offered().getFirst().mutating());
+    }
+
+    /**
+     * The catalog ref survives delivery and reaches the runtime.
+     *
+     * <p>The name the model sees is {@code workflow_3} — a tenant-local number.
+     * The runtime needs the ref to match a tool result back to what the agent's
+     * author said that tool returns, and nothing else on the wire carries it.
+     */
+    @Test
+    void theCatalogRefIsCarriedThroughToTheRuntime() {
+        when(toolTargets.findWorkflow(TENANT, 3L))
+                .thenReturn(Optional.of(new ToolTargetClient.Target(3L, PROJECT, "Health check")));
+
+        AgentToolbox.Toolbox built = toolbox.build(agent(
+                "[{\"type\":\"WORKFLOW\",\"id\":3,\"ref\":\"RD-136-idle-resource-inventory\"}]"));
+
+        assertEquals("RD-136-idle-resource-inventory",
+                built.offered().getFirst().spec().ref());
+    }
+
+    /**
+     * An agent rolled out before refs were carried still runs.
+     *
+     * <p>It loses subject extraction, which is the safe way for this to be
+     * wrong: a scope that enumerates nothing reaps nothing. Refusing the tool
+     * instead would break every agent delivered before the field existed.
+     */
+    @Test
+    void aToolWithNoRefIsStillOfferedWithoutOne() {
+        when(toolTargets.findWorkflow(TENANT, 3L))
+                .thenReturn(Optional.of(new ToolTargetClient.Target(3L, PROJECT, "Health check")));
+
+        AgentToolbox.Toolbox built =
+                toolbox.build(agent("[{\"type\":\"WORKFLOW\",\"id\":3}]"));
+
+        assertEquals(1, built.offered().size());
+        assertNull(built.offered().getFirst().spec().ref());
     }
 
     /**

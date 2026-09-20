@@ -57,7 +57,7 @@ autoops:
     loop:
       # How long the agent watches an automation it started before reporting
       # "still running". Must comfortably exceed the longest automation, and
-      # in particular the Dify run timeout in core-service — otherwise the
+      # in particular the workflow run timeout in core-service — otherwise the
       # agent gives up on a workflow that is still going and reports a
       # non-answer for work that then completes.
       tool-timeout: ${AGENT_TOOL_TIMEOUT:25m}

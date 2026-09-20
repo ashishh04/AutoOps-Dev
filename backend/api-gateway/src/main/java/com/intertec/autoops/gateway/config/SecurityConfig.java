@@ -66,6 +66,11 @@ public class SecurityConfig {
                         // Inbound webhook triggers — the unguessable token is
                         // the credential; core-service validates it.
                         .requestMatchers(HttpMethod.POST, "/api/hooks/**").permitAll()
+                        // Inbound alerts from a customer's monitoring tool.
+                        // Datadog has no AutoOps login; the signed X-API-KEY
+                        // token alert-service verifies IS the credential, the
+                        // same arrangement as /api/hooks/** above.
+                        .requestMatchers(HttpMethod.POST, "/api/alerts/ingest/**").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(rs -> rs

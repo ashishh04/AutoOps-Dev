@@ -65,24 +65,25 @@ autoops:
       # that is merely about to fire gets reported as missed.
       missed-after: ${PLUGIN_MISSED_AFTER:10m}
       watchdog-interval: ${PLUGIN_WATCHDOG_INTERVAL:5m}
-    # Dify backs workflow DESIGN and execution. The API key is a workspace
-    # token that can read and delete every app in the workspace, so it lives
-    # here and never reaches a browser — the console goes through
-    # /api/dify/** on this service instead.
-    # Unset is a valid state: the bridge answers 503 naming the missing
-    # setting rather than pretending the feature works.
-    dify:
-      base-url: ${DIFY_BASE_URL:}
-      api-key: ${DIFY_API_KEY:}
-      connect-timeout: ${DIFY_CONNECT_TIMEOUT:3s}
-      # Console reads: listing apps, fetching a form. Short on purpose.
-      read-timeout: ${DIFY_READ_TIMEOUT:30s}
-      # A WORKFLOW RUN, which is a different kind of call entirely. Dify is
-      # invoked in blocking mode, so this has to outlast the whole workflow —
-      # a research workflow with ten LLM nodes runs for many minutes. It was a
-      # hard-coded 10m Java default with no way to raise it; the first real
-      # workflow ran for 8 of those 10 minutes.
-      run-timeout: ${DIFY_RUN_TIMEOUT:20m}
+    # agent-runtime, which executes NATIVE workflow graphs on LangGraph.
+    # The definition travels with the request,
+    # the tenant's own model credentials are resolved here and sent with it,
+    # and the input form is read out of the definition instead of fetched from
+    # a vendor over the network on every list.
+    runtime:
+      base-url: ${AGENT_RUNTIME_URL:http://localhost:8089}
+      internal-token: ${AGENT_RUNTIME_INTERNAL_TOKEN:dev-internal-token}
+      connect-timeout: ${RUNTIME_CONNECT_TIMEOUT:2s}
+      # Bounds the gap BETWEEN node events, not the length of the workflow.
+      # Because the run is streamed there is traffic every few seconds, so a
+      # workflow may run for an hour under this as long as it keeps making
+      # progress. A node silent this long is genuinely stuck.
+      read-timeout: ${RUNTIME_READ_TIMEOUT:5m}
+      # The model a workflow uses when its own definition names none. Empty is
+      # a valid state: a graph with no llm node needs no model at all, and one
+      # that has an llm node and names nothing fails with a message saying so
+      # rather than silently picking a vendor on the tenant's behalf.
+      default-model: ${RUNTIME_DEFAULT_MODEL:}
     subscription:
       base-url: ${SUBSCRIPTION_SERVICE_URL:http://localhost:8082}
       connect-timeout: ${SUBSCRIPTION_CONNECT_TIMEOUT:2s}

@@ -30,6 +30,7 @@ The container also needs an init process (`init: true` in compose, `docker run -
 | `command`, `agent` | One-line shell command in this container (bash) | `echo hello && df -h` |
 | `script` | Multi-line shell script (temp file, bash/sh) | full script body |
 | `pyscript` | Python script (python3 in the image) | full script body |
+| `powershell` (alias `pwsh`) | PowerShell Core script. Runs the cross-platform modules — AWS.Tools, Az, PowerCLI, Microsoft.Graph, SqlServer. Does **not** run Windows-only cmdlets (`Get-ADUser`, the Exchange shell): those need a real Windows host over WinRM, which is a transport, not a missing module. Cloud credentials arrive as env vars, so `Connect-AzAccount` and AWS.Tools authenticate without further setup | full script body |
 | `ssh` | Command on a remote host via the system ssh client (BatchMode — key auth only; keys must be mounted at `/home/autoops/.ssh`, which the compose stack does **not** do yet — see Known gaps) | `user@host systemctl restart app` |
 | `rest` | HTTP call (2xx/3xx = success; status+body in the log) | `https://api.x.com/health` or `POST https://api.x.com/deploy` + body on next lines |
 | `terraform` | Real `init` + `plan\|apply\|destroy` (step's `action`, default apply) in a scratch workspace, via OpenTofu (Terraform-CLI-compatible). Credentials from the tenant's AWS/Azure/GCP integration are injected as provider env vars (`AWS_*`, `ARM_*`, `GOOGLE_*`); provider-free configs run without any | HCL — the `main.tf` content |
@@ -37,6 +38,63 @@ The container also needs an init process (`init: true` in compose, `docker run -
 | `awslambda` (alias `lambda`) | Real Lambda **Invoke** call, SigV4-signed with the tenant's AWS integration (no SDK). Region from the step's `region`, the ARN, or the integration; the function's CloudWatch log tail lands in the run log. Optional step fields: `invocationType` (`Event` = async), `qualifier` (alias/version), `endpoint` (LocalStack-style override) | `my-function` or a full ARN on line 1, JSON payload on the lines after |
 | `azurefn` (alias `azurefunction`) | Real HTTP-trigger call. Method defaults to POST with a body, GET without; the key comes from the AZURE integration's `functionKey` or a `?code=` already in the URL (anonymous functions need neither, and a `?code=` is masked in the log) | `https://app.azurewebsites.net/api/Fn` or `POST <url>` on line 1, JSON body after |
 | `test` | Always succeeds, echoes its value | anything |
+
+### Library scripts and the layout they expect
+
+A step that carries a `scriptPath` (core-service sets one when the step is a
+reference to a library script — see `LibraryStepResolver`) is not written to a
+flat temp file. It is written **at that path inside the step's workspace**, and
+the shared library tree is placed beside it:
+
+```
+<workspace>/
+  Scripts/<Category>/<Title>.ps1     the step's body
+  Modules/IT-Automation-Common.psm1  copied from /opt/autoops/library
+  Config/config.sample.json
+```
+
+This exists because every one of the catalog's 213 PowerShell automations opens
+with `Import-Module (Join-Path $PSScriptRoot '..\..\Modules\IT-Automation-Common.psm1')`
+— a repository layout that existed on the author's machine and nowhere in this
+platform. Written flat, each script failed on its **first statement**: pwsh
+installed, runner correct, automation logic never reached.
+
+The layout alone is not sufficient, because on Linux a backslash is an ordinary
+filename character rather than a separator, so that `Join-Path` produces one
+absurd filename however the directories are arranged. `ScriptLayout.modulePreamble()`
+handles that in the session instead of rewriting the script text: it wraps
+`Import-Module` so a path that fails is retried by the module's base name,
+resolved out of the workspace's own `Modules/`. A module that genuinely does not
+exist still fails — the fallback is a retry, not a swallow.
+
+The script itself is written **byte-for-byte as authored** and a separate
+`autoops-run.ps1` launcher invokes it. Setup cannot be prepended to the body: a
+`param()` block and its `[CmdletBinding()]` / `[OutputType()]` attributes must be
+the first statement in a PowerShell file, so anything above them fails at PARSE
+time with `Unexpected attribute 'OutputType'`. 119 of the catalog's 213 scripts
+are `param()` scripts, so this is most of the library, not an edge case.
+
+The launcher also carries the step's **arguments**. Those scripts take
+parameters and `-NonInteractive` turns a missing mandatory one into an immediate
+failure rather than a prompt — a step that could not pass arguments could not run
+a single catalog script. A step's `args` string is tokenized by `ArgumentLine`
+and appended after `-File <path>`; `ProcessSupport` execs an argv array, so there
+is no shell to inject into.
+
+The tree is **copied per step, never mounted**. A shared module directory would
+be a channel between two tenants' steps, and a writable one would let a step
+rewrite what the next step imports.
+
+`AUTOOPS_DATA_ROOT` points the module's logs, approval artifacts and reports at
+the step's own workspace, so they die with the step. Its Windows default
+(`%ProgramData%`) is both absent here and shared — wrong twice.
+
+**Not provisioned: a populated `Config/config.json`.** `Get-AutomationConfig`
+throws without one, and roughly 116 of the catalog's scripts treat that as
+fatal (the other 93 catch it and continue, because they only read). Shipping a
+placeholder would make those scripts run against invented SMTP relays and ITSM
+endpoints, which is worse than a clear refusal. Generating it per run from the
+tenant's real notification channels and connections is the next piece of work.
 
 **Credential flow**: credentials live AES-GCM-encrypted in core-service (`CLOUD_CRED_KEY`); core-service resolves the step's integration (step's optional `connection` name, else the tenant's single match — ambiguity is an error), decrypts, and sends the bundle with the execute call over the internal network. Nothing is persisted here; scratch files are deleted after each step.
 
@@ -71,6 +129,33 @@ Platforms with no live check report `supported=false` rather than pretending. co
 ## Known gaps
 
 - **`ssh` steps have no key material.** The runner is complete, but no key is mounted and there is no SSH credential type in core-service (unlike AWS/Azure/GCP/KUBERNETES), so an `ssh` step fails with exit 255. Note that the sandbox makes a mounted key harder, not easier: each step has its own `HOME` and its own uid, so a key at `/home/autoops/.ssh` is neither found nor readable. The fix is an SSH credential type that arrives in the credential bundle like every other platform, written into the step's own workspace — not a mount.
+- **The script library has no per-tenant configuration.** `Config/config.json` is
+  not generated, so the ~116 catalog scripts that require `Get-AutomationConfig`
+  fail with the module's own "copy config.sample.json and populate it" message.
+  The data the file needs (SMTP relay, Teams webhook, ITSM endpoint, protected
+  object lists) already exists in core-service as notification channels,
+  secrets and governance policies; wiring those into a per-run config file is
+  the remaining step. A placeholder file is deliberately NOT shipped.
+- **No cloud PowerShell modules are installed.** The image ships `pwsh` but not
+  `Az.*`, `Microsoft.Graph.*`, `AWS.Tools.*`, `VMware.PowerCLI` or
+  `ExchangeOnlineManagement`, and `#Requires -Modules X` fails a script BEFORE
+  its first statement. Measured against the catalog: **35** scripts need no
+  module and run today, **154** need modules that are installable on Linux, and
+  **24** need Windows-only ones. Installing the first group is the single
+  highest-leverage change left — `Az.Accounts` (49 scripts),
+  `Microsoft.Graph.Authentication` (31), `ExchangeOnlineManagement` (25),
+  `AWS.Tools.Common` (22), `Posh-SSH` (18) and `Az.Compute` (17) cover most of it.
+- **A multi-line `script` (bash) step reports the exit code of its LAST command.**
+  So a step whose first command fails and whose last succeeds is recorded as
+  SUCCEEDED. That is ordinary shell behaviour, but it is the exact failure mode
+  `PowerShellRunner` goes out of its way to prevent for pwsh, and the same
+  reasoning was never applied here. Prepending `set -euo pipefail` would fix it
+  and would change the behaviour of existing customer scripts, so it is called
+  out rather than done silently.
+- **Windows-only PowerShell still cannot run.** `Get-ADUser`, the Exchange
+  management shell and most Windows Server cmdlets need a Windows host over
+  WinRM. That is the same missing transport as `ssh` above, and it bounds which
+  slice of the catalog is reachable today.
 - **Steps have no CPU or memory ceiling.** The compose entry sets no `cpus`/`mem_limit`, so one runaway step can starve the container. Concurrency itself is now bounded by the step-user pool.
 - **The dev token is the default.** Compose falls back to `dev-internal-token` and nothing sets `SPRING_PROFILES_ACTIVE=prod`, so `ProdSafetyGuard` never fires locally. Set a real `JOB_INTERNAL_TOKEN` (and the prod profile) anywhere this is more than a laptop.
 

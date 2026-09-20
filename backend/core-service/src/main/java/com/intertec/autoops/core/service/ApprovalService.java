@@ -42,7 +42,7 @@ public class ApprovalService {
     private final RunService runService;
     private final SubscriptionGate gate;
     private final ApprovalSettingsService settings;
-    private final DifyWorkflowService difyWorkflows;
+    private final NativeInputValidator nativeInputs;
     private final ObjectMapper objectMapper;
 
     /** Nullable in slice tests that don't import it; events then go unannounced. */
@@ -54,7 +54,7 @@ public class ApprovalService {
                            RunService runService,
                            SubscriptionGate gate,
                            ApprovalSettingsService settings,
-                           DifyWorkflowService difyWorkflows,
+                           NativeInputValidator nativeInputs,
                            ObjectMapper objectMapper,
                            org.springframework.beans.factory.ObjectProvider<NotificationService> notificationService) {
         this.approvalRepository = approvalRepository;
@@ -63,12 +63,19 @@ public class ApprovalService {
         this.runService = runService;
         this.gate = gate;
         this.settings = settings;
-        this.difyWorkflows = difyWorkflows;
+        this.nativeInputs = nativeInputs;
         this.objectMapper = objectMapper;
         this.notificationService = notificationService.getIfAvailable();
     }
 
     private String writeInputs(Map<String, Object> inputs) {
+        // Null in, null out. The validator returns null for a workflow that
+        // declares no form at all, and serialising that gives the four-character
+        // string "null" — which is not SQL NULL, reads as a value on the row,
+        // and would be handed to the runtime as inputs.
+        if (inputs == null) {
+            return null;
+        }
         try {
             return objectMapper.writeValueAsString(inputs);
         } catch (Exception ex) {
@@ -138,11 +145,12 @@ public class ApprovalService {
                 settings.rules(tenantId)) || ADMIN_ROLE.equals(role)) {
             return null;
         }
-        String slug = difyWorkflows.slugIn(workflow.definition());
-        String inputsJson = null;
-        if (slug != null) {
-            inputsJson = writeInputs(difyWorkflows.validate(slug, inputs));
-        }
+        // Validated and carried onto the approval row. This used to happen
+        // only for vendor-backed workflows, so approving a NATIVE one started
+        // it with `inputs` null — the operator filled in the form, an admin
+        // approved, and the run began with nothing. The form is the contract
+        // whatever engine runs it.
+        String inputsJson = writeInputs(nativeInputs.validate(workflow.definition(), inputs));
         return queueApproval(tenantId, actor, accessToken, RunTargetType.WORKFLOW,
                 workflow.id(), workflow.name(), workflow.projectId(), inputsJson);
     }
@@ -173,9 +181,8 @@ public class ApprovalService {
             // it can still fix it and retry — parking the mistake in a queue
             // and failing on the human who approves it wastes their time and
             // teaches the model nothing.
-            String slug = difyWorkflows.slugIn(workflow.definition());
-            String inputsJson = slug == null
-                    ? null : writeInputs(difyWorkflows.validate(slug, inputs));
+            String inputsJson = writeInputs(nativeInputs.validate(
+                    workflow.definition(), inputs));
             return queueApprovalRow(tenantId, actor, RunTargetType.WORKFLOW, workflow.id(),
                     workflow.name(), workflow.projectId(), inputsJson);
         }

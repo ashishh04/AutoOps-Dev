@@ -40,12 +40,14 @@ jobs:
     name: build / ${{ matrix.service }}
     runs-on: ubuntu-latest
     strategy:
-      # One service failing should not hide the results of the other nine.
+      # One service failing should not hide the results of the others.
       fail-fast: false
       matrix:
         include:
           - service: agent-service
             context: backend/agent-service
+          - service: alert-service
+            context: backend/alert-service
           - service: api-gateway
             context: backend/api-gateway
           - service: auth-service
@@ -56,6 +58,8 @@ jobs:
             context: backend/job-service
           - service: plugin-service
             context: backend/plugin-service
+          - service: rundeck-service
+            context: backend/rundeck-service
           - service: subscription-service
             context: backend/subscription-service
           - service: voice-agent
@@ -91,7 +95,7 @@ jobs:
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_NAMESPACE }}/${{ matrix.service }}:sha-${{ github.sha }}
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_NAMESPACE }}/${{ matrix.service }}:latest
           # Layer cache in GitHub's own store. Without this every run
-          # re-downloads the full Maven dependency tree for nine JVM services,
+          # re-downloads the full Maven dependency tree for every JVM service,
           # which is by far the slowest thing in this pipeline.
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
@@ -99,7 +103,7 @@ jobs:
 
   # --------------------------------------------------------------------------
   # Tell the deploy repo a complete image set is ready. It runs only after ALL
-  # ten builds succeed — a partial set would deploy a stack where some services
+  # builds succeed — a partial set would deploy a stack where some services
   # are the new build and some are the previous one.
   # --------------------------------------------------------------------------
   notify-deploy-repo:

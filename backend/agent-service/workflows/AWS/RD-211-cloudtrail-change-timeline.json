@@ -1,0 +1,71 @@
+{
+  "taskId": "RD-211",
+  "domain": "AWS",
+  "title": "CloudTrail Change Timeline",
+  "description": "Every write API call in the account within a time window, in order, with who made it, from where, against what, and whether it succeeded. Read-only calls are excluded entirely. Read-only. This is what answers 'what changed just before it broke' — including the case where the honest answer is that nothing did.",
+  "category": "Incident Response",
+  "runtime": "python",
+  "inputs": [
+    {
+      "variable": "Region",
+      "label": "Region",
+      "type": "string",
+      "required": true,
+      "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$",
+      "help": "CloudTrail lookup is regional; global-service events appear in the region they were issued from.",
+      "consumedBy": "node",
+      "default": "us-east-1"
+    },
+    {
+      "variable": "LookbackHours",
+      "label": "Lookback (hours)",
+      "type": "number",
+      "required": true,
+      "min": 1,
+      "max": 168,
+      "default": 6,
+      "help": "The window to read. Start narrow — an hour either side of the incident — and widen only if it comes back empty.",
+      "consumedBy": "node"
+    },
+    {
+      "variable": "ResourceNameContains",
+      "label": "Only changes touching",
+      "type": "string",
+      "required": false,
+      "pattern": "^[A-Za-z0-9 ._:\\-/]{0,255}$",
+      "help": "Leave blank for every change. Supply part of a resource name to narrow the timeline to one service.",
+      "consumedBy": "node",
+      "default": ""
+    },
+    {
+      "variable": "MaxEvents",
+      "label": "Event limit",
+      "type": "number",
+      "required": true,
+      "min": 1,
+      "max": 2000,
+      "default": 500,
+      "help": "A ceiling on how many events one run returns. Hitting it is reported, so a truncated timeline is never read as a complete one.",
+      "consumedBy": "node"
+    }
+  ],
+  "nodes": [
+    {
+      "type": "pyscript",
+      "label": "CloudTrail Change Timeline",
+      "value": "\"\"\"What changed, in order, and who did it. Read-only CloudTrail.\n\nThis is the other half of a root-cause investigation and the half nobody has to\nhand during an incident. Monitoring says what broke; only the change record says\nwhat happened to it immediately beforehand, and \"nothing changed\" is said in\nevery incident call and is wrong about a third of the time.\n\n**Write events only.** `ReadOnly=false` is passed to CloudTrail, so a Describe\nor a List never appears. During an incident the read traffic is enormous and\nnone of it can have caused anything; including it buries the four events that\nmatter under four thousand that cannot.\n\n**Console logins and role assumptions are kept**, even though they change\nnothing themselves, because \"who was in the account at the time\" is the first\nquestion asked when the change record is empty.\n\n**Failed calls are kept and marked.** An AccessDenied burst is not a cause of an\noutage but it is frequently a symptom of one — a role that lost a permission\nfails loudly here before anything else notices.\n\"\"\"\nimport json\nimport re\nimport sys\nfrom datetime import datetime, timedelta, timezone\n\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError, NoCredentialsError\n\nREGION = \"{{Region}}\"\nLOOKBACK_HOURS = int(\"{{LookbackHours}}\")\nRESOURCE_FILTER = \"{{ResourceNameContains}}\"\nMAX_EVENTS = int(\"{{MaxEvents}}\")\n\nif not re.fullmatch(r\"[a-z0-9-]{1,32}\", REGION):\n    sys.exit(\"Region %r is not an AWS region name.\" % REGION)\nif not 1 <= LOOKBACK_HOURS <= 168:\n    sys.exit(\"LookbackHours %d is outside 1-168.\" % LOOKBACK_HOURS)\nif RESOURCE_FILTER and not re.fullmatch(r\"[A-Za-z0-9 ._:\\-/]{0,255}\", RESOURCE_FILTER):\n    sys.exit(\"ResourceNameContains %r contains characters a resource name cannot have.\"\n             % RESOURCE_FILTER)\nif not 1 <= MAX_EVENTS <= 2000:\n    sys.exit(\"MaxEvents %d is outside 1-2000.\" % MAX_EVENTS)\n\nCFG = Config(retries={\"max_attempts\": 5, \"mode\": \"standard\"})\nNOW = datetime.now(timezone.utc)\nSINCE = NOW - timedelta(hours=LOOKBACK_HOURS)\n\n#: Events that change nothing but answer \"who was in here\".\nPRESENCE = (\"ConsoleLogin\", \"AssumeRole\", \"AssumeRoleWithSAML\", \"AssumeRoleWithWebIdentity\")\n\n\ndef actor_of(event):\n    \"\"\"Who did it, in the shortest form that is still unambiguous.\"\"\"\n    identity = event.get(\"userIdentity\", {}) or {}\n    for key in (\"userName\", \"principalId\", \"arn\"):\n        value = identity.get(key)\n        if value:\n            return value.rsplit(\"/\", 1)[-1] if key == \"arn\" else value\n    return event.get(\"Username\") or \"unknown\"\n\n\ndef resources_of(event, record):\n    names = [\n        r.get(\"resourceName\") or r.get(\"ResourceName\")\n        for r in (record.get(\"Resources\") or event.get(\"resources\") or [])\n        if isinstance(r, dict)\n    ]\n    return \",\".join(sorted({n for n in names if n}))[:160] or \"-\"\n\n\ndef main():\n    trail = boto3.client(\"cloudtrail\", region_name=REGION, config=CFG)\n\n    events = []\n    try:\n        paginator = trail.get_paginator(\"lookup_events\")\n        pages = paginator.paginate(\n            # The whole point: mutations only.\n            LookupAttributes=[{\"AttributeKey\": \"ReadOnly\", \"AttributeValue\": \"false\"}],\n            StartTime=SINCE,\n            EndTime=NOW,\n            PaginationConfig={\"MaxItems\": MAX_EVENTS},\n        )\n        for page in pages:\n            events.extend(page.get(\"Events\", []))\n    except NoCredentialsError:\n        sys.exit(\"No AWS credentials reached this step. Connect an AWS account to this project.\")\n    except ClientError as exc:\n        code = exc.response.get(\"Error\", {}).get(\"Code\", \"\")\n        if code in (\"AccessDeniedException\", \"UnauthorizedOperation\"):\n            sys.exit(\"This account's credentials cannot read CloudTrail \"\n                     \"(cloudtrail:LookupEvents).\")\n        sys.exit(\"Could not read CloudTrail: %s\" % exc)\n\n    print(\"CLOUDTRAIL CHANGE TIMELINE\")\n    print(\"region=%s lookback_hours=%d window_start=%s write_events_found=%d\"\n          % (REGION, LOOKBACK_HOURS, SINCE.isoformat(timespec=\"seconds\"), len(events)))\n    print(\"note=read-only API calls are excluded; nothing in this list is a Describe or a List\")\n    if RESOURCE_FILTER:\n        print(\"filtered_to_resources_containing=%s\" % RESOURCE_FILTER)\n    if len(events) >= MAX_EVENTS:\n        print(\"truncated=yes (hit MaxEvents; the window may contain changes not listed here)\")\n    print(\"\")\n\n    rows = []\n    for record in sorted(events, key=lambda e: e.get(\"EventTime\")):\n        try:\n            detail = json.loads(record.get(\"CloudTrailEvent\") or \"{}\")\n        except json.JSONDecodeError:\n            detail = {}\n\n        resources = resources_of(detail, record)\n        name = record.get(\"EventName\", \"?\")\n        if RESOURCE_FILTER and RESOURCE_FILTER not in resources and RESOURCE_FILTER not in name:\n            continue\n\n        when = record.get(\"EventTime\")\n        row = {\n            \"at\": when.isoformat(timespec=\"seconds\") if when else \"?\",\n            \"minutes_ago\": int((NOW - when).total_seconds() // 60) if when else \"?\",\n            \"event\": name,\n            \"actor\": actor_of(detail),\n            \"source\": detail.get(\"eventSource\", \"?\").replace(\".amazonaws.com\", \"\"),\n            \"resources\": resources,\n            \"from_ip\": detail.get(\"sourceIPAddress\", \"-\"),\n            \"outcome\": detail.get(\"errorCode\") or \"ok\",\n        }\n        rows.append(row)\n        print(\" \".join(\"%s=%s\" % kv for kv in row.items()))\n\n    changes = [r for r in rows if r[\"event\"] not in PRESENCE]\n    failed = [r for r in rows if r[\"outcome\"] != \"ok\"]\n    presence = [r for r in rows if r[\"event\"] in PRESENCE]\n\n    by_actor = {}\n    by_event = {}\n    for row in changes:\n        by_actor[row[\"actor\"]] = by_actor.get(row[\"actor\"], 0) + 1\n        by_event[row[\"event\"]] = by_event.get(row[\"event\"], 0) + 1\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"changes_in_window=%d (excluding %d sign-in/assume-role events)\"\n          % (len(changes), len(presence)))\n    print(\"failed_calls=%d %s\" % (len(failed), sorted({r[\"event\"] for r in failed})[:10]))\n    print(\"changes_by_actor=%s\"\n          % sorted(by_actor.items(), key=lambda kv: kv[1], reverse=True)[:10])\n    print(\"most_frequent_changes=%s\"\n          % sorted(by_event.items(), key=lambda kv: kv[1], reverse=True)[:10])\n    if changes:\n        print(\"earliest_change=%s %s\" % (changes[0][\"at\"], changes[0][\"event\"]))\n        print(\"latest_change=%s %s\" % (changes[-1][\"at\"], changes[-1][\"event\"]))\n    else:\n        # The answer everybody claims and nobody verifies. Saying it explicitly,\n        # with the window it applies to, is the useful form.\n        print(\"earliest_change=none — no write API call was recorded in this window\")\n    print(\"\")\n    print(\"JSON \" + json.dumps({\n        \"region\": REGION,\n        \"window_start\": SINCE.isoformat(),\n        \"events\": rows,\n    }, sort_keys=True, default=str))\n\n\nmain()\n",
+      "retries": 0,
+      "continueOnError": false
+    }
+  ],
+  "requires": [
+    {
+      "kind": "cloud_connection",
+      "platform": "AWS",
+      "customerText": "An AWS account we can read from. The access we need is read-only — nothing in this check can change anything.",
+      "permissions": [
+        "cloudtrail:LookupEvents"
+      ]
+    }
+  ]
+}

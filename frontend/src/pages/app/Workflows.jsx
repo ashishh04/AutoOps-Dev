@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   PageHeader,
   Toolbar,
@@ -10,6 +10,7 @@ import {
 } from "../../components/app/appui";
 import Icon from "../../components/Icon";
 import RunInputsDialog from "../../components/app/RunInputsDialog";
+import ModalPortal from "../../components/app/ModalPortal";
 import { useCollection } from "../../lib/useCollection";
 import { useStore } from "../../store/store";
 import { fmtDate } from "../../lib/format";
@@ -49,11 +50,14 @@ function SuccessBar({ value }) {
 
 export default function Workflows() {
   const { pid } = useParams();
+  const navigate = useNavigate();
   const { can, pushToast } = useStore();
   const { rows, loading, error, reload } = useCollection("workflows", pid);
   const canRun = can("runWorkflow");
   /** {row, fields} while the input form is open; null when nothing is pending. */
   const [prompt, setPrompt] = useState(null);
+  // What this workspace still needs before this workflow can run.
+  const [blocked, setBlocked] = useState(null);
   /** Workflow id whose input schema is being fetched — disables just that row. */
   const [asking, setAsking] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -142,6 +146,28 @@ export default function Workflows() {
   const startRun = async (row) => {
     setAsking(row.id);
     try {
+      // Readiness FIRST, before the input dialog. A rolled-out workflow is
+      // built against the provider's workspace, not this one — different AI
+      // connections, different jobs. Discovering that after filling in a form
+      // and pressing Run reads as "this automation is broken" rather than "it
+      // is not set up yet", which is a poor first impression of something the
+      // customer has just been given.
+      // FAIL-OPEN. Readiness improves the MESSAGE; it is not a gate. If the
+      // check itself cannot be reached, the run still goes ahead and fails with
+      // its own clear error — which is exactly what happened before readiness
+      // existed. Letting this throw made an unroutable endpoint block every
+      // workflow in the product, which is a far worse failure than a run that
+      // starts and then explains itself.
+      let state = null;
+      try {
+        state = await api.workflowReadiness(row.id);
+      } catch (readinessError) {
+        console.warn("Readiness check unavailable; running anyway", readinessError);
+      }
+      if (state && state.ready === false) {
+        setBlocked({ row, blockers: state.blockers || [] });
+        return;
+      }
       const fields = await api.workflowInputs(row.id);
       if (Array.isArray(fields) && fields.length > 0) {
         setPrompt({ row, fields });
@@ -170,6 +196,11 @@ export default function Workflows() {
         error={error}
         onRetry={reload}
         empty="No workflows yet. Your provider rolls these out — talk to them about what you need automated."
+        // A workflow's results live INSIDE the workflow, the same way a job's
+        // do. Before this the list was something you could only press Run on,
+        // and a workflow's history was reachable only through the project-wide
+        // Executions page, filtered by hand.
+        onRowClick={(r) => navigate(`/app/projects/${pid}/workflows/${r.id}`)}
         columns={[
           {
             key: "name",
@@ -296,6 +327,84 @@ export default function Workflows() {
           onRun={(inputs) => runWorkflow(prompt.row.id, inputs)}
         />
       )}
+
+      {blocked && (
+        <WorkflowSetupDialog
+          name={blocked.row.name}
+          blockers={blocked.blockers}
+          onClose={() => setBlocked(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * What this workspace still needs before a workflow can run.
+ *
+ * Deliberately NOT a toast. A toast says something went wrong and then
+ * disappears; this is a short list of things to go and do, each with the screen
+ * that does it. The framing matters too — "before you can run this" rather than
+ * an error, because nothing IS broken: a rolled-out automation was built
+ * against the provider's workspace and simply has not been pointed at this
+ * one's connections yet.
+ *
+ * Portals, like every dialog here. A hand-rolled `fixed inset-0` is clipped to
+ * the content column by the page wrapper's lingering transform — see
+ * ModalPortal.
+ */
+function WorkflowSetupDialog({ name, blockers, onClose }) {
+  return (
+    <ModalPortal onClose={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Set up ${name}`}
+        className="rw-pop relative w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+      >
+        <h3 className="text-sm font-semibold text-slate-900">
+          Before you can run “{name}”
+        </h3>
+        <p className="mt-1 text-[12px] leading-relaxed text-slate-500">
+          This automation was designed for you, but it needs pointing at this
+          workspace’s own settings first.
+        </p>
+
+        <ul className="mt-4 space-y-3">
+          {blockers.map((b) => (
+            <li
+              key={b.kind + b.title}
+              className="rounded-lg border border-amber-200 bg-amber-50 p-3"
+            >
+              <div className="flex items-start gap-2.5">
+                <Icon
+                  name="warning"
+                  size={15}
+                  className="mt-0.5 shrink-0 text-amber-600"
+                />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-amber-900">{b.title}</p>
+                  <p className="mt-0.5 text-[12px] leading-relaxed text-amber-800">
+                    {b.detail}
+                  </p>
+                  {b.action && b.href && (
+                    <a
+                      href={b.href}
+                      className="mt-2 inline-block text-[12px] font-medium text-amber-900 underline"
+                    >
+                      {b.action} →
+                    </a>
+                  )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-5 flex justify-end">
+          <SmallButton onClick={onClose}>Close</SmallButton>
+        </div>
+      </div>
+    </ModalPortal>
   );
 }

@@ -140,9 +140,19 @@ class RunContext:
         return parsed
 
     def config(self, phase: Phase) -> dict[str, Any]:
-        """LangChain run config, tagged so a trace reads as a sequence of phases."""
+        """LangChain run config, tagged so a trace reads as a sequence of phases.
+
+        **No ``callbacks`` key, deliberately.** A run's parent is resolved from
+        the callback manager it inherits through a context variable, and naming
+        callbacks here REPLACES that manager: pass the tracer again and this
+        phase becomes its own top-level trace; pass an empty list — which is
+        what this did before — and the call is not traced at all, because an
+        empty list replaces the inherited manager with nothing.
+
+        The tracer is attached once, at ``graph.invoke``, and every phase nests
+        under it. ``tests/test_tracing.py`` pins this.
+        """
         return {
-            "callbacks": self.callbacks,
             "run_name": f"{self.agent.ref}:{phase.value}",
             "tags": [f"agent:{self.agent.ref}", f"phase:{phase.value}"],
             "metadata": {

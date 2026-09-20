@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import java.util.Set;
 
 /**
@@ -554,6 +555,57 @@ public class ModelProviderService {
                 "No enabled AI connection in this workspace offers \"" + wanted
                         + "\". Check the model id on the agent, or add the connection "
                         + "that serves it.");
+    }
+
+    /**
+     * THIS WORKSPACE'S default chat model.
+     *
+     * <p><b>Why this has to exist.</b> Credentials were always multi-tenant —
+     * {@link #resolveForModel} takes a tenantId and decrypts that workspace's
+     * own key. WHICH MODEL TO ASK FOR was not. A workflow either named a
+     * literal id, which only resolves on a workspace that happens to hold a
+     * connection offering it, or fell back to {@code RUNTIME_DEFAULT_MODEL} —
+     * one environment variable for the entire deployment, the same string for
+     * every customer.
+     *
+     * <p>That is fine for a workflow a customer wrote for themselves and wrong
+     * for the ones this platform is built around. A provider designs a workflow
+     * once and rolls it out to fifty workspaces; if it names
+     * {@code deepseek.v3.2} it runs only where someone happens to have Bedrock,
+     * and if it names nothing every workspace is silently pushed onto the
+     * operator's model — billed to the operator's account, with the customer's
+     * data going to a vendor they did not choose.
+     *
+     * <p>The default is the {@code defaultModel} of an enabled connection.
+     * <b>Two connections both declaring one is an error, not a coin toss</b> —
+     * the same rule {@link #resolveForModel} already follows, and for the same
+     * reason: quietly picking the first would send a workspace's data to a
+     * vendor nobody selected.
+     */
+    @Transactional(readOnly = true)
+    public String defaultChatModel(String tenantId) {
+        List<ModelProvider> candidates = providerRepository
+                .findByTenantIdOrderByCreatedAtDesc(tenantId).stream()
+                .filter(ModelProvider::isEnabled)
+                .filter(provider -> provider.getDefaultModel() != null
+                        && !provider.getDefaultModel().isBlank())
+                .toList();
+
+        if (candidates.isEmpty()) {
+            throw CoreException.badRequest("no_default_model",
+                    "This workspace has not chosen a default AI model, so an automation "
+                            + "that does not name one cannot run. Open Settings > AI "
+                            + "Providers, pick a connection and set its default model.");
+        }
+        if (candidates.size() > 1) {
+            throw CoreException.badRequest("ambiguous_default_model",
+                    "This workspace has more than one connection claiming a default model ("
+                            + candidates.stream().map(ModelProvider::getName)
+                                    .collect(Collectors.joining(", "))
+                            + "). Clear the default on all but one, or name a model on the "
+                            + "step itself.");
+        }
+        return candidates.getFirst().getDefaultModel();
     }
 
     /**

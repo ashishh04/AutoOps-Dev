@@ -1,0 +1,110 @@
+{
+  "_comment": [
+    "SAMPLE configuration. Copy to Config/config.json and populate for your environment.",
+    "NEVER put a password, API key, client secret or token in this file.",
+    "Authentication uses managed identity, IAM roles, or certificate thumbprints -",
+    "the thumbprint is a public identifier, the private key stays in the cert store.",
+    "config.json must not be committed to source control."
+  ],
+
+  "environment": "REPLACE-ME (e.g. prod | preprod | lab)",
+
+  "logging": {
+    "logDirectory": "C:\\ProgramData\\ITAutomation\\Logs",
+    "retentionDays": 90
+  },
+
+  "reports": {
+    "outputDirectory": "C:\\ProgramData\\ITAutomation\\Reports"
+  },
+
+  "approvals": {
+    "approvalDirectory": "C:\\ProgramData\\ITAutomation\\Approvals",
+    "defaultValidHours": 24,
+    "_comment": "An approval artifact is created in Pending state. A human moves State to 'Approved' and sets ApprovedBy/ApprovedAt before the gated script will run."
+  },
+
+  "notifications": {
+    "smtpServer": "REPLACE-ME (e.g. smtp.contoso.com)",
+    "smtpPort": 25,
+    "fromAddress": "REPLACE-ME (e.g. it-automation@contoso.com)",
+    "defaultRecipients": [ "REPLACE-ME (e.g. itops@contoso.com)" ],
+    "teamsWebhookUrl": "REPLACE-ME (Teams incoming webhook URL) or null",
+    "_comment": "Send-MailMessage is used for dependency-free delivery on Windows PowerShell 5.1. Prefer Graph mail where available."
+  },
+
+  "itsm": {
+    "createTicketUrl": "REPLACE-ME (e.g. https://contoso.service-now.com/api/now/table/incident) or null",
+    "category": "IT Automation",
+    "assignmentGroup": "REPLACE-ME",
+    "_comment": "Called with -UseDefaultCredentials. Configure a service account with Kerberos/NTLM access rather than embedding a token."
+  },
+
+  "azure": {
+    "tenantId": "REPLACE-ME (GUID) or null",
+    "applicationId": "REPLACE-ME (GUID) or null",
+    "certificateThumbprint": "REPLACE-ME (thumbprint of a cert in CurrentUser\\My or LocalMachine\\My) or null",
+    "useManagedIdentity": true,
+    "defaultSubscriptionId": "REPLACE-ME (GUID) or null"
+  },
+
+  "aws": {
+    "profileName": "REPLACE-ME (named profile) or null",
+    "defaultRegion": "REPLACE-ME (e.g. me-central-1)",
+    "_comment": "Prefer an IAM role or SSO profile. Never an access key pair in this file."
+  },
+
+  "activeDirectory": {
+    "domain": "REPLACE-ME (e.g. contoso.com)",
+    "disabledUsersOU": "REPLACE-ME (e.g. OU=Disabled,DC=contoso,DC=com)",
+    "_comment": "OU paths are environment-specific and are deliberately not defaulted in scripts."
+  },
+
+  "vmware": {
+    "vCenterServer": "REPLACE-ME or null"
+  },
+
+  "commvault": {
+    "webServiceUrl": "REPLACE-ME (e.g. https://commserve/webconsole/api) or null"
+  },
+
+  "oci": {
+    "profileName": "REPLACE-ME (named profile in ~/.oci/config) or null",
+    "defaultRegion": "REPLACE-ME (e.g. me-dubai-1) or null",
+    "defaultCompartmentId": "REPLACE-ME (compartment OCID) or null",
+    "tenancyId": "REPLACE-ME (tenancy OCID) or null",
+    "_comment": "There is no first-party OCI PowerShell module; these scripts wrap the oci CLI. Authentication comes from the CLI config profile - API keys live in ~/.oci, never here."
+  },
+
+  "vulnerability": {
+    "apiBaseUrl": "REPLACE-ME (e.g. https://cloud.tenable.com) or null",
+    "_comment": "Scanner API keys are NEVER stored here. They are passed as SecureString parameters at run time."
+  },
+
+  "safety": {
+    "protectedServices": [
+      "wuauserv", "TrustedInstaller", "WinDefend", "EventLog", "RpcSs",
+      "LSM", "Dhcp", "Dnscache", "gpsvc", "SamSs", "Netlogon", "TermService"
+    ],
+    "protectedProcesses": [
+      "System", "Idle", "smss", "csrss", "wininit", "winlogon", "services",
+      "lsass", "lsm", "svchost", "MsMpEng", "dwm", "explorer", "sqlservr"
+    ],
+    "protectedComputers": [ "REPLACE-ME (e.g. DC01, DC02 - never act on these)" ],
+    "restartableServices": [
+      "Spooler", "W32Time", "BITS", "wuauserv"
+    ],
+    "_comment": [
+      "protectedProcesses and protectedServices are hard exclusions. Scripts refuse to act on them",
+      "and the exclusion cannot be overridden by a parameter - this implements the workbook's",
+      "'protected-process blacklist' guardrail for Windows Server use case #6.",
+      "restartableServices is the whitelist required by the guardrail on use case #4."
+    ]
+  },
+
+  "maintenance": {
+    "windowStartHour": 22,
+    "windowEndHour": 5,
+    "_comment": "Used by change/write scripts that the workbook marks as maintenance-window driven (e.g. Windows Server reboot)."
+  }
+}

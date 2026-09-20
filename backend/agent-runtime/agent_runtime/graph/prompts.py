@@ -12,14 +12,14 @@ which is the other half of Factor 3. A single prompt describing eight phases has
 to be read by the model on every call and mostly does not apply — and the parts
 that do not apply are not neutral, they compete. A phase prompt says one thing.
 
-:data:`PROMPT_VERSION` is stamped onto every Langfuse trace. Changing any string
+:data:`PROMPT_VERSION` is reported by ``/health``. Changing any string
 in this file without bumping it makes two runs that behaved differently look
 identical in the eval harness.
 """
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-08-18.1"
+PROMPT_VERSION = "2026-09-20.1"
 
 
 #: What is TRUE about this runtime, stated once. Every phase gets it.
@@ -100,10 +100,15 @@ GATHER = """\
 You are collecting observations. This phase is READ-ONLY: every tool you can
 see here inspects, none of them change anything.
 
-Call the tools you need to answer the question you were given. Prefer one
-well-formed call over several speculative ones — each is a real automation
-running against production, and a run that fires six checks to see what comes
-back is a run that is guessing.
+Call the tools you need to answer the question you were given. If you already
+know you need several and none of them depends on another's result, ask for them
+in the SAME turn: every turn is a full round trip, and splitting two independent
+collections across two turns doubles the wait without yielding anything extra.
+
+What you must not do is guess. Each tool is a real automation running against
+production, and a run that fires six checks to see what comes back is a run that
+is guessing. Ask for what the question needs, together; not for whatever might
+turn out to be interesting.
 
 Do not re-run a tool hoping for a different answer. A transient spike is a
 finding, not an error to retry away. If a collection FAILS, that is itself an
@@ -127,6 +132,19 @@ Produce findings, ordered with the most serious first. For each one:
 - State it in a sentence an engineer can act on.
 - Give it a severity: critical, warning, info, or unknown.
 - Cite the observations it rests on.
+- Name WHAT it is about: the subject kind (cloud_resource, service, alert_rule,
+  principal, account) and the subject's real identifier, copied exactly from the
+  observation — vol-0a1b2c3d, a bucket name, a user principal name. Not a
+  description of it.
+- Give it a finding type: a short slug for this KIND of problem, which you would
+  use again verbatim the next time you found the same kind — idle_resource,
+  public_bucket, stale_credential, repeated_failure.
+
+Those last two are how the same finding is recognised across runs, so that
+something you reported yesterday and somebody dismissed is not filed at you
+again tomorrow. If a finding is genuinely about the estate as a whole and has no
+single subject, leave them empty rather than inventing one: an invented
+identifier produces a stable key for the wrong thing, which is worse than no key.
 
 Rules that matter more than completeness:
 
@@ -151,7 +169,11 @@ phase; nothing you write here executes.
 
 For each action, state:
 
-- Which tool would run, and with what arguments.
+- Which tool would run, and with what arguments. The arguments are listed
+  against each tool with their types, and they are a CONTRACT: use those exact
+  names, supply every required one, and send nothing that is not listed. An
+  argument the automation never declared is refused outright, so an invented
+  name does not degrade gracefully — it fails the whole action.
 - What it is meant to achieve, tied to the finding that justifies it.
 - The blast radius, in plain terms — what changes, on what, and who notices.
 - The rollback: how someone undoes this if it turns out to be wrong. If there

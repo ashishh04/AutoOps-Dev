@@ -97,7 +97,7 @@ const safeJson = (text) => {
 // goes through the offline mock below so the rest of the app keeps rendering.
 // ---------------------------------------------------------------------------
 
-// Exported so the Dify layer (lib/dify/difyApi.js) reuses one transport —
+// Exported so other API layers reuse one transport —
 // single-flight token refresh and the upgrade-required event live here.
 export async function realFetch(path, { method = "GET", body, auth = false, _retry = false } = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -551,6 +551,12 @@ function mapAgent(a) {
       id: t.id,
       name: t.name,
       available: t.available !== false,
+      // Carried so an edit can send back what it was given. Undefined means
+      // the grant never declared it, which is NOT the same as false: the
+      // backend fails closed on an undeclared tool, and inventing `false`
+      // here would quietly hand a state-changing automation to the phase
+      // that gathers evidence.
+      mutating: typeof t.mutating === "boolean" ? t.mutating : undefined,
     })),
     toolCount: a.toolCount ?? (a.tools || []).length,
     enabled: !!a.enabled,
@@ -570,10 +576,16 @@ function mapAgent(a) {
 // The allow-list travels as JSON: [{"type":"JOB","id":7}].
 const agentTools = (tools) =>
   JSON.stringify(
-    (tools || []).map((t) => ({
-      type: String(t.type || "").toUpperCase(),
-      id: Number(t.id),
-    })),
+    (tools || []).map((t) => {
+      const entry = { type: String(t.type || "").toUpperCase(), id: Number(t.id) };
+      // Only when known. Saving an agent must not invent a value the grant
+      // never had, and must not drop one it did — resending {type, id} alone
+      // is what wiped the flag on every rolled-out agent someone edited.
+      if (typeof t.mutating === "boolean") {
+        entry.mutating = t.mutating;
+      }
+      return entry;
+    }),
   );
 
 async function listAgentsReal(projectId) {
@@ -828,7 +840,12 @@ function mapRun(r) {
     startedAt: r.startedAt,
     finishedAt: r.finishedAt,
     createdAt: r.createdAt,
+    // What the run DID (the engine's trace) and what it PRODUCED (the
+    // deliverable) are separate fields now. They shared one, and a customer
+    // who asked for a meeting summary got node timings and an echo of their
+    // own transcript above it.
     log: r.log,
+    output: r.output,
     error: r.error,
   };
 }
@@ -1367,6 +1384,16 @@ export const api = {
    */
   workflowInputs: (id) => realFetch(`/workflows/${id}/inputs`, { auth: true }),
 
+  /**
+   * What stands between this workspace and running a workflow, asked BEFORE
+   * Run. A rolled-out workflow arrives complete and looks identical to a ready
+   * one — the provider built it against their workspace, not this one.
+   *
+   * Returns `{ready, blockers:[{kind,title,detail,action,href}]}`.
+   */
+  workflowReadiness: (id) =>
+    realFetch(`/workflows/${id}/readiness`, { auth: true }),
+
   runWorkflow: (id, inputs) =>
     realFetch(`/workflows/${id}/run`, {
       method: "POST",
@@ -1651,9 +1678,7 @@ export const api = {
     realFetch(`/notification-rules/${id}`, { method: "DELETE", auth: true }),
 
   // ---- AI model providers, tenant bring-your-own-key (real: core-service) ----
-  // NOT the same thing as difyApi.listProviders(): that one is the PROVIDER
-  // configuring the shared Dify workspace and 403s for a tenant. These are
-  // this workspace's own vendor keys, stored encrypted per tenant.
+  // This workspace's own vendor keys, stored encrypted per tenant.
   listModelProviders: () => realFetch("/model-providers", { auth: true }),
   /** Vendors AutoOps supports and the fields each one needs. */
   modelProviderCatalog: () =>

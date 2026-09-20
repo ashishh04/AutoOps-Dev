@@ -22,14 +22,16 @@ spring:
           # this MORE SPECIFIC route must be declared BEFORE workflow-service's
           # /api/workflows/** — Spring Cloud Gateway matches routes in order and
           # the first predicate wins.
-          # /inputs rides with /run for the same reason: the input form is
-          # resolved by the execution side, which is the only place that knows
-          # a definition names a Dify workflow. Left off this list it would
-          # fall through to workflow-service and 404 there.
+          # /inputs and /readiness ride with /run for the same reason: both are
+          # resolved by the EXECUTION side — the input form and the "can this
+          # workspace actually run it" check both need the tenant's model
+          # connections and jobs, which workflow-service does not have. Left off
+          # this list they fall through to workflow-service and 404 there, and a
+          # 404 on /readiness blocks every run because the console asks it first.
           - id: core-service-workflow-runs
             uri: ${CORE_SERVICE_URL:http://localhost:8083}
             predicates:
-              - Path=/api/workflows/*/run,/api/workflows/*/inputs
+              - Path=/api/workflows/*/run,/api/workflows/*/inputs,/api/workflows/*/readiness
           # Workflow definitions (CRUD, enable/disable).
           - id: workflow-service
             uri: ${WORKFLOW_SERVICE_URL:http://localhost:8086}
@@ -62,6 +64,22 @@ spring:
             uri: ${RUNDECK_SERVICE_URL:http://localhost:8090}
             predicates:
               - Path=/api/rundeck/**
+          # The alert plane: alerts and the incidents they correlate into.
+          # Read-only, and the engine behind it is invisible — alert-service is
+          # the only thing that holds its address, exactly as rundeck-service is
+          # for execution. Neither /api/alerts/** nor /api/incidents/** overlaps
+          # another route's prefix, so this position is not load-bearing.
+          # /api/alert-providers/** is listed EXPLICITLY. It does NOT match
+          # /api/alerts/** — "alerts" and "alert-providers" are different
+          # literal segments — so without it the connect screen's calls fall
+          # through every route and 404 at the gateway. The symptom is not a
+          # 401: the gateway authenticates BEFORE it routes, so an
+          # unauthenticated probe returns 401 whether the route exists or not.
+          # Only a request with a real token tells you anything.
+          - id: alert-service
+            uri: ${ALERT_SERVICE_URL:http://localhost:8091}
+            predicates:
+              - Path=/api/alerts/**,/api/incidents/**,/api/alert-providers,/api/alert-providers/**
           # Projects, jobs, cloud integrations, runs (subscription-gated mutations).
           - id: core-service
             uri: ${CORE_SERVICE_URL:http://localhost:8083}
@@ -70,7 +88,7 @@ spring:
               # view; the .../projects sub-path below is core-service's — the
               # patterns do not overlap, so ordering between the two is not
               # load-bearing.
-              - Path=/api/projects/**,/api/jobs/**,/api/cloud/**,/api/runs/**,/api/approvals/**,/api/compliance/**,/api/governance/**,/api/audit/**,/api/notifications/**,/api/nodes/**,/api/secrets/**,/api/webhooks/**,/api/hooks/**,/api/library/**,/api/commands/**,/api/connectors/**,/api/model-providers/**,/api/provider/usage,/api/provider/health,/api/provider/broadcasts,/api/provider/library,/api/provider/tenants/*/projects,/api/provider/rollout,/api/dify/**
+              - Path=/api/projects/**,/api/jobs/**,/api/cloud/**,/api/runs/**,/api/approvals/**,/api/compliance/**,/api/governance/**,/api/audit/**,/api/notifications/**,/api/nodes/**,/api/secrets/**,/api/webhooks/**,/api/hooks/**,/api/library/**,/api/commands/**,/api/connectors/**,/api/model-providers/**,/api/provider/usage,/api/provider/health,/api/provider/broadcasts,/api/provider/library,/api/provider/tenants/*/projects,/api/provider/rollout
           # Aegis-01, the landing-page voice agent. Anonymous by design —
           # visitors have no account yet — so voice-agent caps it itself.
           - id: voice-agent

@@ -1,5 +1,6 @@
 package com.intertec.autoops.workflow.web;
 
+import com.intertec.autoops.workflow.domain.Workflow;
 import com.intertec.autoops.workflow.service.WorkflowService;
 import com.intertec.autoops.workflow.web.dto.WorkflowRequest;
 import com.intertec.autoops.workflow.web.dto.WorkflowView;
@@ -102,16 +103,25 @@ public class InternalWorkflowController {
      * provider surface calls this once per target tenant after checking the
      * caller's PROVIDER role. The row it creates is sealed: the tenant can run
      * it but the public API will not serialise its definition back to them.
+     *
+     * @param delivery {@code PRODUCT} when the workflow is the thing being
+     *                 delivered, {@code AGENT_COMPONENT} when it is being
+     *                 delivered only so an agent has something to call.
+     *                 Defaulted rather than required, so an older core-service
+     *                 rolling out against a newer workflow-service delivers a
+     *                 visible product — which is the previous behaviour, and
+     *                 the safe way for that skew to be wrong.
      */
     @PostMapping("/internal/projects/{projectId}/workflows/rollout")
     public WorkflowView rollOut(@PathVariable Long projectId,
                                 @RequestParam String tenantId,
                                 @RequestParam String actor,
                                 @RequestParam Long sourceId,
+                                @RequestParam(defaultValue = "PRODUCT") Workflow.Delivery delivery,
                                 @RequestHeader("X-Access-Token") String accessToken,
                                 @Valid @RequestBody WorkflowRequest request) {
         return WorkflowView.from(workflowService.rollOut(tenantId, actor, accessToken,
-                projectId, sourceId, request.name(), request.definition()));
+                projectId, sourceId, request.name(), request.definition(), delivery));
     }
 
     /** Revoke: the provider withdrawing a workflow it rolled out. */

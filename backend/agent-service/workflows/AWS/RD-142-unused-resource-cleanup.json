@@ -2,131 +2,97 @@
   "taskId": "RD-142",
   "domain": "AWS",
   "title": "AWS Unused EBS Volume Cleanup",
-  "description": "Reports EBS volumes unattached beyond a minimum age and, once approved, deletes them after taking a retained recovery snapshot of each. Report-only unless Execute and a valid approval reference are both supplied.",
-  "category": "AWS",
-  "runtime": "powershell",
-  "blockedBy": "job-service has no runner for type 'powershell' and no WinRM transport. This workflow is published so the agent's tool reference resolves, but every run will fail until that runner exists.",
+  "description": "Deletes named unattached EBS volumes after taking and CONFIRMING a recovery snapshot of each. Report-only unless Execute is true. Acts only on the exact volume ids supplied — never on a filter — and re-verifies every one is still unattached, still old enough and still unprotected immediately before deleting.",
+  "category": "Cost",
+  "runtime": "python",
   "sourceScript": "Scripts/01-AWS/Remove-AwsUnusedEbsVolume.ps1",
   "inputs": [
     {
       "variable": "Region",
-      "label": "AWS region",
-      "type": "select",
-      "required": true,
-      "options": [
-        "me-central-1",
-        "me-south-1",
-        "eu-west-1",
-        "eu-central-1",
-        "us-east-1",
-        "us-west-2",
-        "ap-south-1",
-        "ap-southeast-1"
-      ],
-      "help": "One region per run. Volumes are region-scoped."
-    },
-    {
-      "variable": "ProfileName",
-      "label": "AWS profile / SSO profile",
-      "type": "string",
-      "required": false,
-      "pattern": "^[A-Za-z0-9._-]{1,64}$",
-      "help": "Leave empty to use the host's IAM role. Prefer a role over a named profile."
-    },
-    {
-      "variable": "MinimumAgeDays",
-      "label": "Minimum days unattached",
-      "type": "number",
-      "required": true,
-      "min": 7,
-      "max": 3650,
-      "default": 30,
-      "help": "Volumes detached more recently than this are never considered. The floor is 7 days deliberately — shorter catches volumes mid-migration."
-    },
-    {
-      "variable": "ExcludeTagKey",
-      "label": "Protection tag key",
+      "label": "Region",
       "type": "string",
       "required": true,
-      "pattern": "^[A-Za-z0-9:_.\\/=+-]{1,128}$",
-      "default": "AutoOps:DoNotDelete",
-      "help": "Any volume carrying this tag is excluded unconditionally, even with a valid approval."
+      "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$",
+      "help": "Must be the region the volumes are in.",
+      "consumedBy": "node",
+      "default": "us-east-1"
     },
     {
-      "variable": "ProtectedList",
-      "label": "Protected list file",
+      "variable": "VolumeIds",
+      "label": "Volume ids",
       "type": "string",
-      "required": false,
-      "placeholder": "/etc/autoops/keep-volumes.txt",
-      "help": "Volume ids or names that must never be touched. Cannot be overridden by any other setting."
+      "required": true,
+      "pattern": "^vol-[0-9a-f]{8,17}(,vol-[0-9a-f]{8,17})*$",
+      "help": "The exact volumes to reclaim, comma-separated. Take these from an idle resource inventory you have read — this automation never selects targets for you.",
+      "consumedBy": "node",
+      "placeholder": "vol-0a1b2c3d4e5f67890"
     },
     {
       "variable": "Reason",
-      "label": "Change reason",
+      "label": "Reason",
       "type": "string",
       "required": true,
-      "pattern": "^.{10,256}$",
-      "default": "Unattached EBS volume cleanup",
-      "help": "Recorded in the approval artifact and the audit log."
+      "pattern": "^[\\w .,:;()\\-/]{5,200}$",
+      "help": "Recorded on every recovery snapshot and in the run log. Write what a colleague would need to understand this deletion in six months.",
+      "consumedBy": "node",
+      "placeholder": "Reclaiming disks from the decommissioned staging fleet"
     },
     {
-      "variable": "TicketReference",
-      "label": "ITSM ticket",
+      "variable": "MinimumAgeDays",
+      "label": "Minimum age (days)",
+      "type": "number",
+      "required": true,
+      "min": 0,
+      "max": 3650,
+      "default": 30,
+      "help": "Re-checked at execution. A volume younger than this is skipped even if it was named and approved.",
+      "consumedBy": "node"
+    },
+    {
+      "variable": "ExcludeTagKey",
+      "label": "Protection tag",
       "type": "string",
-      "required": false,
-      "pattern": "^[A-Z][A-Z0-9]+-[0-9]+$",
-      "placeholder": "CHG-10482",
-      "help": "Recorded alongside the approval reference in the audit trail."
+      "required": true,
+      "pattern": "^[A-Za-z0-9:_.\\- ]{1,64}$",
+      "help": "A volume carrying this tag key is never deleted. No argument overrides it.",
+      "consumedBy": "node",
+      "default": "autoops:protect"
+    },
+    {
+      "variable": "SnapshotWaitSeconds",
+      "label": "Snapshot wait (seconds)",
+      "type": "number",
+      "required": true,
+      "min": 30,
+      "max": 3600,
+      "default": 300,
+      "help": "How long to wait for each recovery snapshot to COMPLETE before deleting. A snapshot that is still running when this expires means the volume is left alone, not deleted without a recovery point.",
+      "consumedBy": "node"
     },
     {
       "variable": "Execute",
-      "label": "Execute deletions",
+      "label": "Execute",
       "type": "boolean",
       "required": false,
       "default": false,
-      "help": "Off means report only. Switching this on deletes volumes and requires an approval reference."
-    },
-    {
-      "variable": "ApprovalReference",
-      "label": "Approval reference",
-      "type": "string",
-      "required": false,
-      "requiredWhen": {
-        "field": "Execute",
-        "equals": true
-      },
-      "pattern": "^APR-[A-Za-z0-9-]{6,}$",
-      "placeholder": "APR-7F3A9C21",
-      "help": "Issued by a prior report-only run once a human approved the candidate list."
+      "help": "Off by default. Off means the run reports exactly what it would delete and changes nothing.",
+      "consumedBy": "node"
     },
     {
       "variable": "SkipSnapshot",
-      "label": "Skip pre-deletion snapshot",
+      "label": "Skip the recovery snapshot",
       "type": "boolean",
       "required": false,
       "default": false,
-      "help": "Strongly discouraged. The snapshot is the only recovery path."
-    },
-    {
-      "variable": "OutputFormat",
-      "label": "Output format",
-      "type": "select",
-      "required": true,
-      "options": [
-        "Console",
-        "CSV",
-        "JSON",
-        "HTML"
-      ],
-      "default": "JSON",
-      "help": "CSV or HTML when the candidate list is going to a human approver."
+      "help": "Removes the only way back. Leave this off unless someone has accepted in writing that the data is disposable.",
+      "consumedBy": "node"
     }
   ],
   "nodes": [
     {
-      "type": "powershell",
-      "label": "Report unattached volumes (and delete only if approved)",
-      "value": "./Scripts/01-AWS/Remove-AwsUnusedEbsVolume.ps1 -Region '{{Region}}' -ProfileName '{{ProfileName}}' -MinimumAgeDays {{MinimumAgeDays}} -ExcludeTagKey '{{ExcludeTagKey}}' -ProtectedList '{{ProtectedList}}' -Reason '{{Reason}}' -TicketReference '{{TicketReference}}' -ApprovalReference '{{ApprovalReference}}' -OutputFormat '{{OutputFormat}}' -Execute:${{Execute}} -SkipSnapshot:${{SkipSnapshot}}",
+      "type": "pyscript",
+      "label": "AWS Unused EBS Volume Cleanup",
+      "value": "\"\"\"Reclaim unattached EBS volumes. THE ONLY DESTRUCTIVE AUTOMATION HERE.\n\nFive properties, each of which exists because the alternative is how estates\nlose data:\n\n1. **It acts on an explicit list of volume ids, never on a filter.** A filter\n   re-evaluated at execution time matches whatever is unattached NOW, which\n   includes the volume someone detached five minutes ago during a migration.\n   The caller must name exactly what it saw.\n2. **Every target is re-verified immediately before deletion** — still\n   `available`, still old enough, still not protected. The gap between the\n   audit that produced the list and the approval that authorised it can be\n   hours, and a volume that has been re-attached in between is no longer a\n   candidate.\n3. **A recovery snapshot is taken and CONFIRMED COMPLETE first.** Not started\n   — completed. A volume whose snapshot has not finished within the wait is\n   skipped rather than deleted, so a slow snapshot costs a retry instead of\n   the data.\n4. **Report-only unless `Execute` is true.** The default run changes nothing\n   and returns the same shape, so the caller sees exactly what would happen.\n5. **A protection tag is absolute.** No argument overrides it.\n\"\"\"\nimport json\nimport re\nimport sys\nimport time\n\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError, NoCredentialsError\n\nREGION = \"{{Region}}\"\nVOLUME_IDS = \"{{VolumeIds}}\"\nMIN_AGE_DAYS = int(\"{{MinimumAgeDays}}\")\nEXCLUDE_TAG_KEY = \"{{ExcludeTagKey}}\"\nEXECUTE = \"{{Execute}}\".strip().lower() == \"true\"\nSKIP_SNAPSHOT = \"{{SkipSnapshot}}\".strip().lower() == \"true\"\nSNAPSHOT_WAIT_SECONDS = int(\"{{SnapshotWaitSeconds}}\")\nREASON = \"{{Reason}}\"\n\nif not re.fullmatch(r\"[a-z0-9-]{1,32}\", REGION):\n    sys.exit(\"Region %r is not an AWS region name.\" % REGION)\nif not re.fullmatch(r\"vol-[0-9a-f]{8,17}(,vol-[0-9a-f]{8,17})*\", VOLUME_IDS):\n    sys.exit(\"VolumeIds must be a comma-separated list of volume ids, got %r.\" % VOLUME_IDS)\nif not re.fullmatch(r\"[A-Za-z0-9:_.\\- ]{1,64}\", EXCLUDE_TAG_KEY):\n    sys.exit(\"ExcludeTagKey %r is not a valid tag key.\" % EXCLUDE_TAG_KEY)\nif not 0 <= MIN_AGE_DAYS <= 3650:\n    sys.exit(\"MinimumAgeDays %d is outside 0-3650.\" % MIN_AGE_DAYS)\nif not 30 <= SNAPSHOT_WAIT_SECONDS <= 3600:\n    sys.exit(\"SnapshotWaitSeconds %d is outside 30-3600.\" % SNAPSHOT_WAIT_SECONDS)\n\nTARGETS = VOLUME_IDS.split(\",\")\nCFG = Config(retries={\"max_attempts\": 5, \"mode\": \"standard\"})\n\n\ndef age_days(created):\n    from datetime import datetime, timezone\n    return int((datetime.now(timezone.utc) - created).total_seconds() // 86400)\n\n\ndef wait_for_snapshot(ec2, snapshot_id, budget):\n    \"\"\"Blocks until the snapshot is `completed`, or gives up and says so.\n\n    Returning a reason rather than raising: a snapshot that is merely slow must\n    leave the volume ALIVE and the run successful-with-a-skip, not failed. The\n    operator re-runs it and the second attempt finds a finished snapshot.\n    \"\"\"\n    deadline = time.time() + budget\n    while time.time() < deadline:\n        described = ec2.describe_snapshots(SnapshotIds=[snapshot_id])[\"Snapshots\"][0]\n        state = described[\"State\"]\n        if state == \"completed\":\n            return True, described.get(\"Progress\", \"100%\")\n        if state == \"error\":\n            return False, \"the snapshot failed\"\n        time.sleep(5)\n    return False, \"the snapshot did not complete within %ds\" % budget\n\n\ndef main():\n    ec2 = boto3.client(\"ec2\", region_name=REGION, config=CFG)\n\n    print(\"UNUSED EBS VOLUME RECLAIM\")\n    print(\"region=%s mode=%s targets=%d\" % (REGION, \"EXECUTE\" if EXECUTE else \"REPORT-ONLY\",\n                                            len(TARGETS)))\n    print(\"minimum_age_days=%d protection_tag=%s snapshot=%s\"\n          % (MIN_AGE_DAYS, EXCLUDE_TAG_KEY, \"SKIPPED\" if SKIP_SNAPSHOT else \"required\"))\n    print(\"reason=%s\" % REASON)\n    if EXECUTE and SKIP_SNAPSHOT:\n        print(\"WARNING=deleting without a recovery snapshot. This is irreversible.\")\n    print(\"\")\n\n    try:\n        described = ec2.describe_volumes(VolumeIds=TARGETS)[\"Volumes\"]\n    except NoCredentialsError:\n        sys.exit(\"No AWS credentials reached this step. Connect an AWS account to this project.\")\n    except ClientError as exc:\n        code = exc.response.get(\"Error\", {}).get(\"Code\", \"\")\n        if code == \"InvalidVolume.NotFound\":\n            # Already gone is not an error worth failing on, but it IS worth\n            # saying: a caller working from a stale list should learn that.\n            sys.exit(\"One or more volumes no longer exist: %s. Re-run the inventory and \"\n                     \"work from a current list.\" % exc)\n        sys.exit(\"Could not describe the target volumes: %s\" % exc)\n\n    by_id = {v[\"VolumeId\"]: v for v in described}\n    outcomes = []\n\n    for volume_id in TARGETS:\n        volume = by_id.get(volume_id)\n        result = {\"volume_id\": volume_id}\n\n        if volume is None:\n            result.update(action=\"skipped\", reason=\"no longer exists\")\n        elif volume[\"State\"] != \"available\":\n            # The important one. Between the audit and now, something attached\n            # it — a migration, a restore, a person. It is not a candidate any\n            # more and no approval covers deleting an in-use disk.\n            result.update(\n                action=\"skipped\",\n                reason=\"state is %s, not available — it has been attached since the audit\"\n                       % volume[\"State\"],\n            )\n        elif age_days(volume[\"CreateTime\"]) < MIN_AGE_DAYS:\n            result.update(\n                action=\"skipped\",\n                reason=\"age %dd is below the %dd minimum\"\n                       % (age_days(volume[\"CreateTime\"]), MIN_AGE_DAYS),\n            )\n        elif any(t[\"Key\"] == EXCLUDE_TAG_KEY for t in volume.get(\"Tags\", [])):\n            result.update(action=\"skipped\", reason=\"carries the %s protection tag\" % EXCLUDE_TAG_KEY)\n        else:\n            result.update(\n                action=\"would delete\" if not EXECUTE else \"pending\",\n                size_gb=volume[\"Size\"],\n                type=volume.get(\"VolumeType\", \"?\"),\n                az=volume.get(\"AvailabilityZone\", \"?\"),\n                age_days=age_days(volume[\"CreateTime\"]),\n            )\n\n        outcomes.append(result)\n\n    eligible = [r for r in outcomes if r[\"action\"] in (\"would delete\", \"pending\")]\n\n    if not EXECUTE:\n        for row in outcomes:\n            print(\" \".join(\"%s=%s\" % kv for kv in row.items()))\n        print(\"\")\n        print(\"SUMMARY\")\n        print(\"mode=REPORT-ONLY nothing_was_changed=true\")\n        print(\"would_delete=%d skipped=%d\" % (len(eligible), len(outcomes) - len(eligible)))\n        print(\"to_execute=re-run with Execute set true and the same VolumeIds\")\n        print(\"\")\n        print(\"JSON \" + json.dumps({\"executed\": False, \"outcomes\": outcomes}, sort_keys=True))\n        return\n\n    for row in eligible:\n        volume_id = row[\"volume_id\"]\n        snapshot_id = None\n\n        if not SKIP_SNAPSHOT:\n            try:\n                snapshot = ec2.create_snapshot(\n                    VolumeId=volume_id,\n                    Description=\"AutoOps recovery snapshot before reclaim. %s\" % REASON,\n                    TagSpecifications=[{\n                        \"ResourceType\": \"snapshot\",\n                        \"Tags\": [\n                            {\"Key\": \"autoops:origin\", \"Value\": volume_id},\n                            {\"Key\": \"autoops:reason\", \"Value\": REASON[:255]},\n                        ],\n                    }],\n                )\n                snapshot_id = snapshot[\"SnapshotId\"]\n                row[\"snapshot_id\"] = snapshot_id\n            except ClientError as exc:\n                row.update(action=\"failed\", reason=\"could not create a recovery snapshot: %s\" % exc)\n                continue\n\n            ok, detail = wait_for_snapshot(ec2, snapshot_id, SNAPSHOT_WAIT_SECONDS)\n            if not ok:\n                # Alive, with a snapshot that may yet finish. The next run will\n                # find it complete.\n                row.update(\n                    action=\"skipped\",\n                    reason=\"%s — the volume was NOT deleted and the snapshot was kept\" % detail,\n                )\n                continue\n\n        try:\n            ec2.delete_volume(VolumeId=volume_id)\n            row.update(action=\"deleted\", recovery_snapshot=snapshot_id or \"NONE\")\n        except ClientError as exc:\n            row.update(action=\"failed\", reason=str(exc), recovery_snapshot=snapshot_id or \"NONE\")\n\n    for row in outcomes:\n        print(\" \".join(\"%s=%s\" % kv for kv in row.items()))\n\n    deleted = [r for r in outcomes if r[\"action\"] == \"deleted\"]\n    failed = [r for r in outcomes if r[\"action\"] == \"failed\"]\n    skipped = [r for r in outcomes if r[\"action\"] == \"skipped\"]\n    undocumented = [r for r in deleted if r.get(\"recovery_snapshot\") in (None, \"NONE\")]\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"mode=EXECUTE deleted=%d skipped=%d failed=%d\"\n          % (len(deleted), len(skipped), len(failed)))\n    print(\"reclaimed_gb=%d\" % sum(r.get(\"size_gb\", 0) for r in deleted))\n    if undocumented:\n        # Stated as a finding, not a success line. A deletion with no recovery\n        # point is the thing a human needs to know about first.\n        print(\"DELETED_WITHOUT_RECOVERY_SNAPSHOT=%s\" % [r[\"volume_id\"] for r in undocumented])\n    print(\"\")\n    print(\"JSON \" + json.dumps({\"executed\": True, \"outcomes\": outcomes}, sort_keys=True))\n\n    if failed:\n        # Partial failure is a failed step: the caller must not read \"some were\n        # deleted\" as \"the request was satisfied\".\n        sys.exit(\"%d volume(s) could not be deleted; see the outcomes above.\" % len(failed))\n\n\nmain()\n",
       "retries": 0,
       "continueOnError": false
     }
@@ -137,15 +103,12 @@
       "platform": "AWS",
       "permissions": [
         "ec2:DescribeVolumes",
+        "ec2:DescribeSnapshots",
         "ec2:CreateSnapshot",
+        "ec2:CreateTags",
         "ec2:DeleteVolume"
       ],
-      "customerText": "An AWS account this can inspect and clean up unused disks in. If you have already connected one, we will use it."
-    },
-    {
-      "kind": "runtime",
-      "runtime": "powershell",
-      "customerText": "This automation runs a PowerShell script. Your workspace cannot run PowerShell yet, so it is published for review but cannot be started."
+      "customerText": "An AWS account we can clean up unused disks in. This one needs permission to delete, so it is the only automation here that can change anything — and it takes a recovery snapshot of every disk first."
     }
   ]
 }

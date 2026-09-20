@@ -33,6 +33,23 @@ WORKFLOW_SCHEMA = Draft202012Validator(
 
 PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}")
 
+#: The NATIVE graph form, `{{#start.Field#}}`. A different engine reads a
+#: different syntax, and the two deliberately cannot collide — core-service
+#: substitutes `{{Name}}` into a step before execution, so a graph body passing
+#: through that substitution would have its own references eaten.
+GRAPH_REF = re.compile(r"\{\{#\s*start\.([A-Za-z][A-Za-z0-9_]*)\s*#\}\}")
+
+
+def referenced(node):
+    """Every input a node reads, whichever engine it belongs to.
+
+    A step node keeps its command in `value`; a graph node scatters references
+    across `windowHours`, `url`, `args`, `prompt` and more — so the whole node
+    is searched rather than one field.
+    """
+    text = json.dumps(node)
+    return set(PLACEHOLDER.findall(text)) | set(GRAPH_REF.findall(text))
+
 
 def name_matches_task(doc, path, errors):
     task_id = doc.get("taskId", "")
@@ -94,7 +111,7 @@ def workflow_rules(doc, path):
     # would reach the runner verbatim — a hostname of "{{TargetHost}}" handed to
     # ssh is the kind of fault that must fail here, not in production.
     for node in doc.get("nodes", []):
-        for used in PLACEHOLDER.findall(node.get("value") or ""):
+        for used in referenced(node):
             if used not in by_name:
                 errors.append(f"node {node.get('label')!r} uses {{{{{used}}}}}, "
                               f"which is not a declared input")
@@ -104,7 +121,7 @@ def workflow_rules(doc, path):
     # they reach the model as tool arguments and inform its judgement (a
     # threshold to compare against) rather than being substituted into a step.
     used_everywhere = {u for n in doc.get("nodes", [])
-                       for u in PLACEHOLDER.findall(n.get("value") or "")}
+                       for u in referenced(n)}
     for name, field in sorted(by_name.items()):
         if field.get("consumedBy", "node") == "node" and name not in used_everywhere:
             errors.append(f"input '{name}' is declared consumedBy=node but no node uses it "

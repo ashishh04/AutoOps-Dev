@@ -33,16 +33,18 @@ jobs:
     name: backend / ${{ matrix.service }}
     runs-on: ubuntu-latest
     strategy:
-      # One service failing should not hide the results of the other eight.
+      # One service failing should not hide the results of the others.
       fail-fast: false
       matrix:
         service:
           - agent-service
+          - alert-service
           - api-gateway
           - auth-service
           - core-service
           - job-service
           - plugin-service
+          - rundeck-service
           - subscription-service
           - voice-agent
           - workflow-service
@@ -55,7 +57,7 @@ jobs:
           java-version: '21'
           distribution: temurin
           # Keyed on every pom.xml so a dependency bump in one service does not
-          # invalidate the cache for the other eight.
+          # invalidate the cache for the others.
           cache: maven
 
       - name: Build and test
@@ -76,6 +78,63 @@ jobs:
           check_name: tests / ${{ matrix.service }}
           # The build step already failed the job; do not fail it a second time.
           fail_on_failure: false
+
+  # --------------------------------------------------------------------------
+  # agent-runtime is Python, so it is invisible to the Maven matrix above — and
+  # until this job existed its tests had never run on a pull request at all.
+  #
+  # It gates three things that reach a customer's production cloud:
+  #   * the reducer and the phase graphs (pytest), including the golden replays
+  #     that pin how each shipped agent behaves step by step;
+  #   * the boto3 automation bodies, exercised against a stubbed AWS — these are
+  #     the only scripts here that run against a real account, and one of them
+  #     deletes disks;
+  #   * the authored workflow JSON, against its schema and against the body
+  #     scripts it is generated from.
+  # --------------------------------------------------------------------------
+  agent-runtime:
+    name: agent-runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/agent-runtime/pyproject.toml
+
+      - name: Install
+        working-directory: backend/agent-runtime
+        # jsonschema is not a runtime dependency — it is only needed by the
+        # authoring validator below, which does not ship in the image.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" jsonschema
+
+      - name: Lint
+        working-directory: backend/agent-runtime
+        # The automation bodies live in agent-service but are Python, and this
+        # is the only job with an interpreter — unlinted, they are the scripts
+        # least able to afford it.
+        run: |
+          ruff check .
+          ruff check --line-length 100 ../agent-service/workflows/_authoring
+          ruff check --line-length 100 ../agent-service/agents/_schema
+
+      - name: Tests
+        working-directory: backend/agent-runtime
+        run: pytest -q
+
+      # Run explicitly as well as through pytest. The schema validator covers
+      # the AGENTS tree too, which pytest does not reach, and a readable pass
+      # list in the log is what someone checks after authoring a new workflow.
+      - name: Validate authored agents and workflows
+        run: python backend/agent-service/agents/_schema/validate.py
+
+      - name: Check workflow JSON matches its body scripts
+        run: python backend/agent-service/workflows/_authoring/generate.py --check
 
   # --------------------------------------------------------------------------
   # Frontend: lint, unit tests, then a real production build. The build step is

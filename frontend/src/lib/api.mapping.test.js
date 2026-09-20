@@ -295,6 +295,51 @@ describe("agent mapping", () => {
     expect(agent.toolCount).toBe(2);
   });
 
+  it("round-trips the mutating flag so an edit cannot wipe it", async () => {
+    // The bug: mapAgent read {type, id, name} and agentTools wrote
+    // {type, id}, so saving a rolled-out agent dropped the flag its catalog
+    // declared. The backend then fails closed on the undeclared tool and the
+    // agent goes blind to its own read-only automations.
+    fetchSequence(
+      response(200, {
+        ...AGENT,
+        tools: [
+          { type: "WORKFLOW", id: 11, name: "Deploy API", available: true, mutating: false },
+          { type: "JOB", id: 31, name: "Purge logs", available: true, mutating: true },
+        ],
+      }),
+      response(200, { ...AGENT, tools: [] }),
+    );
+
+    const agent = await api.get("agents", 4);
+    expect(agent.tools.map((t) => t.mutating)).toEqual([false, true]);
+
+    await api.update("agents", 4, { tools: agent.tools });
+    const sent = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(JSON.parse(sent.tools)).toEqual([
+      { type: "WORKFLOW", id: 11, mutating: false },
+      { type: "JOB", id: 31, mutating: true },
+    ]);
+  });
+
+  it("does not invent a mutating flag the grant never declared", async () => {
+    // Undeclared is a third state. Writing `false` would hand a possibly
+    // state-changing automation to the evidence-gathering phase; writing
+    // `true` would hide a read-only one. Saying nothing keeps the decision
+    // with the backend, which fails closed.
+    fetchSequence(
+      response(200, AGENT),
+      response(200, { ...AGENT, tools: [] }),
+    );
+
+    const agent = await api.get("agents", 4);
+    expect(agent.tools[0].mutating).toBeUndefined();
+
+    await api.update("agents", 4, { tools: agent.tools });
+    const sent = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(JSON.parse(sent.tools)[0]).toEqual({ type: "WORKFLOW", id: 11 });
+  });
+
   it("shows a disabled agent as paused", async () => {
     fetchSequence(response(200, { ...AGENT, enabled: false }));
 

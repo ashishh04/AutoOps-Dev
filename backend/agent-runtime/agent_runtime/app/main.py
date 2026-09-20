@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from agent_runtime import agents
 from agent_runtime.app.config import settings
@@ -26,6 +26,8 @@ from agent_runtime.app.models import is_runnable
 from agent_runtime.app.reduce import reduce
 from agent_runtime.app.state import STATE_VERSION, ReduceRequest, ReduceResponse, Vendor
 from agent_runtime.graph.prompts import PROMPT_VERSION
+from agent_runtime.workflows import SPEC_VERSION
+from agent_runtime.workflows.api import WorkflowRunRequest, inspect, stream_run
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +71,7 @@ def health() -> dict:
         "status": "UP",
         "state_version": STATE_VERSION,
         "prompt_version": PROMPT_VERSION,
+        "workflow_spec_version": SPEC_VERSION,
         "agents": sorted(agents.REGISTRY),
     }
 
@@ -123,6 +126,33 @@ def reduce_endpoint(request: ReduceRequest) -> ReduceResponse:
         response.usage.completion_tokens,
     )
     return response
+
+
+@app.post("/v1/workflows/run", dependencies=[Depends(require_internal_token)])
+def run_workflow_endpoint(request: WorkflowRunRequest) -> StreamingResponse:
+    """Execute a workflow, streaming one NDJSON event per node.
+
+    Replaces the Dify bridge. The event shape is the one core-service's
+    progress callback already consumes, so the live run screen and the
+    line-by-line run log are unchanged by the swap.
+
+    Always 200, even for a run that fails: a failure is a *result* that Java
+    has to record against a run which may already have had side effects, and a
+    5xx would make the client guess at what happened. Only a malformed request
+    is an HTTP error.
+    """
+    return StreamingResponse(stream_run(request), media_type="application/x-ndjson")
+
+
+@app.post("/v1/workflows/inspect", dependencies=[Depends(require_internal_token)])
+def inspect_workflow_endpoint(definition: dict) -> dict:
+    """Validate a definition and report its input form, without running it.
+
+    This is what replaces reading a Dify app's ``/v1/parameters`` over the
+    network on every list and every run. The form travels WITH the definition
+    now, so it cannot desynchronise from the variables the workflow reads.
+    """
+    return inspect(definition)
 
 
 @app.exception_handler(Exception)

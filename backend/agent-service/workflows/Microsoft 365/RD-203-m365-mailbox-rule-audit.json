@@ -1,0 +1,77 @@
+{
+  "taskId": "RD-203",
+  "domain": "Microsoft 365",
+  "title": "Microsoft 365 Mailbox Rule Audit",
+  "description": "Finds inbox rules that forward or redirect mail to addresses outside the organisation, and flags the ones that also mark as read, move or delete the original — the signature of business email compromise rather than a user convenience. Read-only. External is computed from the tenant's own verified domains, not from a typed-in list.",
+  "category": "Security",
+  "runtime": "python",
+  "inputs": [
+    {
+      "variable": "Scope",
+      "label": "Which mailboxes",
+      "type": "select",
+      "required": true,
+      "options": [
+        "disabled-accounts",
+        "named-users",
+        "all-users"
+      ],
+      "default": "disabled-accounts",
+      "help": "disabled-accounts is the offboarding check and is cheap. all-users is a full sweep and takes one request per mailbox.",
+      "consumedBy": "node"
+    },
+    {
+      "variable": "UserPrincipalNames",
+      "label": "Mailboxes to check",
+      "type": "string",
+      "required": false,
+      "pattern": "^[A-Za-z0-9._%+\\-@]+(,[A-Za-z0-9._%+\\-@]+)*$|^$",
+      "help": "Required when the scope is named-users. Comma-separated addresses.",
+      "consumedBy": "node",
+      "default": "",
+      "placeholder": "leaver@customer.com"
+    },
+    {
+      "variable": "AdditionalInternalDomains",
+      "label": "Extra internal domains",
+      "type": "string",
+      "required": false,
+      "pattern": "^[a-z0-9.\\-]+(,[a-z0-9.\\-]+)*$|^$",
+      "help": "Domains to treat as internal beyond the tenant's own verified ones — a parent company or a partner you legitimately forward to.",
+      "consumedBy": "node",
+      "default": ""
+    },
+    {
+      "variable": "MaxUsers",
+      "label": "Mailbox limit",
+      "type": "number",
+      "required": true,
+      "min": 1,
+      "max": 2000,
+      "default": 200,
+      "help": "A ceiling on how many mailboxes one run inspects. Reaching it is reported, so a truncated sweep is never read as a clean one.",
+      "consumedBy": "node"
+    }
+  ],
+  "nodes": [
+    {
+      "type": "pyscript",
+      "label": "Microsoft 365 Mailbox Rule Audit",
+      "value": "\"\"\"Inbox rules that send mail out of the organisation. Read-only Graph.\n\nThis is the one that finds a live data leak rather than a posture weakness. Two\nthings produce an external forwarding rule and they look identical in the data:\n\n* a leaver who set one up before they went, which is an exfiltration path still\n  running months after their account was supposed to be closed;\n* business email compromise, where an attacker adds a rule that forwards or\n  redirects finance mail to an address they control and deletes the original,\n  so nobody in the company ever sees the thread.\n\nThe rule that hides its tracks is the tell. A rule that forwards externally AND\nmarks as read or moves to Deleted Items is doing something a person would not\ndo to their own mailbox, and that is called out separately.\n\n**\"External\" is computed from the tenant's own verified domains**, read from\nGraph, not from a list typed into a form. A hand-maintained internal-domain list\nis wrong the first time the customer adds a domain, and being wrong here means\neither missing a real leak or drowning the report in false positives.\n\"\"\"\nimport json\nimport os\nimport re\nimport sys\nimport urllib.parse\n\nimport requests\n\nSCOPE = \"{{Scope}}\"\nUSER_LIST = \"{{UserPrincipalNames}}\"\nEXTRA_INTERNAL = \"{{AdditionalInternalDomains}}\"\nMAX_USERS = int(\"{{MaxUsers}}\")\n\nif SCOPE not in (\"disabled-accounts\", \"named-users\", \"all-users\"):\n    sys.exit(\"Scope %r is not one this audit supports.\" % SCOPE)\nif not 1 <= MAX_USERS <= 2000:\n    sys.exit(\"MaxUsers %d is outside 1-2000.\" % MAX_USERS)\nif USER_LIST and not re.fullmatch(r\"[A-Za-z0-9._%+\\-@]+(,[A-Za-z0-9._%+\\-@]+)*\", USER_LIST):\n    sys.exit(\"UserPrincipalNames must be a comma-separated list of addresses.\")\nif EXTRA_INTERNAL and not re.fullmatch(r\"[a-z0-9.\\-]+(,[a-z0-9.\\-]+)*\", EXTRA_INTERNAL):\n    sys.exit(\"AdditionalInternalDomains must be a comma-separated list of domains.\")\nif SCOPE == \"named-users\" and not USER_LIST:\n    sys.exit(\"Scope is named-users but no UserPrincipalNames were supplied.\")\n\nGRAPH = \"https://graph.microsoft.com/v1.0\"\nTENANT = os.environ.get(\"AZURE_TENANT_ID\", \"\")\nCLIENT = os.environ.get(\"AZURE_CLIENT_ID\", \"\")\nSECRET = os.environ.get(\"AZURE_CLIENT_SECRET\", \"\")\n\nif not (TENANT and CLIENT and SECRET):\n    sys.exit(\n        \"No Microsoft 365 credentials reached this step. Connect an Azure/Entra \"\n        \"application to this project — it needs a tenant id, client id and client secret.\"\n    )\n\n#: Rule actions that move mail out of the organisation.\nOUTBOUND = (\"forwardTo\", \"redirectTo\", \"forwardAsAttachmentTo\")\n#: Rule actions whose only purpose, combined with an outbound action, is to stop\n#: the mailbox owner noticing.\nCONCEALING = (\"delete\", \"markAsRead\", \"moveToFolder\", \"permanentDelete\")\n\n\ndef token():\n    response = requests.post(\n        \"https://login.microsoftonline.com/%s/oauth2/v2.0/token\" % urllib.parse.quote(TENANT),\n        data={\n            \"client_id\": CLIENT,\n            \"client_secret\": SECRET,\n            \"grant_type\": \"client_credentials\",\n            \"scope\": \"https://graph.microsoft.com/.default\",\n        },\n        timeout=30,\n    )\n    if response.status_code != 200:\n        detail = response.json().get(\"error_description\", response.text)[:300]\n        sys.exit(\"Could not authenticate to Microsoft Graph: %s\" % detail)\n    return response.json()[\"access_token\"]\n\n\ndef graph_get(path, access_token, *, single=False):\n    url = path if path.startswith(\"http\") else GRAPH + path\n    items = []\n    while url:\n        response = requests.get(\n            url, headers={\"Authorization\": \"Bearer \" + access_token}, timeout=60\n        )\n        if response.status_code == 403:\n            return None, \"forbidden\"\n        if response.status_code == 404:\n            # No mailbox — an unlicensed or on-premises account. Not an error.\n            return None, \"no_mailbox\"\n        if response.status_code != 200:\n            return None, \"http_%d\" % response.status_code\n        payload = response.json()\n        if single:\n            return payload, None\n        items.extend(payload.get(\"value\", []))\n        url = payload.get(\"@odata.nextLink\")\n    return items, None\n\n\ndef addresses_in(action_value):\n    \"\"\"Recipient addresses out of a rule action, whatever shape it arrived in.\"\"\"\n    found = []\n    for entry in action_value or []:\n        address = (entry or {}).get(\"emailAddress\", {}).get(\"address\")\n        if address:\n            found.append(address.lower())\n    return found\n\n\ndef main():\n    access_token = token()\n\n    organisation, error = graph_get(\"/organization\", access_token)\n    if error:\n        sys.exit(\"Could not read the tenant's verified domains: %s. The app \"\n                 \"registration needs Organization.Read.All.\" % error)\n    internal = {\n        domain.get(\"name\", \"\").lower()\n        for org in (organisation or [])\n        for domain in org.get(\"verifiedDomains\", [])\n        if domain.get(\"name\")\n    }\n    internal |= {d for d in EXTRA_INTERNAL.split(\",\") if d}\n\n    if SCOPE == \"named-users\":\n        wanted = [name.strip().lower() for name in USER_LIST.split(\",\") if name.strip()]\n        users = [{\"userPrincipalName\": name, \"id\": name} for name in wanted]\n    else:\n        query = \"/users?$select=id,userPrincipalName,accountEnabled&$top=999\"\n        everyone, error = graph_get(query, access_token)\n        if error:\n            sys.exit(\"Could not list users: %s. The app registration needs \"\n                     \"User.Read.All.\" % error)\n        users = [\n            u for u in everyone\n            if SCOPE == \"all-users\" or not u.get(\"accountEnabled\", True)\n        ]\n\n    truncated = len(users) > MAX_USERS\n    users = users[:MAX_USERS]\n\n    print(\"MICROSOFT 365 MAILBOX RULE AUDIT\")\n    print(\"scope=%s mailboxes_examined=%d\" % (SCOPE, len(users)))\n    print(\"internal_domains=%s\" % \",\".join(sorted(internal)))\n    if truncated:\n        print(\"truncated=yes (more mailboxes matched than MaxUsers; narrow the scope \"\n              \"or raise the cap before treating this as complete)\")\n    print(\"\")\n\n    findings = []\n    unreadable = []\n    for user in users:\n        upn = user.get(\"userPrincipalName\", \"?\")\n        rules, error = graph_get(\n            \"/users/%s/mailFolders/inbox/messageRules\" % urllib.parse.quote(upn), access_token\n        )\n        if error:\n            if error != \"no_mailbox\":\n                unreadable.append(\"%s:%s\" % (upn, error))\n            continue\n\n        for rule in rules or []:\n            actions = rule.get(\"actions\", {}) or {}\n            recipients = []\n            for kind in OUTBOUND:\n                recipients.extend(addresses_in(actions.get(kind)))\n            if not recipients:\n                continue\n\n            external = sorted({\n                address for address in recipients\n                if address.rsplit(\"@\", 1)[-1] not in internal\n            })\n            if not external:\n                continue\n\n            conceals = [kind for kind in CONCEALING if actions.get(kind)]\n            finding = {\n                \"upn\": upn,\n                \"account_enabled\": \"yes\" if user.get(\"accountEnabled\", True) else \"NO\",\n                \"rule\": (rule.get(\"displayName\") or \"(unnamed)\")[:48],\n                \"rule_enabled\": \"yes\" if rule.get(\"isEnabled\") else \"no\",\n                \"forwards_to\": \",\".join(external),\n                \"hides_itself\": \",\".join(conceals) or \"no\",\n            }\n            findings.append(finding)\n            print(\" \".join(\"%s=%s\" % kv for kv in finding.items()))\n\n    active = [f for f in findings if f[\"rule_enabled\"] == \"yes\"]\n    concealing = [f for f in active if f[\"hides_itself\"] != \"no\"]\n    on_disabled = [f for f in active if f[\"account_enabled\"] == \"NO\"]\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"mailboxes_examined=%d\" % len(users))\n    print(\"external_forwarding_rules=%d (of which enabled: %d)\" % (len(findings), len(active)))\n    print(\"enabled_rules_that_also_hide_themselves=%d %s\"\n          % (len(concealing), sorted({f[\"upn\"] for f in concealing})))\n    print(\"enabled_rules_on_DISABLED_accounts=%d %s\"\n          % (len(on_disabled), sorted({f[\"upn\"] for f in on_disabled})))\n    if unreadable:\n        print(\"mailboxes_that_could_not_be_read=%d %s\" % (len(unreadable), unreadable[:20]))\n    print(\"\")\n    print(\"JSON \" + json.dumps({\n        \"scope\": SCOPE,\n        \"internal_domains\": sorted(internal),\n        \"truncated\": truncated,\n        \"rules\": findings,\n        \"unreadable\": unreadable,\n    }, sort_keys=True))\n\n\nmain()\n",
+      "retries": 0,
+      "continueOnError": false
+    }
+  ],
+  "requires": [
+    {
+      "kind": "cloud_connection",
+      "platform": "AZURE",
+      "permissions": [
+        "User.Read.All",
+        "Organization.Read.All",
+        "MailboxSettings.Read"
+      ],
+      "customerText": "A Microsoft 365 app registration we can read your directory with. It is read-only and separate from any Azure subscription — it needs consent for the listed permissions. MailboxSettings.Read lets it read inbox RULES only — it does not grant access to the contents of anyone's mail"
+    }
+  ]
+}

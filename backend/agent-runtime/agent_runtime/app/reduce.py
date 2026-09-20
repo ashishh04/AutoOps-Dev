@@ -22,10 +22,12 @@ are the ones that mean the request itself was malformed.
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from agent_runtime import agents
-from agent_runtime.app import evidence, tracing
-from agent_runtime.app.config import settings
+from agent_runtime.app import evidence, extraction, subject_scope, tracing, verdicts
+from agent_runtime.app.config import ELISION_MARKER, settings
 from agent_runtime.app.models import MissingCredential, VendorNotRunnable
 from agent_runtime.app.state import (
     AgentState,
@@ -63,6 +65,10 @@ def reduce(request: ReduceRequest) -> ReduceResponse:
         return _fail(None, str(exc))
 
     toolbox = Toolbox(specs=list(request.tools), unavailable=list(request.unavailable))
+    # Off unless a provider turned it on. `trace_id` is the LangSmith THREAD
+    # this run's reduces are stitched into, not a per-call id: a run parked on
+    # an approval for two days produces several reduces, and scattering them
+    # across unrelated traces loses the one artefact worth keeping.
     callbacks, trace_id = tracing.handlers(
         request.agent, run_id=request.run_id, tenant_id=request.tenant_id
     )
@@ -80,7 +86,16 @@ def reduce(request: ReduceRequest) -> ReduceResponse:
 
     try:
         graph = spec.build_graph()
-        result = graph.invoke({"state": state, "ctx": context})
+        # The ONE place callbacks are attached. Every phase inside inherits the
+        # parent run through LangChain's context variable, which is what makes
+        # a reduce read as one trace with eight nested phases rather than eight
+        # unrelated traces. See tracing.graph_config.
+        result = graph.invoke(
+            {"state": state, "ctx": context},
+            config=tracing.graph_config(
+                callbacks, request.agent, run_id=request.run_id, tenant_id=request.tenant_id
+            ),
+        )
         state = result["state"]
     except (VendorNotRunnable, MissingCredential) as exc:
         # A configuration problem, not a run problem. The message names the
@@ -96,7 +111,17 @@ def reduce(request: ReduceRequest) -> ReduceResponse:
             trace_id=trace_id,
         )
 
-    return _respond(state, context, resolution, trace_id)
+    return _respond(
+        state, context, resolution, trace_id,
+        run_id=request.run_id,
+        tenant_id=request.tenant_id,
+        # The window an idempotency key is scoped to. A run id would make every
+        # key unique and dedupe nothing; the DAY is the coarsest thing that is
+        # still honest for agents that run nightly, and it is what lets
+        # tomorrow's run recognise today's finding.
+        window=time.strftime("%Y-%m-%d", time.gmtime()),
+        has_mutating=toolbox.has_mutating(),
+    )
 
 
 # --------------------------------------------------------------- events ---
@@ -125,9 +150,64 @@ def _apply(request: ReduceRequest, agent_ref: str) -> AgentState:
         )
 
     if isinstance(event, ToolResultsEvent):
+        # ORDERING IS THE ENFORCEMENT. Extraction reads event.results, which are
+        # the RAW results as Java sent them. _absorb creates the compacted copies
+        # and they never leave it, so there is no shortened value in scope here
+        # to read by mistake.
+        #
+        # This matters because _compact elides the MIDDLE of a long result and a
+        # scope built from the survivors is internally perfect — count matches
+        # digest, digest matches rows, coverage matches count — while describing
+        # a fraction of what the run examined, and reaping the rest. See
+        # TRUNCATION.md.
+        #
+        # extraction.extract() also refuses content carrying ELISION_SIGNATURE,
+        # which backs this up if somebody moves the call. That guard should
+        # never fire in a correct build: if it fires, the ordering is wrong, not
+        # the guard.
+        _observe(state, request, event.results)
         _absorb(state, event.results)
 
     return state
+
+
+def _observe(
+    state: AgentState, request: ReduceRequest, results: list[ToolResultWire]
+) -> None:
+    """Records what the tools in this turn said the run examined.
+
+    Subjects come from TOOL OUTPUT, never from the model's account of it — an
+    agent that does not author its own coverage claim cannot overclaim one.
+    """
+    try:
+        spec = agents.resolve(request.agent.ref, request.agent.version).spec
+    except agents.UnknownAgent:
+        return
+
+    declared = {
+        tool.ref: tool.subjects for tool in spec.manifest.tools if tool.subjects
+    }
+    if not declared:
+        return
+
+    # The model calls tools by the name Java generated — workflow_<id>, a
+    # tenant-local number. The ref is the stable name the agent's author
+    # declared against, and it only exists on the wire spec.
+    ref_by_name = {tool.name: tool.ref for tool in request.tools if tool.ref}
+
+    for result in results:
+        ref = ref_by_name.get(evidence.tool_for(state, result.call_id))
+        for source in declared.get(ref, ()):
+            found = extraction.extract(result.content, source, tool_ok=result.ok)
+            state.extractions.append(
+                {
+                    "subject_kind": found.subject_kind,
+                    "outcome": found.outcome.value,
+                    "subject_ids": list(found.subject_ids),
+                    "source_total": found.source_total,
+                    "reason": found.reason,
+                }
+            )
 
 
 def _absorb(state: AgentState, results: list[ToolResultWire]) -> None:
@@ -178,7 +258,7 @@ def _compact(state: AgentState, result: ToolResultWire) -> str:
         head = content[: limit // 2].rstrip()
         tail = content[-(limit // 2) :].lstrip()
         elided = len(content) - len(head) - len(tail)
-        content = f"{head}\n\n... [{elided} characters elided] ...\n\n{tail}"
+        content = f"{head}\n\n{ELISION_MARKER.format(count=elided)}\n\n{tail}"
 
     if result.ok:
         return content
@@ -217,6 +297,11 @@ def _respond(
     context: RunContext,
     resolution: agents.Resolution,
     trace_id: str | None,
+    *,
+    run_id: int | None = None,
+    tenant_id: str | None = None,
+    window: str = "",
+    has_mutating: bool = False,
 ) -> ReduceResponse:
     """Turns the state the graph left behind into a directive for Java."""
     if state.pending_tool_calls:
@@ -228,8 +313,15 @@ def _respond(
             usage=context.usage,
             model_calls=context.calls,
             trace_id=trace_id,
+            # The declaration, and deliberately NOT the coverage. It is a
+            # property of the agent and true from the first call; coverage is a
+            # property of a finished run. A parked run has examined an unknown
+            # fraction of what it set out to, and publishing that fraction is
+            # how one bad night reaps a backlog.
+            declared_subject_kinds=list(resolution.spec.declared_subject_kinds()),
         )
 
+    coverage = _coverage(state)
     output = _final_text(state)
 
     if state.phase is not Phase.DONE:
@@ -243,6 +335,26 @@ def _respond(
             context=context,
             trace_id=trace_id,
         )
+
+    blocked = _blocked_from_gathering(state, context)
+    if blocked:
+        # The run reached REPORT having observed nothing, done nothing and
+        # concluded nothing, because every tool it was granted is invisible to
+        # the only phase that collects evidence. The model still writes
+        # something in that situation — it has an instruction and no data, so
+        # it narrates its intent — and that narration is what would otherwise
+        # be handed to the customer as the deliverable.
+        #
+        # Reported as a failure with the cause named, because it IS one, and
+        # because the alternative is a report that looks like work. A run that
+        # succeeded without looking at anything is worse than a run that
+        # failed: the failure gets fixed.
+        # The narration is replaced rather than shipped beside the error. A
+        # failed run still returns its output, and _final_text takes the last
+        # assistant message — so without this the paragraph describing tool
+        # calls that never happened is still what the customer would read.
+        state.messages.append(Message(role="assistant", text=blocked))
+        return _fail(state, blocked, context=context, trace_id=trace_id)
 
     note = resolution.note
     if note:
@@ -260,7 +372,123 @@ def _respond(
         trace_id=trace_id,
         citations=evidence.parse_citations(output or ""),
         uncited_claims=list(state.uncited_claims),
+        # Emitted only on a FINISHed run. A run that failed halfway has
+        # findings in its state, and publishing them as verdicts would let a
+        # half-finished investigation be dismissed as though it were complete.
+        findings=verdicts.verdicts(
+            state,
+            agent_ref=resolution.spec.ref,
+            agent_version=resolution.spec.version,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            window=window,
+            has_mutating=has_mutating,
+        ),
+        declared_subject_kinds=list(resolution.spec.declared_subject_kinds()),
+        # The COMPLETION claim, and only on a finished run. A run that stopped
+        # halfway examined an unknown fraction of what it set out to, and
+        # publishing that as coverage is how an outage reaps a backlog.
+        subject_scope=coverage[0],
+        subject_ids=coverage[1],
     )
+
+
+def _blocked_from_gathering(state: AgentState, context: RunContext) -> str | None:
+    """Why this run could not have gathered anything, if that is the case.
+
+    Narrowing hides a mutating tool from GATHER on purpose, and an agent whose
+    grant is ENTIRELY mutating therefore has a gathering phase that can see
+    nothing at all. That is a misconfiguration rather than a result, but from
+    inside the graph it is indistinguishable from an agent that simply found
+    nothing: GATHER routes onward, HYPOTHESIZE asks for data that never
+    arrives, and REPORT writes a paragraph about what it intended to do.
+
+    Everything here must be true before this is called a failure. An empty
+    ledger alone is not enough — a legitimate run can observe nothing — and a
+    run that acted, planned or concluded did work worth reporting even if it
+    gathered little. This is the narrow case where the agent was never able to
+    start.
+    """
+    if state.ledger or state.findings or state.planned or state.extractions:
+        return None
+    granted = context.toolbox.specs
+    if not granted:
+        return None
+
+    if not context.toolbox.for_phase(Phase.GATHER):
+        names = ", ".join(sorted(spec.name for spec in granted))
+        return (
+            f"The agent could not collect any evidence. All {len(granted)} of the tools it was "
+            f"granted ({names}) are marked as state-changing, and the evidence-gathering phase "
+            f"is only ever shown read-only tools — so it had nothing to call. Mark the "
+            'read-only ones with "mutating": false on the tool grant for this agent, then run '
+            "it again."
+        )
+
+    attempted = [
+        result
+        for message in state.messages
+        for result in message.tool_results
+    ]
+    if attempted and not any(result.ok for result in attempted):
+        # Every call it made was rejected. The model cannot recover from this
+        # on its own — the errors that produce it are usually structural rather
+        # than reasoning mistakes, and a model that spells an argument wrong
+        # once will spell it wrong identically on every retry — so the run
+        # burns its rounds and REPORT is asked to write up an investigation
+        # that never happened.
+        reasons = []
+        for result in attempted:
+            first = (result.content or "").strip().splitlines()[:1]
+            if first and first[0] not in reasons:
+                reasons.append(first[0])
+        # The first line of each distinct failure, capped: the operator needs
+        # to know WHICH wall it hit, and three of them is enough to see the
+        # pattern without pasting a transcript into an error field.
+        detail = "; ".join(reasons[:3])
+        summary = (
+            f"The agent could not collect any evidence: all {len(attempted)} of its tool "
+            f"calls were rejected, so it observed nothing to report on."
+        )
+        return f"{summary} {detail}" if detail else summary
+
+    return None
+
+def _coverage(state: AgentState) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """Folds every extraction into one scope element per subject kind.
+
+    Per kind rather than per tool because a kind can come from several tools —
+    and from several lists within one tool. ``resolve`` is what keeps a failure
+    in one of them from either contaminating the others or being papered over:
+    the union of what was seen is kept, and the verdict degrades to PARTIAL.
+    """
+    elements: list[dict[str, Any]] = []
+    ids: dict[str, list[str]] = {}
+
+    for kind, group in extraction.merge(
+        extraction.Extraction(
+            outcome=extraction.Outcome(record["outcome"]),
+            subject_kind=record["subject_kind"],
+            subject_ids=tuple(record["subject_ids"]),
+            source_total=record["source_total"],
+            reason=record["reason"],
+        )
+        for record in state.extractions
+    ).items():
+        covered = extraction.resolve(kind, group)
+        element: dict[str, Any] = {
+            "kind": "enumerated",
+            "subject_kind": kind,
+            "subject_id_count": len(covered.subject_ids),
+            "subject_ids_digest": subject_scope.subject_set_digest(covered.subject_ids),
+            "coverage": covered.coverage,
+        }
+        if covered.source_verified:
+            element["source_verified"] = True
+        elements.append(element)
+        ids[kind] = list(covered.subject_ids)
+
+    return elements, ids
 
 
 def _final_text(state: AgentState) -> str:

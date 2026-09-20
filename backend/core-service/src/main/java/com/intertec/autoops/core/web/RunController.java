@@ -5,8 +5,9 @@ import com.intertec.autoops.core.domain.CoreAuditEventType;
 import com.intertec.autoops.core.domain.RunTargetType;
 import com.intertec.autoops.core.exception.CoreException;
 import com.intertec.autoops.core.service.ApprovalService;
-import com.intertec.autoops.core.service.DifyWorkflowService;
 import com.intertec.autoops.core.service.GovernanceService;
+import com.intertec.autoops.core.service.WorkflowReadiness;
+import com.intertec.autoops.core.service.WorkflowInputField;
 import com.intertec.autoops.core.service.RunService;
 import com.intertec.autoops.core.web.dto.ApprovalRequiredResponse;
 import com.intertec.autoops.core.web.dto.ApprovalResponse;
@@ -84,17 +85,35 @@ public class RunController {
      *
      * <p>Deliberately NOT served by returning the workflow's definition: the
      * definition is the provider's design and workflow-service withholds it
-     * from a customer's browser on purpose. This resolves the slug to a Dify
+     * from a customer's browser on purpose. This reads the definition
      * key server-side and hands back only the field list.
      *
      * <p>An empty list is the normal answer for a plain {@code nodes[]}
      * workflow — the console then runs it straight away with no dialog.
      */
     @GetMapping("/api/workflows/{id}/inputs")
-    public List<DifyWorkflowService.InputField> workflowInputs(@PathVariable Long id,
+    public List<WorkflowInputField> workflowInputs(@PathVariable Long id,
                                                                @AuthenticationPrincipal Jwt jwt) {
         governanceService.assertWorkflowRunAllowed(tenant(jwt), id);
         return runService.inputFormFor(tenant(jwt), id);
+    }
+
+    /**
+     * Whether this workspace can actually run this workflow — asked BEFORE
+     * anyone presses Run.
+     *
+     * <p>A rolled-out workflow arrives complete and looks identical to a ready
+     * one: the provider built it against their workspace, and this one has
+     * different AI connections and different jobs. Until this existed the only
+     * way to find out was to press Run and read a red error, which reads as "the
+     * automation is broken" rather than "it is not set up yet".
+     *
+     * <p>Reads only; spends no tokens and starts nothing.
+     */
+    @GetMapping("/api/workflows/{id}/readiness")
+    public WorkflowReadiness.Readiness workflowReadiness(@PathVariable Long id,
+                                                         @AuthenticationPrincipal Jwt jwt) {
+        return runService.readinessFor(tenant(jwt), id);
     }
 
     @PostMapping("/api/workflows/{id}/run")

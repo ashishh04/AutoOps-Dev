@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://autoops.intertecsys.com/schema/workflow.schema.json",
   "title": "Provider-authored workflow definition",
-  "description": "Validation contract for workflows/<DOMAIN>/*.json. This file is the SINGLE source of truth for a use case's input form: the console renders it, and AgentToolbox turns the same declaration into the model's tool schema. Agents deliberately do NOT restate inputs — two copies drift, and a form that disagrees with the model's contract is worse than either alone.",
+  "description": "Validation contract for workflows/<DOMAIN>/*.json. Two shapes are legal and they run on different engines. A STEP workflow's nodes[] are job steps walked by core-service's ExecutionEngine on an execution host. A NATIVE workflow's nodes[] are a typed graph with edges[], handed whole to agent-runtime. This file is the SINGLE source of truth for a use case's input form either way: the console renders it, and AgentToolbox turns the same declaration into the model's tool schema.",
   "type": "object",
   "required": [
     "taskId",
@@ -33,8 +33,10 @@
         "SQL Server",
         "Security",
         "VMware",
-        "Windows Server"
-      ]
+        "Windows Server",
+        "AutoOps"
+      ],
+      "description": "'AutoOps' is the platform's own plane — workflows that read what happened in the workspace rather than in a vendor's estate. They need no cloud connection because the data is already ours."
     },
     "title": {
       "type": "string",
@@ -59,9 +61,10 @@
         "python",
         "rest",
         "terraform",
-        "kubernetes"
+        "kubernetes",
+        "native"
       ],
-      "description": "Runner the underlying automation needs. 'powershell' is currently blocked: job-service has no PowerShell runner or WinRM transport."
+      "description": "Runner the underlying automation needs. 'native' means the graph executes inside agent-runtime and needs no execution host at all. 'powershell' is currently blocked: job-service has no PowerShell runner or WinRM transport."
     },
     "blockedBy": {
       "type": "string",
@@ -200,32 +203,68 @@
       "minItems": 1,
       "description": "Steps ExecutionEngine walks. {{Variable}} placeholders are resolved from the run's inputs.",
       "items": {
-        "type": "object",
-        "required": [
-          "type",
-          "label"
-        ],
-        "properties": {
-          "type": {
-            "type": "string",
-            "minLength": 1
+        "oneOf": [
+          {
+            "title": "Step node (ExecutionEngine)",
+            "type": "object",
+            "required": [
+              "type",
+              "label"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "value": {
+                "type": "string"
+              },
+              "retries": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5
+              },
+              "continueOnError": {
+                "type": "boolean"
+              }
+            }
           },
-          "label": {
-            "type": "string",
-            "minLength": 1
-          },
-          "value": {
-            "type": "string"
-          },
-          "retries": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 5
-          },
-          "continueOnError": {
-            "type": "boolean"
+          {
+            "title": "Graph node (agent-runtime)",
+            "type": "object",
+            "required": [
+              "id",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "start",
+                  "llm",
+                  "platform",
+                  "job",
+                  "http",
+                  "template",
+                  "condition",
+                  "end"
+                ]
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
           }
-        }
+        ]
       }
     },
     "requires": {
@@ -288,6 +327,29 @@
             "type": "boolean",
             "default": false,
             "description": "True when the automation degrades gracefully without it."
+          }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "description": "Native graph only. Transitions between nodes; 'branch' selects an arm of a condition.",
+      "items": {
+        "type": "object",
+        "required": [
+          "source",
+          "target"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
           }
         }
       }

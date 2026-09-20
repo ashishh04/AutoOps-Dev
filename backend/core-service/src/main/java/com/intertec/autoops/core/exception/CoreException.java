@@ -35,7 +35,7 @@ public class CoreException extends RuntimeException {
     }
 
     /**
-     * An upstream we depend on answered, but wrongly — a Dify rejection of OUR
+     * An upstream we depend on answered, but wrongly — a rejection of OUR
      * credentials, say. Distinct from 503 (couldn't reach it) and from 401
      * (which the console would misread as the USER's session expiring).
      */

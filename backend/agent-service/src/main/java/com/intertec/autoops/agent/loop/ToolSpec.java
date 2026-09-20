@@ -13,10 +13,24 @@ import java.util.Map;
  * when to reach for it, and - for anything that changes state - that it will
  * be gated.
  */
-public record ToolSpec(String name, String description, Map<String, Object> inputSchema) {
+/**
+ * @param ref the catalog name this tool was declared against, carried through
+ *            delivery. The {@code name} the model sees is {@code workflow_<id>}
+ *            — a tenant-specific number that means nothing to the runtime — so
+ *            the ref is how agent-runtime matches a result back to what its
+ *            author said that tool returns. Null for anything rolled out before
+ *            refs were carried, which costs subject extraction and nothing else.
+ */
+public record ToolSpec(String name, String description, Map<String, Object> inputSchema,
+                       String ref) {
 
     public ToolSpec {
         inputSchema = Map.copyOf(inputSchema);
+    }
+
+    /** For callers that have no ref to give — tests, and jobs before delivery. */
+    public ToolSpec(String name, String description, Map<String, Object> inputSchema) {
+        this(name, description, inputSchema, null);
     }
 
     /**

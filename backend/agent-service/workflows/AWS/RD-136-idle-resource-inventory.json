@@ -1,0 +1,52 @@
+{
+  "taskId": "RD-136",
+  "domain": "AWS",
+  "title": "Idle Resource Inventory",
+  "description": "Lists unattached EBS volumes, unassociated elastic IPs and stopped instances in one region, with age, tags and an indicative monthly cost per item. Read-only. This is the inventory a cleanup is proposed FROM — it names the exact resource ids a reclaim would act on.",
+  "category": "Cost",
+  "runtime": "python",
+  "inputs": [
+    {
+      "variable": "Region",
+      "label": "Region",
+      "type": "string",
+      "required": true,
+      "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$",
+      "help": "EBS volumes and elastic IPs are regional. One region per run.",
+      "consumedBy": "node",
+      "default": "us-east-1"
+    },
+    {
+      "variable": "MinimumAgeDays",
+      "label": "Minimum age (days)",
+      "type": "number",
+      "required": true,
+      "min": 0,
+      "max": 3650,
+      "default": 7,
+      "help": "Ignore volumes created more recently than this. A disk detached this morning is usually a migration in progress, not waste.",
+      "consumedBy": "node"
+    }
+  ],
+  "nodes": [
+    {
+      "type": "pyscript",
+      "label": "Idle Resource Inventory",
+      "value": "\"\"\"What is running that nobody is using. Read-only: EC2 Describe* only.\n\nThree kinds of waste, in one pass, because they are usually the same story:\nan instance was terminated, its volume was kept, and its elastic IP was never\nreleased.\n\n**On the cost figures.** AWS does not expose \"what is this volume costing me\"\nas an API. The estimates below are computed from published list prices for the\nregion named in PRICES, and every line that carries one says so in the field\nname. They are the right order of magnitude for deciding what to clean up and\nthe wrong number to put in a financial report, which is exactly how they are\nlabelled. Where a volume type or region is not in the table, the field reads\n`unpriced` rather than guessing — a made-up figure is worse than no figure.\n\"\"\"\nimport json\nimport re\nimport sys\nfrom datetime import datetime, timezone\n\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError, NoCredentialsError\n\nREGION = \"{{Region}}\"\nMIN_AGE_DAYS = int(\"{{MinimumAgeDays}}\")\n\nif not re.fullmatch(r\"[a-z0-9-]{1,32}\", REGION):\n    sys.exit(\"Region %r is not an AWS region name.\" % REGION)\nif not 0 <= MIN_AGE_DAYS <= 3650:\n    sys.exit(\"MinimumAgeDays %d is outside 0-3650.\" % MIN_AGE_DAYS)\n\nCFG = Config(retries={\"max_attempts\": 5, \"mode\": \"standard\"})\nNOW = datetime.now(timezone.utc)\n\n#: Published USD per GB-month, us-east-1, at time of authoring. Used ONLY to\n#: rank candidates by rough size of prize. Every output field built from this\n#: carries the basis in its own name so a figure cannot be quoted without it.\nPRICES_REGION = \"us-east-1\"\nPRICES = {\n    \"gp3\": 0.08, \"gp2\": 0.10, \"io1\": 0.125, \"io2\": 0.125,\n    \"st1\": 0.045, \"sc1\": 0.015, \"standard\": 0.05,\n}\n#: An idle (unassociated) elastic IP is charged by the hour.\nEIP_MONTHLY = 0.005 * 730\n\n\ndef estimate(volume_type, size_gb):\n    rate = PRICES.get(volume_type)\n    if rate is None:\n        return \"unpriced\"\n    return round(rate * size_gb, 2)\n\n\ndef age_of(timestamp):\n    return int((NOW - timestamp).total_seconds() // 86400)\n\n\ndef tags_of(item):\n    return {t[\"Key\"]: t[\"Value\"] for t in item.get(\"Tags\", [])}\n\n\ndef main():\n    ec2 = boto3.client(\"ec2\", region_name=REGION, config=CFG)\n\n    print(\"IDLE RESOURCE INVENTORY\")\n    print(\"region=%s minimum_age_days=%d\" % (REGION, MIN_AGE_DAYS))\n    print(\"cost_estimate_basis=published %s list prices; indicative only, not billing data\"\n          % PRICES_REGION)\n    if REGION != PRICES_REGION:\n        print(\"cost_estimate_caveat=this run is against %s and the prices are %s; \"\n              \"treat the figures as relative sizes, not amounts\" % (REGION, PRICES_REGION))\n    print(\"\")\n\n    volumes, eips, stopped = [], [], []\n    failures = []\n\n    try:\n        pages = ec2.get_paginator(\"describe_volumes\").paginate(\n            Filters=[{\"Name\": \"status\", \"Values\": [\"available\"]}]\n        )\n        for page in pages:\n            for vol in page[\"Volumes\"]:\n                age = age_of(vol[\"CreateTime\"])\n                if age < MIN_AGE_DAYS:\n                    continue\n                tags = tags_of(vol)\n                row = {\n                    \"volume_id\": vol[\"VolumeId\"],\n                    \"size_gb\": vol[\"Size\"],\n                    \"type\": vol.get(\"VolumeType\", \"?\"),\n                    \"az\": vol.get(\"AvailabilityZone\", \"?\"),\n                    \"age_days\": age,\n                    \"encrypted\": \"yes\" if vol.get(\"Encrypted\") else \"no\",\n                    \"snapshot_of_origin\": vol.get(\"SnapshotId\") or \"none\",\n                    \"est_monthly_usd_list_price\": estimate(vol.get(\"VolumeType\", \"\"), vol[\"Size\"]),\n                    \"name_tag\": tags.get(\"Name\", \"\"),\n                    \"owner_tag\": tags.get(\"Owner\") or tags.get(\"owner\", \"\"),\n                }\n                volumes.append(row)\n                print(\"UNATTACHED_VOLUME \" + \" \".join(\"%s=%s\" % kv for kv in row.items()))\n    except NoCredentialsError:\n        sys.exit(\"No AWS credentials reached this step. Connect an AWS account to this project.\")\n    except ClientError as exc:\n        failures.append(\"describe_volumes:%s\" % exc.response.get(\"Error\", {}).get(\"Code\", \"?\"))\n\n    try:\n        for addr in ec2.describe_addresses().get(\"Addresses\", []):\n            if addr.get(\"AssociationId\"):\n                continue\n            tags = tags_of(addr)\n            row = {\n                \"allocation_id\": addr.get(\"AllocationId\", \"classic\"),\n                \"public_ip\": addr.get(\"PublicIp\", \"?\"),\n                \"domain\": addr.get(\"Domain\", \"?\"),\n                \"est_monthly_usd_list_price\": round(EIP_MONTHLY, 2),\n                \"name_tag\": tags.get(\"Name\", \"\"),\n            }\n            eips.append(row)\n            print(\"UNASSOCIATED_EIP \" + \" \".join(\"%s=%s\" % kv for kv in row.items()))\n    except ClientError as exc:\n        failures.append(\"describe_addresses:%s\" % exc.response.get(\"Error\", {}).get(\"Code\", \"?\"))\n\n    try:\n        pages = ec2.get_paginator(\"describe_instances\").paginate(\n            Filters=[{\"Name\": \"instance-state-name\", \"Values\": [\"stopped\"]}]\n        )\n        for page in pages:\n            for reservation in page[\"Reservations\"]:\n                for inst in reservation[\"Instances\"]:\n                    tags = tags_of(inst)\n                    attached = [\n                        m[\"Ebs\"][\"VolumeId\"] for m in inst.get(\"BlockDeviceMappings\", [])\n                        if m.get(\"Ebs\")\n                    ]\n                    transition = inst.get(\"StateTransitionReason\", \"\")\n                    row = {\n                        \"instance_id\": inst[\"InstanceId\"],\n                        \"type\": inst.get(\"InstanceType\", \"?\"),\n                        \"stopped_since\": transition or \"unknown\",\n                        \"attached_volumes\": len(attached),\n                        \"name_tag\": tags.get(\"Name\", \"\"),\n                    }\n                    # A stopped instance is free; its disks are not. That is the\n                    # part people are surprised by, so it is the part reported.\n                    stopped.append(row)\n                    print(\"STOPPED_INSTANCE \" + \" \".join(\"%s=%s\" % kv for kv in row.items()))\n    except ClientError as exc:\n        failures.append(\"describe_instances:%s\" % exc.response.get(\"Error\", {}).get(\"Code\", \"?\"))\n\n    priced = [v[\"est_monthly_usd_list_price\"] for v in volumes\n              if isinstance(v[\"est_monthly_usd_list_price\"], float)]\n    volume_cost = round(sum(priced), 2)\n    eip_cost = round(sum(e[\"est_monthly_usd_list_price\"] for e in eips), 2)\n    unpriced = [v[\"volume_id\"] for v in volumes\n                if v[\"est_monthly_usd_list_price\"] == \"unpriced\"]\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"unattached_volumes=%d total_gb=%d est_monthly_usd_list_price=%.2f\"\n          % (len(volumes), sum(v[\"size_gb\"] for v in volumes), volume_cost))\n    if unpriced:\n        print(\"volumes_with_no_published_price=%s\" % unpriced)\n    print(\"unassociated_eips=%d est_monthly_usd_list_price=%.2f\" % (len(eips), eip_cost))\n    print(\"stopped_instances=%d (the instances are free; their attached disks are not)\"\n          % len(stopped))\n    print(\"combined_est_monthly_usd_list_price=%.2f\" % round(volume_cost + eip_cost, 2))\n    if failures:\n        # An audit that could not look must not read as an audit that found\n        # nothing.\n        print(\"collections_that_failed=%s\" % failures)\n    print(\"\")\n    print(\"JSON \" + json.dumps({\n        \"region\": REGION,\n        \"price_basis_region\": PRICES_REGION,\n        \"unattached_volumes\": volumes,\n        \"unassociated_eips\": eips,\n        \"stopped_instances\": stopped,\n        \"failures\": failures,\n    }, sort_keys=True, default=str))\n\n\nmain()\n",
+      "retries": 0,
+      "continueOnError": false
+    }
+  ],
+  "requires": [
+    {
+      "kind": "cloud_connection",
+      "platform": "AWS",
+      "customerText": "An AWS account we can read from. The access we need is read-only — nothing in this check can change anything.",
+      "permissions": [
+        "ec2:DescribeVolumes",
+        "ec2:DescribeAddresses",
+        "ec2:DescribeInstances"
+      ]
+    }
+  ]
+}

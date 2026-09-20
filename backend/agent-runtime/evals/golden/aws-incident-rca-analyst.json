@@ -1,0 +1,192 @@
+{
+  "name": "Incident RCA analyst — nine alarms, two incidents, one change that explains one of them",
+  "_why": [
+    "The agent doing the job an engineer is doing at 02:00, and the case that",
+    "shows why a phased agent beats a dashboard. Two consoles each hold half",
+    "the answer; the question is the join.",
+    "",
+    "Three behaviours are pinned, and each is one an agent under time pressure",
+    "gets wrong:",
+    "",
+    "  * It splits the board into TWO incidents rather than narrating nine",
+    "    alarms. The flapping alarm is set aside, not made part of the story.",
+    "  * For the first incident it names a prime suspect WITH A MECHANISM —",
+    "    the security-group change removed the ingress the health check uses —",
+    "    and gives the gap in minutes.",
+    "  * For the second it says the change record is EMPTY for that window and",
+    "    points at what is invisible to CloudTrail, instead of reaching for the",
+    "    nearest change and calling it the cause. That restraint is the whole",
+    "    product; an agent that always finds a culprit is worse than none."
+  ],
+  "agent": {
+    "ref": "aws.incident_rca_analyst",
+    "version": "1.0.0",
+    "model": "claude-sonnet-5",
+    "vendor": "ANTHROPIC"
+  },
+  "tools": [
+    {
+      "name": "workflow_71",
+      "description": "Lists every alarm not in OK with the resource it is about, how long it has been in that state, and how many times it has flipped. Groups alarms whose first state change falls in the same ten minutes. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Region": { "type": "string", "description": "Region" },
+          "LookbackHours": { "type": "number", "description": "Lookback (hours)" },
+          "AlarmNamePrefix": { "type": "string", "description": "Alarm name prefix" }
+        },
+        "required": ["Region", "LookbackHours"]
+      },
+      "mutating": false
+    },
+    {
+      "name": "workflow_72",
+      "description": "Every write API call in the account within a time window, in order, with who made it, from where, against what, and whether it succeeded. Read-only calls are excluded. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Region": { "type": "string", "description": "Region" },
+          "LookbackHours": { "type": "number", "description": "Lookback (hours)" },
+          "ResourceNameContains": { "type": "string", "description": "Only changes touching" },
+          "MaxEvents": { "type": "number", "description": "Event limit" }
+        },
+        "required": ["Region", "LookbackHours", "MaxEvents"]
+      },
+      "mutating": false
+    }
+  ],
+  "steps": [
+    {
+      "event": {
+        "kind": "START",
+        "input": "Checkout has been throwing 5xx since about 14:20 and the board is lit up. What is going on and what caused it? us-east-1."
+      },
+      "script": [
+        {
+          "type": "structured",
+          "schema": "TriageOut",
+          "value": {
+            "restated": "Work out which of the current alarms are one incident and what changed immediately before each started, in us-east-1.",
+            "observations_needed": [
+              "Every alarm not in OK, with its resource and when it went red",
+              "Every write API call in the surrounding window, in order"
+            ],
+            "can_proceed": true,
+            "reason": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "Taking the alarm board and the change record over the same window so the timelines line up.",
+          "tool_calls": [
+            {
+              "name": "workflow_71",
+              "args": { "Region": "us-east-1", "LookbackHours": 4, "AlarmNamePrefix": "" },
+              "id": "toolu_alarms"
+            },
+            {
+              "name": "workflow_72",
+              "args": {
+                "Region": "us-east-1",
+                "LookbackHours": 4,
+                "ResourceNameContains": "",
+                "MaxEvents": 500
+              },
+              "id": "toolu_trail"
+            }
+          ],
+          "input_tokens": 1310,
+          "output_tokens": 96
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "GATHER",
+        "tool_calls": ["workflow_71", "workflow_72"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "toolu_alarms",
+            "ok": true,
+            "evidence_id": 801,
+            "content": "CLOUDWATCH ALARM STATE AUDIT\nregion=us-east-1 lookback_hours=4 window_start=2026-09-19T10:30:00+00:00 alarms_examined=61\n\nalarm=prod-alb-5xx state=ALARM resource=LoadBalancer=app/prod-lb/abc metric=AWS/ApplicationELB/HTTPCode_ELB_5XX_Count in_state_since=2026-09-19T14:22:00+00:00 minutes_in_state=48 reason=Threshold Crossed state_changes_in_window=1 first_change_in_window=2026-09-19T14:22:00+00:00\nalarm=prod-tg-unhealthy state=ALARM resource=TargetGroup=targetgroup/checkout/def metric=AWS/ApplicationELB/UnHealthyHostCount in_state_since=2026-09-19T14:23:00+00:00 minutes_in_state=47 reason=Threshold Crossed state_changes_in_window=1 first_change_in_window=2026-09-19T14:23:00+00:00\nalarm=checkout-ecs-running-count state=ALARM resource=ServiceName=checkout,ClusterName=prod metric=AWS/ECS/RunningTaskCount in_state_since=2026-09-19T14:24:00+00:00 minutes_in_state=46 reason=Threshold Crossed state_changes_in_window=1 first_change_in_window=2026-09-19T14:24:00+00:00\nalarm=reports-rds-cpu state=ALARM resource=DBInstanceIdentifier=reports-prod metric=AWS/RDS/CPUUtilization in_state_since=2026-09-19T12:05:00+00:00 minutes_in_state=185 reason=Threshold Crossed state_changes_in_window=1 first_change_in_window=2026-09-19T12:05:00+00:00\nalarm=batch-queue-depth state=ALARM resource=QueueName=batch-jobs metric=AWS/SQS/ApproximateNumberOfMessagesVisible in_state_since=2026-09-19T14:10:00+00:00 minutes_in_state=60 reason=Threshold Crossed state_changes_in_window=9 first_change_in_window=2026-09-19T10:41:00+00:00\nalarm=checkout-canary state=INSUFFICIENT_DATA resource=CanaryName=checkout-canary metric=CloudWatchSynthetics/SuccessPercent in_state_since=2026-09-19T14:25:00+00:00 minutes_in_state=45 reason=Insufficient data state_changes_in_window=1 first_change_in_window=2026-09-19T14:25:00+00:00\n\nSUMMARY\nalarms_not_ok=6 in_alarm=5 insufficient_data=1\nflapping_4_or_more_changes=1 ['batch-queue-depth']\ntime_clusters=1 (alarms that first changed within the same ten minutes)\ncluster_at=2026-09-19T14:20:00+00:00 count=4 alarms=['checkout-canary', 'checkout-ecs-running-count', 'prod-alb-5xx', 'prod-tg-unhealthy']\nnote=INSUFFICIENT_DATA is not OK. A check that stopped reporting often means the thing it measured has gone away."
+          },
+          {
+            "call_id": "toolu_trail",
+            "ok": true,
+            "evidence_id": 802,
+            "content": "CLOUDTRAIL CHANGE TIMELINE\nregion=us-east-1 lookback_hours=4 window_start=2026-09-19T10:30:00+00:00 write_events_found=12\nnote=read-only API calls are excluded; nothing in this list is a Describe or a List\n\nat=2026-09-19T11:02:00+00:00 minutes_ago=248 event=ConsoleLogin actor=a.fernandes source=signin resources=- from_ip=198.51.100.4 outcome=ok\nat=2026-09-19T14:19:00+00:00 minutes_ago=51 event=ModifySecurityGroupRules actor=deploy-ci source=ec2 resources=sg-0f1e2d3c4b5a69780 from_ip=203.0.113.7 outcome=ok\nat=2026-09-19T14:19:00+00:00 minutes_ago=51 event=RevokeSecurityGroupIngress actor=deploy-ci source=ec2 resources=sg-0f1e2d3c4b5a69780 from_ip=203.0.113.7 outcome=ok\nat=2026-09-19T14:41:00+00:00 minutes_ago=29 event=UpdateService actor=a.fernandes source=ecs resources=checkout from_ip=198.51.100.4 outcome=ok\n\nSUMMARY\nchanges_in_window=3 (excluding 1 sign-in/assume-role events)\nfailed_calls=0 []\nchanges_by_actor=[('deploy-ci', 2), ('a.fernandes', 1)]\nmost_frequent_changes=[('ModifySecurityGroupRules', 1), ('RevokeSecurityGroupIngress', 1), ('UpdateService', 1)]\nearliest_change=2026-09-19T14:19:00+00:00 ModifySecurityGroupRules\nlatest_change=2026-09-19T14:41:00+00:00 UpdateService"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "Both returned. The board is two incidents, not six alarms.",
+          "input_tokens": 2600,
+          "output_tokens": 20
+        },
+        {
+          "type": "structured",
+          "schema": "HypothesisOut",
+          "value": {
+            "findings": [
+              {
+                "summary": "Incident 1 — checkout: four alarms first changed between 14:22 and 14:25, all on the same request path (ALB, its target group, the ECS service behind it, and the synthetic canary in front of it). This is one incident, not four.",
+                "severity": "critical",
+                "cites": [801]
+              },
+              {
+                "summary": "Prime suspect for incident 1: RevokeSecurityGroupIngress on sg-0f1e2d3c4b5a69780 by deploy-ci at 14:19, three minutes before the first alarm. Revoking ingress on the group in front of the targets would make the load balancer's health check fail, which produces exactly this order — unhealthy targets, then 5xx, then the canary losing data.",
+                "severity": "critical",
+                "cites": [801, 802]
+              },
+              {
+                "summary": "Incident 2 — reports-prod RDS CPU has been in ALARM since 12:05, over two hours before the checkout cluster and on an unrelated resource. No write API call touched it in the window searched, so nothing in the change record explains it.",
+                "severity": "warning",
+                "cites": [801, 802]
+              },
+              {
+                "summary": "batch-queue-depth has changed state nine times in the window, which is flapping rather than an incident, and should be set aside until the threshold is reviewed.",
+                "severity": "info",
+                "cites": [801]
+              },
+              {
+                "summary": "The UpdateService on checkout at 14:41 is 19 minutes AFTER the first alarm, so it is remediation in progress rather than a cause.",
+                "severity": "info",
+                "cites": [802]
+              }
+            ],
+            "need_more": false,
+            "collect": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "**Checkout is down because ingress was revoked on the load balancer's security group at 14:19, three minutes before the first alarm [e:801][e:802]. The RDS alarm is a separate, older problem [e:801].**\n\n## Incident 1 — checkout, started 14:22\n\nFour alarms, one request path, one incident [e:801]:\n\n| Time | Alarm | Resource |\n| --- | --- | --- |\n| 14:22 | prod-alb-5xx | LoadBalancer=app/prod-lb/abc [e:801] |\n| 14:23 | prod-tg-unhealthy | TargetGroup=targetgroup/checkout/def [e:801] |\n| 14:24 | checkout-ecs-running-count | ServiceName=checkout [e:801] |\n| 14:25 | checkout-canary | INSUFFICIENT_DATA, not OK [e:801] |\n\nThe order is the tell: unhealthy targets, then 5xx at the edge, then the canary losing data as there was nothing left to answer it.\n\nPrime suspect, with a mechanism: at 14:19, three minutes before the first alarm, deploy-ci called RevokeSecurityGroupIngress and ModifySecurityGroupRules on sg-0f1e2d3c4b5a69780 [e:802]. Revoking ingress on the group in front of the targets stops the load balancer's health check reaching them, which produces this exact sequence. It is the only change in the window that touches a resource on this path.\n\nCheck first: whether that security group is the one attached to the checkout targets, and whether the revoked rule was the health-check port. That single check confirms or kills this.\n\nThe UpdateService on checkout at 14:41 is 19 minutes after the first alarm [e:802], so it is somebody already responding rather than a cause.\n\n## Incident 2 — reports-prod, started 12:05\n\nreports-rds-cpu has been in ALARM since 12:05, more than two hours before the checkout cluster, on a database that is not on that request path [e:801]. It is a separate problem and should not be merged into the checkout narrative.\n\nNo write API call touched reports-prod in the four hours searched [e:802]. That is a real finding rather than a gap: it points away from an infrastructure change and towards query load, a scheduled job, or an application release that CloudTrail cannot see.\n\n## Set aside\n\nbatch-queue-depth has changed state nine times in the window [e:801]. That is flapping — a threshold problem or a genuinely marginal queue — and not part of either incident.\n\n## What I could not determine\n\nI have alarm states and the change record, and nothing about error rates, customer impact or duration. The window searched was four hours; a change made before 10:30 would not appear.",
+          "input_tokens": 3600,
+          "output_tokens": 640
+        }
+      ],
+      "expect": {
+        "directive": "FINISH",
+        "phase": "DONE",
+        "tool_calls": [],
+        "citations": [801, 802],
+        "has_uncited": false,
+        "output_contains": [
+          "Incident 1",
+          "Incident 2",
+          "Prime suspect, with a mechanism",
+          "No write API call touched reports-prod",
+          "flapping",
+          "somebody already responding rather than a cause"
+        ]
+      }
+    }
+  ]
+}

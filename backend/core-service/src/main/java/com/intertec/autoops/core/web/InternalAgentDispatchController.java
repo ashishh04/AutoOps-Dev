@@ -23,7 +23,6 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.intertec.autoops.core.service.DifyWorkflowService;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -61,7 +60,6 @@ public class InternalAgentDispatchController {
     private final ApprovalService approvalService;
     private final ApprovalSettingsService approvalSettings;
     private final WorkflowClient workflowClient;
-    private final DifyWorkflowService difyWorkflows;
     private final ObjectMapper objectMapper;
 
     public InternalAgentDispatchController(JobRepository jobRepository,
@@ -70,7 +68,6 @@ public class InternalAgentDispatchController {
                                            ApprovalService approvalService,
                                            ApprovalSettingsService approvalSettings,
                                            WorkflowClient workflowClient,
-                                           DifyWorkflowService difyWorkflows,
                                            ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.runRepository = runRepository;
@@ -78,7 +75,6 @@ public class InternalAgentDispatchController {
         this.approvalService = approvalService;
         this.approvalSettings = approvalSettings;
         this.workflowClient = workflowClient;
-        this.difyWorkflows = difyWorkflows;
         this.objectMapper = objectMapper;
     }
 
@@ -86,7 +82,7 @@ public class InternalAgentDispatchController {
      * @param actor      names the agent, e.g. {@code agent:Patch Operator#12} —
      *                   it becomes the run's {@code triggered_by}
      * @param targetType JOB or WORKFLOW
-     * @param inputs     values for a Dify-backed workflow's published input
+     * @param inputs     values for the workflow's published input
      *                   form; ignored for jobs and for plain canvas workflows,
      *                   which have no form to fill
      */
@@ -118,31 +114,24 @@ public class InternalAgentDispatchController {
     /**
      * The input form a workflow tool must expose to the model.
      *
-     * <p>Without this an agent could only press a button. A Dify workflow that
-     * asks for a hostname and a change ticket is useless to an agent that
-     * cannot supply either, and guessing the variable names from the workflow
-     * title is exactly the kind of invention this codebase does not do.
+     * <p>Without this an agent could only press a button. A workflow that asks
+     * for a hostname and a change ticket is useless to an agent that cannot
+     * supply either, and guessing the variable names from the workflow title is
+     * exactly the kind of invention this codebase does not do.
      *
-     * <p><b>Two sources, one shape.</b> A Dify-backed workflow's form comes from
-     * Dify. A native workflow declares its own {@code inputs[]} alongside its
-     * {@code nodes[]}, and that is read here. Both are returned in the same
-     * {@code variable/label/type/required/options} rows, so agent-service and
-     * the console cannot tell — or care — which engine is behind a tool.
+     * <p><b>One source.</b> A workflow declares its own {@code inputs[]}
+     * alongside its {@code nodes[]}, and that is read here. It used to have a
+     * second source — a vendor's published form, fetched over the network on
+     * every call — which meant the tool schema was only ever as available as a
+     * third party, and could disagree with the variables the workflow read.
      *
-     * <p>Before native inputs were read here this returned an empty list for
-     * every non-Dify workflow, which gave the model a zero-argument tool
-     * schema: a parameterised automation the agent had no way to parameterise.
-     *
-     * <p>An empty list is still a real answer — a canvas workflow that declares
-     * no inputs genuinely has no form. A workflow whose Dify key is missing or
-     * revoked reports {@code error} rather than an empty form, so agent-service
-     * can leave the tool out instead of offering one that will fail on use.
+     * <p>An empty list is a real answer: a workflow that declares no inputs
+     * genuinely has no form.
      */
     @GetMapping("/internal/agent/workflow-inputs")
     public Map<String, Object> workflowInputs(@RequestParam String tenantId,
                                               @RequestParam Long workflowId) {
         WorkflowClient.WorkflowView workflow = workflowClient.require(tenantId, workflowId);
-        String slug = difyWorkflows.slugIn(workflow.definition());
 
         Map<String, Object> out = new HashMap<>();
         out.put("workflowId", workflow.id());
@@ -153,33 +142,12 @@ public class InternalAgentDispatchController {
         // an agent asked for a bucket inventory refused outright rather than
         // call the very tool that returns one.
         out.put("description", descriptionIn(workflow.definition()));
-        if (slug == null) {
-            out.put("fields", nativeInputs(workflow.definition()));
-            return out;
-        }
-        try {
-            out.put("fields", difyWorkflows.inputsFor(slug).stream()
-                    .map(field -> {
-                        Map<String, Object> row = new HashMap<>();
-                        row.put("variable", field.variable());
-                        row.put("label", field.label());
-                        row.put("type", field.type());
-                        row.put("required", field.required());
-                        row.put("options", field.options());
-                        return row;
-                    })
-                    .toList());
-        } catch (RuntimeException ex) {
-            log.warn("Workflow {} inputs unreadable for tenant {}: {}", workflowId, tenantId,
-                    ex.getMessage());
-            out.put("fields", List.of());
-            out.put("error", ex.getMessage());
-        }
+        out.put("fields", nativeInputs(workflow.definition()));
         return out;
     }
 
     /**
-     * The input form a native (non-Dify) workflow declares for itself, read
+     * The input form a workflow declares for itself, read
      * from {@code inputs[]} in its definition — the same document that carries
      * {@code nodes[]}. Authored under {@code agent-service/agents/} and
      * published with the workflow, so the operator's form and the model's

@@ -58,6 +58,21 @@ public class LibraryController {
 
         static LibraryItemResponse from(LibraryService.LibraryView view,
                                         Map<String, Long> rolloutCounts) {
+            return from(view, rolloutCounts, true);
+        }
+
+        /**
+         * @param withDefinition whether to ship the template body. The catalog
+         *        is ~240 items averaging 8.6KB of JSON each, so including it
+         *        makes the list response about two megabytes — every time the
+         *        Library page is opened. The customer's Library never reads it;
+         *        only the provider's screen does, to show an agent's spec. So
+         *        the list carries it only for the screen that uses it, and the
+         *        rest of the payload is unchanged.
+         */
+        static LibraryItemResponse from(LibraryService.LibraryView view,
+                                        Map<String, Long> rolloutCounts,
+                                        boolean withDefinition) {
             LibraryItem i = view.item();
             return new LibraryItemResponse(i.getId(), i.getTitle(), i.getDescription(),
                     i.getType().name().toLowerCase(Locale.ROOT), i.getCategory(),
@@ -65,7 +80,7 @@ public class LibraryController {
                     i.getInstalls(),
                     rolloutCounts.getOrDefault(String.valueOf(i.getId()), 0L),
                     // Definitions of LOCKED premium templates stay server-side.
-                    view.locked() ? null : i.getDefinition());
+                    withDefinition && !view.locked() ? i.getDefinition() : null);
         }
 
         static LibraryItemResponse from(LibraryService.LibraryView view) {
@@ -90,11 +105,10 @@ public class LibraryController {
      */
     @GetMapping
     public List<LibraryItemResponse> list(@AuthenticationPrincipal Jwt jwt) {
-        Map<String, Long> rollouts = "PROVIDER".equals(jwt.getClaimAsString("role"))
-                ? libraryService.rolloutCounts()
-                : Map.of();
+        boolean provider = "PROVIDER".equals(jwt.getClaimAsString("role"));
+        Map<String, Long> rollouts = provider ? libraryService.rolloutCounts() : Map.of();
         return libraryService.list(tenant(jwt), jwt.getTokenValue()).stream()
-                .map(view -> LibraryItemResponse.from(view, rollouts)).toList();
+                .map(view -> LibraryItemResponse.from(view, rollouts, provider)).toList();
     }
 
     @PostMapping("/{id}/clone")

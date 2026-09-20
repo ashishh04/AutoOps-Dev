@@ -55,6 +55,38 @@ Two consequences that a single loop cannot give you:
 - **`HYPOTHESIZE` has no tools at all**, so the only way to finish is to say
   what the numbers mean. A model that can still collect will keep collecting.
 
+## This service holds nothing. Keep it that way.
+
+`reduce` is `(state, event) -> state'`. Every run's entire world arrives in the
+request and leaves in the response; there is no session, no cache keyed by run
+id, and nothing on disk. `ReduceRequest.run_id` and `tenant_id` are
+**correlation only** — they exist so a run can be matched against whatever
+observability is wired up, and nothing here is stored under them.
+
+That is what makes a run parked on a human approval for two days
+indistinguishable from one parked for two milliseconds, and it is why the
+service can be restarted, scaled or replaced mid-run without anybody noticing.
+
+**The refactor that would quietly destroy it.** When agent-service needs
+something this service computed — a coverage scope, a counter, a verdict — the
+obvious-looking move is to have the runtime POST it back:
+
+```python
+# NO. This makes the runtime stateful.
+requests.post(f"{agent_service}/runs/{run_id}/scope", json=scope)
+```
+
+It reads like a small convenience and it is not one. A callback means the
+runtime now owns a fact that has to reach another system, so it acquires
+retries, ordering, and a failure mode where a parked run depends on a call
+having succeeded hours ago. The property above is gone, and nothing fails
+loudly enough to notice.
+
+**Everything computed here rides back on `ReduceResponse` instead**, and
+agent-service — which already owns the run's lifetime and its transaction —
+writes it. `findings` works this way; `subject_scope` will too. If you find
+yourself wanting an HTTP client in this service, add a field to the response.
+
 ## The evidence ledger
 
 Every tool result agent-service records produces an `agent_run_steps` row, and
@@ -94,22 +126,80 @@ agent_runtime/
     kit.py        phases -> a compiled LangGraph
     crews.py      CrewAI, for the hypothesize phase of hard triage only
   agents/
-    aws/public_exposure_auditor.py     RD-149/145/137 — correlates three audits
-    aws/cost_anomaly_investigator.py   RD-141/142/136 — explains a bill movement
-    linux/server_health_check.py       RD-079 — SSH; needs a key volume (see gaps)
-    generic/single_phase.py            the legacy-compatibility loop
+    aws/public_exposure_auditor.py       RD-149 — correlates three security audits
+    aws/cost_anomaly_investigator.py     RD-141 — explains a bill movement
+    aws/idle_resource_reclaimer.py       RD-142 — the only agent that changes anything
+    aws/incident_rca_analyst.py          RD-210 — nine alarms, two incidents, one cause
+    m365/offboarding_auditor.py          RD-201 — did the leavers actually leave
+    m365/privileged_access_auditor.py    RD-202 — who can do the most damage
+    generic/single_phase.py              the legacy-compatibility loop
 evals/            golden cases + the replay harness
 ```
 
 ### The shipped agents
 
-| Agent | Tools | Why an agent rather than three reports |
-|---|---|---|
-| `aws.public_exposure_auditor` | S3 public access · IAM key age · security group ingress | The finding is in the *intersection* — a public bucket reachable through an open port with a stale key is a chain, not three lists |
-| `aws.cost_anomaly_investigator` | Cost Explorer delta · idle volumes & EIPs · S3 storage | Cost Explorer says spend rose; only correlation says *which resources* explain it |
+| Agent | Phases | Tools | Why an agent rather than a report |
+|---|---|---|---|
+| `aws.public_exposure_auditor` | 4, read-only | S3 public access · security-group ingress · IAM credential hygiene | The finding is in the *intersection* — a public bucket, an open port with something live behind it, and a stale unused key is a chain, not three lists |
+| `aws.cost_anomaly_investigator` | 4, read-only | Cost Explorer delta · idle resource inventory | Cost Explorer says which *service* rose; only correlation says which *resources* explain it, and how much it does **not** explain |
+| `aws.idle_resource_reclaimer` | **all 8** | idle resource inventory · unused volume reclaim *(mutating)* | Deciding which idle disk is waste and which is a migration in progress is the judgement. Deleting it is the easy part |
+| `aws.incident_rca_analyst` | 4, read-only | CloudWatch alarm state · CloudTrail change timeline | Two consoles each hold half the answer. The question is the join: which of the nine red things are one incident, and what touched a resource in that cluster four minutes before it went red |
+| `m365.offboarding_auditor` | 4, read-only | licence assignment · mailbox rules | Offboarding is three jobs in two systems and nothing checks all three happened. A leaver disabled on day one looks finished — while their seat bills for a year and their inbox forwards to a personal address |
+| `m365.privileged_access_auditor` | 4, read-only | privileged access · licence assignment | A list of admins is an org chart. A tier-zero role holder with no MFA registered is a finding |
 
-Both are read-only, four-phase (`TRIAGE → GATHER → HYPOTHESIZE → REPORT`), and
-collect all their tools in **one** turn before reasoning with the tools removed.
+The two auditors are read-only and collect all their tools in **one** turn before
+reasoning with the tools removed.
+
+`aws.idle_resource_reclaimer` is the one that exercises the whole kit, and it is
+why the kit has eight nodes. `GATHER` is never *shown* the delete tool, so the
+candidate list cannot be contaminated by it. `PLAN` writes a proposal carrying the
+exact volume ids, the blast radius and the rollback. `GATE` emits **one** action
+and Java parks the run on a human. `ACT` routes a rejection to `REPORT`, never
+back to `PLAN`. `VERIFY` re-runs the read-only inventory, because an automation
+that exited zero is not evidence a disk is gone — the disk being absent from a
+fresh listing is.
+
+Every one of those transitions is pinned by a golden case, including the
+rejection: that case supplies exactly ONE model reply for its final step, so a
+graph that ever re-entered `PLAN` would run out of recorded replies and fail the
+build.
+
+### Why the domains are what they are
+
+The limit has never been the reasoning — it is which credentials a job step can
+be handed. `StepCredentials` gives a `pyscript` step AWS, Azure or GCP and
+nothing else, `SshRunner` needs keys at `/home/autoops/.ssh` that nothing mounts,
+and there is no WinRM transport at all.
+
+An **Azure** connection supplies `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` /
+`AZURE_CLIENT_SECRET`, which is exactly Microsoft Graph's client-credentials
+contract — and the execution image already ships `requests`. So Microsoft 365
+and Entra ID needed no new plumbing, which is why the identity agents exist.
+
+What is still blocked, and on what:
+
+| Domain | Blocked on |
+|---|---|
+| Active Directory, Exchange on-premises, Windows Server | no WinRM transport, and no credential type a step can be handed for one |
+| Linux | `ssh` runs, but no key material is mounted into the execution image |
+| VMware, Network, SQL Server | need a credential for an arbitrary endpoint; `StepCredentials` only resolves cloud connections |
+
+None of these needs an agent to be designed. Each needs one transport, and the
+agents follow the day it lands.
+
+### The automations behind them
+
+The tools are catalog workflows under `backend/agent-service/workflows/`, whose
+steps are `pyscript` — boto3 or `requests` on the execution host, with the
+tenant's own cloud credential in the environment. Their bodies are real `.py` files under
+`workflows/_authoring/bodies/`, assembled into the published JSON by
+`generate.py`; `generate.py --check` fails the build if the two drift.
+
+`tests/test_workflow_bodies.py` runs them against a stubbed AWS. That is where
+the judgement in them is pinned: that a denied read is never reported as a clean
+result, that an open port with nothing behind it is not an exposure, and that a
+volume re-attached between the audit and the approval is skipped however it was
+approved.
 
 ## Agents are Python modules, and that seals them properly
 
@@ -157,6 +247,58 @@ to tell whether the deployment is the one you think it is.
 Everything under `/v1` requires `X-Internal-Token`. api-gateway does not route
 here at all; the only caller is agent-service.
 
+## Tracing (LangSmith)
+
+Off by default, opt-in per environment, and it can never fail a run. With
+`AGENT_RUNTIME_LANGSMITH_ENABLED=true` and a key, every model call is traced with
+the phase it belongs to, the prompt version that produced it, and the agent ref
+and version.
+
+```bash
+AGENT_RUNTIME_LANGSMITH_ENABLED=true
+AGENT_RUNTIME_LANGSMITH_API_KEY=ls-...
+AGENT_RUNTIME_LANGSMITH_PROJECT=autoops-agents      # one per environment
+AGENT_RUNTIME_LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+AGENT_RUNTIME_LANGSMITH_HIDE_IO=false               # structure without content
+```
+
+**One trace per reduce, one thread per run.** A reduce is a single graph
+traversal, so it is one trace with each phase nested inside it — `TRIAGE`,
+`GATHER`, `HYPOTHESIZE` and the rest appear as named child runs, in order. A run
+spans many reduces, because it stops every time it wants a tool and can sit on an
+approval for two days between them; those are stitched into one LangSmith thread
+from the `session_id` on the root run, derived from the run id. `trace_id` on the
+reduce response is that thread.
+
+**One project, every customer in it.** The project is per ENVIRONMENT, not per
+tenant: an agent is authored once and delivered to every customer who buys it, so
+"is this version misbehaving everywhere or only at one site?" is the first
+question asked of a regression — and it cannot be asked at all if the ten sites
+are ten projects. The tenant is a tag (`tenant:<id>`) and a metadata field
+instead, which is what the trace list filters on. An untenanted run — an eval, a
+replay — is tagged `tenant:none` so it can be filtered out of a customer
+investigation. Per-tenant CONSENT is a different axis from per-tenant storage;
+see `LANGSMITH_HIDE_IO` below.
+
+**Where the callbacks hang is load-bearing, not tidiness.** LangChain resolves a
+run's parent from the callback manager inherited through a context variable, and
+a config that names `callbacks` explicitly REPLACES that manager. Pass a tracer
+again on each model call and every phase becomes its own top-level trace; pass an
+empty list — which this code did before — and the call is not traced at all. So
+the tracer is attached once, at `graph.invoke`, and `RunContext.config` carries
+the run name, tags and metadata but deliberately no callbacks.
+`tests/test_tracing.py` pins both halves, including the LangChain semantic itself,
+so a future release that changes it fails here in a second rather than as a
+project that quietly stopped showing phases.
+
+**What never reaches a trace.** The tenant's model credential arrives on the
+descriptor and leaves with the response. Nothing in `tracing.py` reads
+`agent.credentials`; the metadata is assembled field by field rather than dumped
+from the descriptor, and a test asserts the key cannot appear in the payload. For
+a customer whose infrastructure detail must not leave the estate at all,
+`LANGSMITH_HIDE_IO=true` keeps the shape of every run — phases, timings, token
+counts, errors — and drops the message bodies.
+
 ## Evals
 
 `evals/` replays recorded runs. Two modes, answering different questions:
@@ -172,11 +314,12 @@ here at all; the only caller is agent-service.
 
 ## Known gaps
 
-- **`linux.server_health_check` cannot authenticate in the compose stack.**
-  Its automation is an `ssh` step, and `SshRunner` needs key-based auth
-  provisioned at `/home/autoops/.ssh` — which `docker-compose.yml` does not
-  mount. The agent and its workflow are correct; the transport is missing. The
-  two AWS agents were built against `pyscript`/boto3 for exactly this reason.
+- **There is no Linux agent, because SSH cannot authenticate in the compose
+  stack.** `RD-079-linux-server-health-check` is an `ssh` workflow and
+  `SshRunner` needs key-based auth provisioned at `/home/autoops/.ssh`, which
+  `docker-compose.yml` does not mount. The workflow is correct and stays in the
+  tree; no agent is built on it until something can run it. Every shipped agent
+  uses `pyscript`/boto3 for exactly this reason.
 - **Huawei has no adapter here.** Its ModelArts endpoint has no LangChain
   binding, so agent-service keeps Huawei-backed agents on its own Java loop
   rather than letting them arrive and fail. `GET /v1/vendors` publishes what
@@ -185,9 +328,19 @@ here at all; the only caller is agent-service.
   other service here. A digest must be read from a real `docker pull` — an
   invented one fails the build outright rather than degrading to the tag. The
   command to get it is in the Dockerfile.
-- **`VERIFY` is available but not mandatory.** No agent currently declares it.
-  Making a run that cannot prove its effect report `UNVERIFIED` rather than
-  `SUCCEEDED` is a deliberate next step, not an oversight.
+- **`VERIFY` is declared but not enforced.** `aws.idle_resource_reclaimer`
+  declares it and a test now requires every state-changing agent to. What is
+  still missing is the consequence: a run whose verification comes back
+  UNCHANGED reports that in its prose, but still finishes `SUCCEEDED`. Making
+  an unproven effect a distinct run outcome is the next step, not an oversight.
+- **The cost figures in `RD-136` are list prices from a table in the script.**
+  AWS exposes no "what is this volume costing me" API, and the Pricing API
+  needs its own permission and is us-east-1 only. Every field built from the
+  table carries its basis in its own NAME (`est_monthly_usd_list_price`), an
+  unknown volume type reads `unpriced` rather than being guessed, and both
+  agents' personas require the basis to travel with the number. It is the right
+  order of magnitude for deciding what to clean up and the wrong number for a
+  finance report, which is exactly how it is labelled.
 - **CrewAI is an optional extra and is NOT in the default image.** `crewai`
   requires `crewai-tools`, which pulls a browser-automation stack, `pytube` and
   `youtube-transcript-api` — a large dependency surface to acquire, in a service

@@ -14,7 +14,7 @@ import java.util.Map;
  * client written before this existed, POST nothing at all.
  *
  * @param inputs variable name → value, as declared by the workflow's start
- *               node. Values stay {@code Object} because Dify's form has
+ *               node. Values stay {@code Object} because the form has
  *               number and select controls alongside text, and coercing them
  *               all to String here would send {@code "3"} where the workflow
  *               declared a number.

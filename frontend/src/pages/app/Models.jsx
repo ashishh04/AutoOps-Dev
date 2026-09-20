@@ -1,16 +1,14 @@
 /**
  * Models — this workspace's AI vendor credentials.
  *
- * Dify is deliberately NOT reachable from this console. It is the engine
- * behind workflows, not a product surface a tenant configures: the workspace
- * token can read and delete every app in the shared Dify workspace, so the
- * only thing that should ever hold it is the server. The "Platform (Dify)"
- * tab that used to live here — the shared workspace's providers, plugin
- * marketplace and system defaults — has been removed outright, along with the
- * screen behind it.
+ * There is ONE model surface, and this is it: the tenant's own
+ * bring-your-own-key credentials, stored encrypted by core-service and never
+ * echoed back to the browser.
  *
- * What remains is the tenant's own bring-your-own-key credentials, stored
- * encrypted by core-service and never echoed back to the browser.
+ * A second tab used to sit here driving a shared third-party workspace — its
+ * providers, plugin marketplace and system defaults. It went when the engine
+ * behind it did. Its token could read and delete every app in that workspace,
+ * which is precisely why a browser should never have been able to reach it.
  */
 
 import React from "react";

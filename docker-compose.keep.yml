@@ -1,0 +1,171 @@
+# ============================================================
+# AutoOps — Keep overlay. The alert plane.
+#
+# Keep (keephq.dev, MIT outside ee/) ingests from 100+ monitoring tools,
+# deduplicates, enriches and correlates. When an alert needs something DONE it
+# calls AutoOps, which is where approvals, audit and the run log live.
+#
+# It is an ENGINE, on the same terms as Rundeck:
+#   - no host port, so nothing reaches it except over the compose network;
+#   - its own UI is never deployed (see docker-compose.keep-ui.yml for the
+#     loopback-bound operator view, mirroring docker-compose.rundeck-ui.yml);
+#   - nothing tenant-facing renders the word Keep.
+#
+# Append to COMPOSE_FILE in ./.env, AFTER the base file:
+#   COMPOSE_FILE=docker-compose.yml;deploy-demo/docker-compose.demo.yml;docker-compose.keep.yml
+#
+# Then set AUTOOPS_HOOK_TOKEN in ./.env to the token from an AutoOps webhook
+# (Project -> Webhooks -> create; the token is the last path segment of the URL
+# it shows you). Nothing dispatches until that is a real token.
+# ============================================================
+services:
+  keep-backend:
+    # Upstream keep-api, pinned, plus a writable /state. See the Dockerfile.
+    build: ./backend/keep-runtime
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+
+      # DB auth, not NOAUTH. Keep's default is NOAUTH, which would leave a full
+      # alert/incident/workflow API answering any unauthenticated caller on the
+      # compose network — the same sharpness docker-compose.aws.yml calls out
+      # for rundeck-service:8090. DB is in Keep's OSS tier; Auth0/Keycloak/
+      # AzureAD are the ee/-licensed ones and are deliberately not used.
+      AUTH_TYPE: DB
+      KEEP_JWT_SECRET: ${KEEP_JWT_SECRET:-dev-keep-jwt-secret-change-me}
+      KEEP_DEFAULT_USERNAME: ${KEEP_ADMIN_USER:-keep}
+      KEEP_DEFAULT_PASSWORD: ${KEEP_ADMIN_PASSWORD:-keep}
+
+      # Minted at boot so the stack comes up integrable without a human
+      # clicking through a UI to create one — the same reasoning as Rundeck's
+      # tokens.properties. Phase 1 (alert-service) authenticates with this.
+      #
+      # Format is name:role:secret. `noc` is READ-ONLY (read:* plus
+      # execute:workflows) and is what a read surface needs. Acknowledging or
+      # resolving an incident from the AutoOps console needs write:incident,
+      # which means `admin` — widen it then, deliberately, not now. A wrong
+      # role fails loudly with a 403 from Keep, never silently.
+      # Two keys, two jobs, least privilege each:
+      #   autoops         - alert-service reads with this. `noc` is read-only.
+      #   autoops-ingest  - the ingest path writes alerts with this. `webhook`
+      #                     grants write:alert and write:incident and NOTHING
+      #                     else, so a leaked ingest key cannot read back the
+      #                     alert stream it writes into.
+      #   autoops-admin   - connecting a monitoring source needs
+      #                     write:providers, and `admin` is the only role
+      #                     that has it. Held by alert-service for that one
+      #                     job and never used for a read.
+      KEEP_DEFAULT_API_KEYS: autoops:noc:${KEEP_API_KEY:-dev-keep-api-key-change-me},autoops-ingest:webhook:${KEEP_INGEST_KEY:-dev-keep-ingest-key-change-me},autoops-admin:admin:${KEEP_ADMIN_KEY:-dev-keep-admin-key-change-me}
+
+      # SQLite on a named volume, NOT the platform MySQL. The mysql-init mount
+      # that creates the other databases is first-init-only and the mysql-data
+      # volume already exists on every running host, so adding a database there
+      # would silently do nothing. Single-instance, like the engine's stock H2 —
+      # see "Known gaps" in the README.
+      DATABASE_CONNECTION_STRING: sqlite:////state/db.sqlite3?check_same_thread=False
+      SECRET_MANAGER_TYPE: FILE
+      SECRET_MANAGER_DIRECTORY: /state
+
+      # No Pusher/Soketi. That websocket exists to push live updates into
+      # Keep's own Next.js console, which this platform does not deploy.
+      PUSHER_DISABLED: "true"
+
+      # The dispatcher. Inline rather than a mounted file on purpose: the hook
+      # token is the SOLE credential on /api/hooks/{token} (permitAll at the
+      # gateway), so it must not be committed. Compose substitutes it here from
+      # the untracked ./.env; a mounted YAML file could not.
+      #
+      # ONE action, and it must stay one action. Keep ships a full workflow
+      # engine and using it for orchestration would put a third brain next to
+      # Dify and ExecutionEngine, taking the approval gate with it. This is a
+      # dispatcher: alert in, AutoOps run started, done.
+      #
+      # `provider:` deliberately has no `config:` key — Keep's parser defaults a
+      # missing provider config to {"authentication": {}}, and the http provider
+      # needs none, so no provider has to be provisioned alongside this.
+      #
+      # NOTE: the body is accepted and DISCARDED today —
+      # WebhookController.fire(String token) has no @RequestBody. It is sent
+      # anyway so that widening that endpoint is a one-sided change.
+      KEEP_WORKFLOW: |
+        workflow:
+          id: autoops-dispatch
+          name: Dispatch to AutoOps
+          description: Starts the bound AutoOps run when an alert fires.
+          disabled: false
+          triggers:
+            - type: alert
+              filters:
+                - key: status
+                  value: firing
+          actions:
+            - name: post-to-autoops
+              provider:
+                type: http
+                with:
+                  url: http://api-gateway:8080/api/hooks/${AUTOOPS_HOOK_TOKEN:-unset-see-docker-compose-keep-yml}
+                  method: POST
+                  body:
+                    source: keep
+                    fingerprint: "{{ alert.fingerprint }}"
+                    name: "{{ alert.name }}"
+                    severity: "{{ alert.severity }}"
+                    status: "{{ alert.status }}"
+                    alertSource: "{{ alert.source }}"
+                    description: "{{ alert.description }}"
+    volumes:
+      - keep-data:/state
+    healthcheck:
+      # python, not curl: the keep-api image is python-slim based and carries no
+      # curl. Keep runs migrations and loads every provider class at boot, hence
+      # the long start_period.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthcheck').status == 200 else 1)"
+      interval: 15s
+      retries: 20
+      start_period: 90s
+
+  # The AutoOps face of the alert plane. The console calls here; this service
+  # calls the engine with a key the browser never sees.
+  #
+  # Read-only, and holding a read-only key: the whole surface is GETs, and the
+  # role provisioned above cannot write even if this service tried to.
+  alert-service:
+    build: ./backend/alert-service
+    restart: unless-stopped
+    environment:
+      AUTH_JWKS_URI: http://auth-service:8081/oauth2/jwks
+      JWT_ISSUER: ${JWT_ISSUER:-autoops-auth-service}
+      # The engine. Internal name, internal key, never exposed. There is no
+      # table holding these and no endpoint that returns them.
+      KEEP_URL: http://keep-backend:8080
+      KEEP_API_KEY: ${KEEP_API_KEY:-dev-keep-api-key-change-me}
+      KEEP_ADMIN_KEY: ${KEEP_ADMIN_KEY:-dev-keep-admin-key-change-me}
+      KEEP_INGEST_KEY: ${KEEP_INGEST_KEY:-dev-keep-ingest-key-change-me}
+      # Signs the token a customer pastes into Datadog or an Airflow DAG.
+      # Rotating it invalidates every issued token at once.
+      ALERT_INGEST_SECRET: ${ALERT_INGEST_SECRET:-dev-alert-ingest-secret-change-me}
+      # Where a customer's tool reaches AutoOps FROM THE INTERNET. A compose
+      # service name is useless in a webhook field on someone else's SaaS,
+      # so this must be the public origin - the same one the browser uses.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:5173}
+    # No host port, deliberately. Everything reaches it through the gateway;
+    # publishing one would be the surface docker-compose.aws.yml exists to
+    # remove. Curl it with `docker exec` if you need to.
+    healthcheck:
+      # Without this the container reports "Up" the instant the JVM starts,
+      # some 40s before Tomcat binds 8091 - and the gateway would route an
+      # alerts page straight into a connection refused.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8091/actuator/health || exit 1"]
+      interval: 10s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      keep-backend:
+        condition: service_healthy
+
+volumes:
+  keep-data:

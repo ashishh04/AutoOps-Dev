@@ -9,6 +9,7 @@ import com.intertec.autoops.core.repo.JobRepository;
 import com.intertec.autoops.core.repo.ProjectRepository;
 import com.intertec.autoops.core.service.ApprovalSettingsService;
 import com.intertec.autoops.core.service.AuditService;
+import com.intertec.autoops.core.service.PlatformTimelineService;
 import com.intertec.autoops.core.service.RunService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,17 +53,20 @@ public class InternalController {
     private final RunService runService;
     private final ApprovalSettingsService approvalSettings;
     private final AuditService auditService;
+    private final PlatformTimelineService platformTimeline;
 
     public InternalController(ProjectRepository projectRepository,
                               JobRepository jobRepository,
                               RunService runService,
                               ApprovalSettingsService approvalSettings,
-                              AuditService auditService) {
+                              AuditService auditService,
+                              PlatformTimelineService platformTimeline) {
         this.projectRepository = projectRepository;
         this.jobRepository = jobRepository;
         this.runService = runService;
         this.approvalSettings = approvalSettings;
         this.auditService = auditService;
+        this.platformTimeline = platformTimeline;
     }
 
     /** Project existence + tenancy. 404 is what the caller turns into its own. */
@@ -91,6 +95,26 @@ public class InternalController {
                 .stream()
                 .map(j -> Map.<String, Object>of("id", j.getId(), "name", j.getName()))
                 .toList();
+    }
+
+    /**
+     * Everything that happened in one project inside a time window.
+     *
+     * <p>Read by agent-runtime's {@code platform} workflow node — the tool that
+     * lets an agent reason about the WORKSPACE rather than about one cloud
+     * vendor. It is the only evidence source in the platform that needs no
+     * customer credential, because the data is already ours: the runs we
+     * executed, the approvals we raised.
+     *
+     * <p>Tenant and project are both required and are used together on every
+     * query. The internal token authorises the caller to ask on a tenant's
+     * behalf; it does not let it widen the answer.
+     */
+    @GetMapping("/internal/platform/timeline")
+    public Map<String, Object> platformTimeline(@RequestParam String tenantId,
+                                                @RequestParam Long projectId,
+                                                @RequestParam(defaultValue = "24") int windowHours) {
+        return platformTimeline.timeline(tenantId, projectId, windowHours);
     }
 
     /**

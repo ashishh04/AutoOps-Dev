@@ -1,0 +1,268 @@
+app:
+  description: Turns a raw incident timeline into a structured post-incident review — impact, timeline,
+    root cause, and follow-up actions.
+  icon: 🧯
+  icon_background: '#E0F2FE'
+  icon_type: emoji
+  mode: workflow
+  name: Incident Postmortem Writer
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/openai_api_compatible:0.0.61@8178deea650bcea1d301ec362d78b35141fcfbc57c56e5e6a7629e13a41d7672
+    version: null
+kind: app
+version: 0.7.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: llm
+      id: e_start_writer
+      source: start
+      sourceHandle: source
+      target: writer
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: end
+      id: e_writer_end
+      source: writer
+      sourceHandle: source
+      target: end
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: Start
+        type: start
+        variables:
+        - default: ''
+          hint: Paste the Slack thread, ticket updates or your own rough notes.
+          label: Incident notes or timeline
+          max_length: 8000
+          options: []
+          required: true
+          type: paragraph
+          variable: incident_notes
+        - default: P1
+          hint: ''
+          label: Severity
+          max_length: 64
+          options:
+          - P1
+          - P2
+          - P3
+          - P4
+          required: true
+          type: select
+          variable: severity
+        - default: Internal engineering
+          hint: ''
+          label: Written for
+          max_length: 64
+          options:
+          - Internal engineering
+          - Customer-facing
+          required: true
+          type: select
+          variable: audience
+        - default: ''
+          hint: 'Example: Payments API'
+          label: Affected service
+          max_length: 500
+          options: []
+          required: false
+          type: text-input
+          variable: service_name
+      height: 290
+      id: start
+      position:
+        x: 80
+        y: 300
+      positionAbsolute:
+        x: 80
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+      zIndex: 0
+    - data:
+        context:
+          enabled: false
+        desc: Writes a post-incident review from raw notes.
+        model:
+          completion_params:
+            temperature: 0.2
+            top_p: 0.9
+          mode: chat
+          name: deepseek-v4-pro
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        outputs: []
+        prompt_template:
+        - id: 8b7b1252-369a-461a-9aa3-a4c92ed3efb1
+          role: system
+          text: 'You write post-incident reviews for a managed-services provider. Your reader is deciding
+            what to fix, so the document has to be honest about what is known and what is not.
+
+
+            Produce markdown with these sections, in this order:
+
+            1. Summary — two sentences: what broke, who was affected, how long.
+
+            2. Impact — who or what was affected, and for how long.
+
+            3. Timeline — a table of time, event, source. Use only times present in the notes.
+
+            4. Root cause — what actually caused it.
+
+            5. Contributing factors — what made it worse or slower to detect.
+
+            6. What went well — genuinely, not filler.
+
+            7. Action items — a table of action, owner, priority. One action per row.
+
+
+            RULES YOU MUST NOT BREAK:
+
+            - Never invent a root cause. If the notes do not establish one, write ''Root cause not established
+            from the available timeline'' and say precisely what evidence would settle it. A plausible-sounding
+            invented cause is the single most damaging thing this document can contain.
+
+            - Never invent a timestamp, a metric, a customer count or a duration. If the notes do not
+            give it, say it was not recorded.
+
+            - Never assign an action to a named person the notes do not name. Use ''Owner not assigned''.
+
+            - Blameless: describe what the system allowed, not who erred.
+
+
+            If written for a CUSTOMER: no internal hostnames, no employee names, no internal tooling.
+            Lead with impact and remediation, and be plain about what you are still investigating.
+
+            If written for INTERNAL ENGINEERING: full technical detail, and name the specific systems
+            involved.'
+        - id: fe6cae01-aab5-4027-b240-48ac73f9ae3d
+          role: user
+          text: 'Severity: {{#start.severity#}}
+
+            Affected service: {{#start.service_name#}}
+
+            Written for: {{#start.audience#}}
+
+
+            Incident notes:
+
+            {{#start.incident_notes#}}'
+        selected: false
+        title: Postmortem Writer
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 110
+      id: writer
+      position:
+        x: 420
+        y: 300
+      positionAbsolute:
+        x: 420
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+      zIndex: 0
+    - data:
+        desc: Return the finished document.
+        outputs:
+        - type: string
+          value_selector:
+          - writer
+          - text
+          variable: final_report
+        selected: false
+        title: End
+        type: end
+      height: 90
+      id: end
+      position:
+        x: 760
+        y: 300
+      positionAbsolute:
+        x: 760
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+      zIndex: 0
+    viewport:
+      x: 0
+      y: 0
+      zoom: 0.8

@@ -1,7 +1,9 @@
 package com.intertec.autoops.agent.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.intertec.autoops.agent.client.AutomationClient;
 import com.intertec.autoops.agent.client.ModelCredentialsClient;
 import com.intertec.autoops.agent.client.RuntimeClient;
@@ -130,6 +132,8 @@ public class AgentRunService {
     private final TranscriptCodec transcripts;
     private final SubscriptionGate gate;
     private final ObjectMapper objectMapper;
+    private final RunScopeService scopes;
+    private final FindingIngestService findingIngest;
     private final TaskExecutor loopExecutor;
     private final AgentProperties.Loop config;
 
@@ -144,6 +148,8 @@ public class AgentRunService {
                            TranscriptCodec transcripts,
                            SubscriptionGate gate,
                            ObjectMapper objectMapper,
+                           RunScopeService scopes,
+                           FindingIngestService findingIngest,
                            @Qualifier("agentLoopExecutor") TaskExecutor loopExecutor,
                            AgentProperties properties) {
         this.agentRepository = agentRepository;
@@ -157,6 +163,8 @@ public class AgentRunService {
         this.transcripts = transcripts;
         this.gate = gate;
         this.objectMapper = objectMapper;
+        this.scopes = scopes;
+        this.findingIngest = findingIngest;
         this.loopExecutor = loopExecutor;
         this.config = properties.getLoop();
     }
@@ -415,6 +423,13 @@ public class AgentRunService {
             run.setCompletionTokens(run.getCompletionTokens() + reduction.completionTokens());
             run = save(run);
 
+            // The run's opening coverage claim, on the first reduce that
+            // reports one. Built from the agent's STATIC declarations, so it
+            // does not depend on which tool happened to run first — a coverage
+            // claim that varies with scheduling has no business near state
+            // deletion. Everything after this may only narrow it.
+            declareScopeOnce(run, reduction);
+
             recordStep(run, AgentRunStep.Kind.MODEL_CALL, null, null, null,
                     "step " + run.getStepCount() + " of " + run.getMaxSteps()
                             + " — phase " + reduction.phase(),
@@ -574,6 +589,111 @@ public class AgentRunService {
      * model that guessed a plausible number — still cannot reach an operator
      * looking like a verified fact.
      */
+    /**
+     * Opens the run's coverage claim, once.
+     *
+     * <p>Failures here are logged and swallowed. A run whose scope could not be
+     * recorded still produced a report somebody asked for, and the cost of the
+     * missing claim is that nothing it found is ever reaped by absence — which
+     * is the safe direction. Failing the run instead would trade a working
+     * report for a coverage record nobody is yet reading.
+     *
+     * <p>Like {@link #completeScope}, that trade expires when the reaper does
+     * not: a run that silently failed to declare still gets reaped against
+     * <i>other</i> runs' claims, and nothing here would have said so.
+     */
+    private void declareScopeOnce(AgentRun run, RuntimeClient.Reduction reduction) {
+        if (run.getScopeStatus() != null || reduction.declaredSubjectKinds().isEmpty()) {
+            return;
+        }
+        try {
+            ArrayNode intent = objectMapper.createArrayNode();
+            for (String kind : reduction.declaredSubjectKinds()) {
+                intent.addObject().put("kind", "all").put("subject_kind", kind);
+            }
+            scopes.declare(run.getId(), intent, Map.of());
+        } catch (RuntimeException e) {
+            log.warn("run {} could not declare its scope; nothing it finds will be "
+                    + "reaped by absence: {}", run.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Files the run's verdicts, and says how many were accepted.
+     *
+     * <p><b>Called while the run is still open</b> — see the ordering note at
+     * the call site. Attribution refuses a verdict whose run has already settled
+     * its coverage claim, so this cannot move below {@link #completeScope}.
+     *
+     * <p>Each verdict is ingested on its own transaction and its own
+     * disposition: one malformed verdict must not cost a nightly sweep of four
+     * hundred good ones. A rejection is logged rather than thrown for the same
+     * reason the scope calls swallow — the report is what somebody asked for.
+     *
+     * @return how many were stored, which is what the coverage claim records as
+     *         {@code verdicts_emitted}. A run that examined a thousand subjects
+     *         and emitted nothing is a clean estate; one that emitted nothing
+     *         because every verdict was refused is not, and the two are only
+     *         distinguishable if this number is the ACCEPTED count.
+     */
+    private int ingestVerdicts(AgentRun run, RuntimeClient.Reduction reduction) {
+        int accepted = 0;
+        for (JsonNode verdict : reduction.verdicts()) {
+            try {
+                FindingIngestService.Result result =
+                        findingIngest.ingest(run.getTenantId(), run.getProjectId(),
+                                run.getId(), verdict);
+                if (result.disposition() == FindingIngestService.Disposition.REJECTED) {
+                    log.warn("run {} verdict {} refused ({}): {}", run.getId(),
+                            result.verdictId(), result.reasonCode(), result.error());
+                } else {
+                    accepted++;
+                }
+            } catch (RuntimeException e) {
+                log.warn("run {} could not file a verdict: {}", run.getId(), e.getMessage());
+            }
+        }
+        return accepted;
+    }
+
+    /**
+     * Records what the run actually covered, per subject kind.
+     *
+     * <p><b>This must be called BEFORE {@link #finish}, and the order is not
+     * arbitrary.</b> Completion validation re-reads the run, and
+     * {@code VerdictAttributionService} treats a run with {@code finished_at}
+     * set as closed — so completing after finishing would have the run refuse
+     * its own claim as arriving late. The symptom would be every agent's
+     * completion rejected with {@code run_already_completed}, a reason code that
+     * means "the agent raced its own completion" and would point the
+     * investigation at agent timing while the cause sat in this method's
+     * statement order. Do not reorder these two calls during a tidy-up.
+     *
+     * <p><b>Failures are logged and swallowed — and that has an expiry date.</b>
+     * Today nothing reads coverage, so a refused claim costs this run its reap
+     * and nothing else, while a thrown exception would cost the report somebody
+     * actually asked for. That trade only holds while the reaper is off. Once it
+     * is live, a silently swallowed scope failure becomes a run that LOOKS
+     * covered and is not — which is the failure this whole subsystem exists to
+     * prevent. Whoever enables the reaper has to revisit this: see the reaper
+     * gate in {@code backend/MIGRATIONS.md}.
+     */
+    private void completeScope(AgentRun run, RuntimeClient.Reduction reduction, int emitted) {
+        if (!reduction.carriesCoverage()) {
+            return;
+        }
+        try {
+            Map<String, Integer> evaluated = new LinkedHashMap<>();
+            reduction.subjectScope().forEach(element ->
+                    evaluated.put(element.path("subject_kind").asText(),
+                            element.path("subject_id_count").asInt()));
+            scopes.complete(run.getId(), reduction.subjectScope(), reduction.subjectIds(),
+                    evaluated, emitted);
+        } catch (RuntimeException e) {
+            log.warn("run {} coverage claim refused: {}", run.getId(), e.getMessage());
+        }
+    }
+
     private void finishFromRuntime(AgentRun run, RuntimeClient.Reduction reduction) {
         List<String> problems = new ArrayList<>(reduction.uncitedClaims());
 
@@ -591,6 +711,19 @@ public class AgentRunService {
             run.setUncitedClaims(String.join("\n", problems));
             log.warn("Agent run {} reported {} unsupported claim(s)", run.getId(), problems.size());
         }
+        // ORDER IS LOAD-BEARING, and tighter than it looks: verdicts FIRST,
+        // then coverage, then finish.
+        //
+        // VerdictAttributionService.isClosed() is true as soon as scope_status
+        // moves past RUNNING — not only when finished_at is set. So ingesting
+        // after completeScope() rejects EVERY verdict as run_already_completed,
+        // a reason code meaning "the agent raced its own completion", which
+        // would send the investigation after agent timing while the cause sat
+        // in these three lines. Ingesting after finish() does the same thing for
+        // the other reason. Do not reorder.
+        int emitted = ingestVerdicts(run, reduction);
+        completeScope(run, reduction, emitted);
+
         // Still a SUCCESS. The run did the work and produced a report; the
         // report simply carries a visible warning about the parts it could not
         // substantiate. Failing it would leave the operator with nothing
@@ -837,19 +970,35 @@ public class AgentRunService {
      * way to call back into a specific paused loop, and adding one would mean
      * this service could only be run as a single instance.
      */
+    /** Where the adaptive tool poll starts before doubling toward the configured cap. */
+    private static final Duration MIN_TOOL_POLL = Duration.ofMillis(250);
+
     private Observed watch(AgentRun run, AgentToolbox.Tool tool, String toolCallId,
                              Long targetRunId, long began) {
         Instant deadline = Instant.now().plus(config.getToolTimeout());
         AutomationClient.RunState state = null;
+
+        // The interval GROWS rather than staying flat. Agent tools are mostly
+        // short — a boto3 read finishes in six to eight seconds — and a fixed
+        // three-second poll finds them, on average, a second and a half after
+        // they were already done. Across two tools that is three seconds of a
+        // demo spent waiting for a timer rather than for work. Starting at a
+        // quarter second and doubling to the configured interval costs a
+        // handful of extra local calls on a short run and leaves a
+        // twenty-minute one polling exactly as often as it does today.
+        Duration cap = config.getToolPollInterval();
+        Duration wait = MIN_TOOL_POLL.compareTo(cap) > 0 ? cap : MIN_TOOL_POLL;
 
         while (Instant.now().isBefore(deadline)) {
             state = automations.runState(run.getTenantId(), targetRunId);
             if (state.terminal()) {
                 break;
             }
-            if (!sleep(config.getToolPollInterval())) {
+            if (!sleep(wait)) {
                 break;
             }
+            Duration next = wait.multipliedBy(2);
+            wait = next.compareTo(cap) > 0 ? cap : next;
         }
 
         long took = System.currentTimeMillis() - began;
@@ -888,8 +1037,20 @@ public class AgentRunService {
                 + "\nLog:\n" + (state.log() == null || state.log().isBlank()
                         ? "(no output)" : state.log());
 
+        // Two audiences, one event. The model gets `summary` below — it is
+        // diagnosing, and the engine's detail occasionally distinguishes a
+        // missing credential from a wrong one. What is STORED, and therefore
+        // what the customer reads in the run timeline, is the same events with
+        // the engine's bookkeeping removed: no node ids, no execution ids, no
+        // internal project slug, no Java data-context types.
+        String cleanedLog = CustomerFacingLog.clean(state.log());
+        String display = "Run #" + targetRunId + " for \"" + tool.targetName() + "\" finished "
+                + state.status() + " (" + state.stepCompleted() + " of " + state.stepTotal()
+                + " steps)."
+                + (cleanedLog.isBlank() ? "" : "\n" + cleanedLog);
+
         Long evidenceId = recordStep(run, AgentRunStep.Kind.TOOL_RESULT, tool.type(),
-                tool.targetId(), tool.targetName(), null, summary, !state.succeeded(), took);
+                tool.targetId(), tool.targetName(), null, display, !state.succeeded(), took);
 
         // A failed automation is reported through is_error so the model treats
         // it as a failure rather than as text that happens to mention one. It

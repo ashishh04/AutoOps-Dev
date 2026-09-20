@@ -137,7 +137,7 @@ def test_a_huge_result_keeps_its_head_and_tail():
 
     assert "START-OF-LOG" in compacted
     assert "END-OF-LOG: permission denied" in compacted
-    assert "characters elided" in compacted
+    assert __import__('agent_runtime.app.config', fromlist=['x']).ELISION_SIGNATURE in compacted
     assert len(compacted) < len(content) / 4
 
 
@@ -183,3 +183,26 @@ def test_errors_differing_only_by_timestamp_count_as_the_same_one():
     )
 
     assert "occurred 2 times" in compacted
+
+
+def test_a_comma_negated_hedge_is_not_flagged_as_an_uncited_claim():
+    """The heuristic must not penalise the hedge the personas ask for.
+
+    Found by the activity correlator's golden case: its persona instructs it to
+    "report proximity as a sequence and explicitly not as a cause", and the
+    auditor then flagged exactly that sentence — because "shows" makes it
+    claim-shaped and the negation uses a comma rather than "is not".
+
+    An agent trained by its own evidence rule to stop hedging is the failure
+    this module exists to prevent, so the exemption covers both constructions.
+    """
+    hedge = (
+        "That is a sequence, not a cause - this record shows what our automation did, "
+        "not what patching changed on the host."
+    )
+    assert evidence.uncited_claims(hedge) == []
+
+
+def test_the_exemption_does_not_swallow_an_ordinary_figure():
+    """The other direction, so the clause above cannot quietly disable the rule."""
+    assert evidence.uncited_claims("The disk shows 94% used on /var.")

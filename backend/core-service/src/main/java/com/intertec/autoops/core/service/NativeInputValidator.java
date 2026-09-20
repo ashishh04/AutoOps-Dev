@@ -7,9 +7,11 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -30,8 +32,8 @@ import java.util.regex.PatternSyntaxException;
  * believed mattered is worse than refusing it. A field whose {@code pattern}
  * will not compile rejects every value rather than accepting all of them.
  *
- * <p>Dify-backed workflows keep their own validation in
- * {@link DifyWorkflowService}; this is the native equivalent.
+ * <p>This is the only workflow input validator; the vendor-backed one it used
+ * to sit beside is gone.
  */
 @Service
 public class NativeInputValidator {
@@ -60,11 +62,7 @@ public class NativeInputValidator {
         }
 
         List<String> problems = new ArrayList<>();
-        for (String name : answers.keySet()) {
-            if (!byName.containsKey(name)) {
-                problems.add("'" + name + "' is not an input this workflow accepts");
-            }
-        }
+        answers = resolveNames(answers, byName, problems);
 
         Map<String, Object> clean = new LinkedHashMap<>();
         for (Map.Entry<String, JsonNode> entry : byName.entrySet()) {
@@ -110,6 +108,75 @@ public class NativeInputValidator {
         return clean;
     }
 
+
+    /**
+     * Maps supplied keys onto the names this workflow actually declares.
+     *
+     * <p>Exact matches pass through untouched. Anything else is matched on a
+     * canonical form — lower case, with separators removed — so {@code
+     * lookback_hours} finds {@code LookbackHours}. This is not politeness: a
+     * model does not copy a JSON schema's keys verbatim, it regenerates them in
+     * whatever casing its own training favours, and several will snake_case a
+     * PascalCase property every single time. That is not a mistake it can be
+     * talked out of by handing back an error — observed four identical retries
+     * before the agent gave up — so the alternative to canonicalising here is
+     * an agent that can never call its own tools.
+     *
+     * <p>It stays a validator. Nothing is invented and nothing is widened: a
+     * key that matches no declared input is still refused, and every value
+     * still goes through the declared field's own type and pattern checks,
+     * which is where injection is actually controlled. Ambiguity in either
+     * direction — two declared inputs sharing a canonical form, or two supplied
+     * keys landing on one input — is refused rather than guessed, because
+     * picking a winner there would silently drop the caller's other value.
+     */
+    private Map<String, Object> resolveNames(Map<String, Object> answers,
+                                             Map<String, JsonNode> byName,
+                                             List<String> problems) {
+        Map<String, String> canonical = new LinkedHashMap<>();
+        Set<String> ambiguous = new LinkedHashSet<>();
+        for (String declared : byName.keySet()) {
+            String key = canonicalName(declared);
+            if (canonical.putIfAbsent(key, declared) != null) {
+                ambiguous.add(key);
+            }
+        }
+
+        Map<String, Object> resolved = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> answer : answers.entrySet()) {
+            String supplied = answer.getKey();
+            String target = supplied;
+            if (!byName.containsKey(supplied)) {
+                String key = canonicalName(supplied);
+                target = ambiguous.contains(key) ? null : canonical.get(key);
+                if (target == null) {
+                    problems.add("'" + supplied + "' is not an input this workflow accepts");
+                    continue;
+                }
+            }
+            if (resolved.putIfAbsent(target, answer.getValue()) != null) {
+                problems.add("'" + supplied + "' and another value both answer '"
+                        + target + "'");
+            }
+        }
+        return resolved;
+    }
+
+    /** Letters and digits only, lower cased: all two spellings of one name differ by. */
+    private static String canonicalName(String name) {
+        if (name == null) {
+            return "";
+        }
+        StringBuilder canonical = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char ch = name.charAt(i);
+            if (Character.isLetterOrDigit(ch)) {
+                canonical.append(Character.toLowerCase(ch));
+            }
+        }
+        return canonical.toString();
+    }
+
     /** True when a run of this definition needs its inputs checked here. */
     public boolean declaresForm(String definition) {
         return !declaredFields(definition).isEmpty();
@@ -117,7 +184,7 @@ public class NativeInputValidator {
 
     /**
      * The form the console renders before a native workflow runs, in the same
-     * shape a Dify-backed one produces — so the console asks the person the
+     * shape the console already renders — so it asks the person the
      * same way whichever engine is behind the automation.
      *
      * <p>Every field the validator will later enforce is offered here. If the
@@ -125,15 +192,15 @@ public class NativeInputValidator {
      * another, so both read the same {@code inputs[]} rather than keeping
      * separate ideas of the contract.
      */
-    public List<DifyWorkflowService.InputField> formFor(String definition) {
-        List<DifyWorkflowService.InputField> form = new ArrayList<>();
+    public List<WorkflowInputField> formFor(String definition) {
+        List<WorkflowInputField> form = new ArrayList<>();
         for (JsonNode field : declaredFields(definition)) {
             List<String> options = new ArrayList<>();
             if (field.path("options").isArray()) {
                 field.get("options").forEach(option -> options.add(option.asText()));
             }
             JsonNode defaultValue = field.get("default");
-            form.add(new DifyWorkflowService.InputField(
+            form.add(new WorkflowInputField(
                     field.path("variable").asText(),
                     label(field),
                     field.path("type").asText("string"),

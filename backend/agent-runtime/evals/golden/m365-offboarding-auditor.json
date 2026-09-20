@@ -1,0 +1,186 @@
+{
+  "name": "M365 offboarding auditor — the join two separate reports cannot make",
+  "_why": [
+    "The business case for an agent, stated as a test. Offboarding is three jobs",
+    "in two systems: disable the account, release the licence, remove the mail",
+    "routing. Each has a report; none knows about the others. A leaver disabled",
+    "on day one looks finished in the system that did it while their seat bills",
+    "for a year and their inbox forwards to a personal address the whole time.",
+    "",
+    "What is pinned here is that the agent leads with the LEAK — a disabled",
+    "account whose rule is still enabled and still hiding itself — rather than",
+    "with the bigger-looking licence number, and that it reports licences as",
+    "SEATS and SKU names with no invented currency figure, because Microsoft",
+    "does not publish what a tenant pays.",
+    "",
+    "It also pins the honest closing line: the sweep covered disabled accounts",
+    "only, so a clean result here is not a clean result for the tenant."
+  ],
+  "agent": {
+    "ref": "m365.offboarding_auditor",
+    "version": "1.0.0",
+    "model": "claude-sonnet-5",
+    "vendor": "ANTHROPIC"
+  },
+  "tools": [
+    {
+      "name": "workflow_61",
+      "description": "Lists every subscribed SKU with prepaid against assigned seats, and every user with the licences they hold, whether their account is still enabled and when they last signed in. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Scope": {
+            "type": "string",
+            "enum": ["licensed-only", "disabled-only", "all"],
+            "description": "Who to include"
+          },
+          "InactiveAfterDays": { "type": "number", "description": "Dormant after (days)" }
+        },
+        "required": ["Scope", "InactiveAfterDays"]
+      },
+      "mutating": false
+    },
+    {
+      "name": "workflow_63",
+      "description": "Finds inbox rules that forward or redirect mail to addresses outside the organisation, and flags the ones that also mark as read, move or delete the original. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "Scope": {
+            "type": "string",
+            "enum": ["disabled-accounts", "named-users", "all-users"],
+            "description": "Which mailboxes"
+          },
+          "UserPrincipalNames": { "type": "string", "description": "Mailboxes to check" },
+          "AdditionalInternalDomains": { "type": "string", "description": "Extra internal domains" },
+          "MaxUsers": { "type": "number", "description": "Mailbox limit" }
+        },
+        "required": ["Scope", "MaxUsers"]
+      },
+      "mutating": false
+    }
+  ],
+  "steps": [
+    {
+      "event": {
+        "kind": "START",
+        "input": "We had a round of leavers last quarter. Were they actually offboarded?"
+      },
+      "script": [
+        {
+          "type": "structured",
+          "schema": "TriageOut",
+          "value": {
+            "restated": "Check whether the people who left have been fully offboarded: account disabled, licence released, and no mail routing left behind.",
+            "observations_needed": [
+              "Which disabled accounts still hold licences, and which SKUs",
+              "Which disabled accounts still have inbox rules forwarding mail externally"
+            ],
+            "can_proceed": true,
+            "reason": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "Taking both audits together — neither answers the offboarding question alone.",
+          "tool_calls": [
+            {
+              "name": "workflow_61",
+              "args": { "Scope": "licensed-only", "InactiveAfterDays": 90 },
+              "id": "toolu_lic"
+            },
+            {
+              "name": "workflow_63",
+              "args": { "Scope": "disabled-accounts", "MaxUsers": 200 },
+              "id": "toolu_rules"
+            }
+          ],
+          "input_tokens": 1220,
+          "output_tokens": 84
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "GATHER",
+        "tool_calls": ["workflow_61", "workflow_63"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "toolu_lic",
+            "ok": true,
+            "evidence_id": 701,
+            "content": "MICROSOFT 365 LICENCE ASSIGNMENT AUDIT\nscope=licensed-only inactive_after_days=90\nnote=Graph does not expose what this tenant pays for a SKU, so seats are reported and never a currency amount\n\nSUBSCRIPTIONS\nsku=SPE_E5 prepaid=120 assigned=116 unassigned=4\nsku=SPB prepaid=40 assigned=38 unassigned=2\n\nUSERS\nupn=j.okafor@customer.com enabled=NO type=Member licences=SPE_E5 licence_count=1 last_sign_in_days=203 created_days=1450\nupn=s.varga@customer.com enabled=NO type=Member licences=SPE_E5 licence_count=1 last_sign_in_days=188 created_days=990\nupn=svc-scanner@customer.com enabled=yes type=Member licences=SPB licence_count=1 last_sign_in_days=NEVER created_days=620\n\nSUMMARY\nusers_examined=154 licensed_users=154\nunassigned_paid_seats=6\nlicensed_but_account_disabled=14 users, 14 seats ['j.okafor@customer.com', 's.varga@customer.com']\nlicensed_but_never_signed_in=3 users, 3 seats ['svc-scanner@customer.com']\nlicensed_but_dormant_over_90d=21 users, 21 seats []\nlicensed_guest_accounts=0 []"
+          },
+          {
+            "call_id": "toolu_rules",
+            "ok": true,
+            "evidence_id": 702,
+            "content": "MICROSOFT 365 MAILBOX RULE AUDIT\nscope=disabled-accounts mailboxes_examined=14\ninternal_domains=customer.com,customer.onmicrosoft.com\n\nupn=j.okafor@customer.com account_enabled=NO rule=Archive rule_enabled=yes forwards_to=j.okafor.personal@outlook.com hides_itself=markAsRead\nupn=s.varga@customer.com account_enabled=NO rule=(unnamed) rule_enabled=yes forwards_to=svarga.work@gmail.com hides_itself=no\nupn=r.mensah@customer.com account_enabled=NO rule=Old forward rule_enabled=no forwards_to=r.mensah@partner.co.uk hides_itself=no\n\nSUMMARY\nmailboxes_examined=14\nexternal_forwarding_rules=3 (of which enabled: 2)\nenabled_rules_that_also_hide_themselves=1 ['j.okafor@customer.com']\nenabled_rules_on_DISABLED_accounts=2 ['j.okafor@customer.com', 's.varga@customer.com']"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "Both audits returned and they overlap on two people.",
+          "input_tokens": 2350,
+          "output_tokens": 18
+        },
+        {
+          "type": "structured",
+          "schema": "HypothesisOut",
+          "value": {
+            "findings": [
+              {
+                "summary": "j.okafor@customer.com is disabled but an enabled inbox rule still forwards mail to a personal outlook.com address and marks the original as read — a rule that conceals itself was not set up for convenience.",
+                "severity": "critical",
+                "cites": [701, 702]
+              },
+              {
+                "summary": "s.varga@customer.com is disabled but an enabled rule still redirects mail to a personal gmail.com address.",
+                "severity": "critical",
+                "cites": [701, 702]
+              },
+              {
+                "summary": "14 disabled accounts still hold licences, 14 seats in total, and a further 6 paid seats have never been assigned to anyone.",
+                "severity": "warning",
+                "cites": [701]
+              },
+              {
+                "summary": "3 licensed accounts have never signed in, including one that looks like a service account by its name — these need classifying by someone who knows the tenant, not reclaiming.",
+                "severity": "info",
+                "cites": [701]
+              }
+            ],
+            "need_more": false,
+            "collect": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "**Two people who left are still forwarding mail out of the company, and 14 disabled accounts are still holding licences [e:701][e:702].**\n\nStill leaking — deal with these first:\n\n- j.okafor@customer.com is disabled, and an enabled inbox rule still forwards to a personal outlook.com address and marks the original as read [e:702]. A rule that hides itself was not set up for convenience.\n- s.varga@customer.com is disabled, and an enabled rule still redirects to a personal gmail.com address [e:702].\n\nOne further rule on r.mensah@customer.com points at a partner domain and is already disabled, so it is housekeeping rather than exposure [e:702].\n\nStill billing:\n\n| SKU | Prepaid | Assigned | Unassigned |\n| --- | --- | --- | --- |\n| SPE_E5 | 120 | 116 | 4 [e:701] |\n| SPB | 40 | 38 | 2 [e:701] |\n\nFourteen seats are assigned to disabled accounts, and a further six paid seats have never been assigned to anyone [e:701]. I have no prices — Microsoft does not publish what this tenant pays, and it varies by agreement — so the seat counts are what to take to the renewal conversation.\n\nTo review rather than reclaim:\n\n- Three licensed accounts have never signed in, one of them named svc-scanner [e:701]. Shared mailboxes and service accounts look identical to leavers in this data, so somebody who knows the tenant should classify these before anything is removed.\n\nRecommended order: remove the two live forwarding rules first, then release the licences and convert those mailboxes to shared. Do not delete the accounts — that loses the mailbox, the OneDrive and the audit trail, which most retention obligations require you to keep.\n\nNot checked: the mailbox sweep covered disabled accounts only, so an active employee forwarding company mail externally would not appear in this report.",
+          "input_tokens": 3200,
+          "output_tokens": 420
+        }
+      ],
+      "expect": {
+        "directive": "FINISH",
+        "phase": "DONE",
+        "tool_calls": [],
+        "citations": [701, 702],
+        "has_uncited": false,
+        "output_contains": [
+          "j.okafor@customer.com",
+          "hides itself",
+          "I have no prices",
+          "Do not delete the accounts",
+          "sweep covered disabled accounts only"
+        ]
+      }
+    }
+  ]
+}

@@ -25,7 +25,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_runtime.agents.autoops import activity_correlator
+from agent_runtime.agents.aws import (
+    cost_anomaly_investigator,
+    idle_resource_reclaimer,
+    incident_rca_analyst,
+    public_exposure_auditor,
+)
 from agent_runtime.agents.generic import single_phase
+from agent_runtime.agents.m365 import offboarding_auditor, privileged_access_auditor
 from agent_runtime.agents.spec import AgentSpec
 
 #: Every agent this build can run. Adding one is an import and a line here —
@@ -34,6 +42,15 @@ from agent_runtime.agents.spec import AgentSpec
 REGISTRY: dict[str, AgentSpec] = {
     spec.ref: spec
     for spec in (
+        # The platform's own plane first: it is the only one that needs no
+        # vendor credential and works for every estate.
+        activity_correlator.AGENT,
+        incident_rca_analyst.AGENT,
+        public_exposure_auditor.AGENT,
+        cost_anomaly_investigator.AGENT,
+        idle_resource_reclaimer.AGENT,
+        offboarding_auditor.AGENT,
+        privileged_access_auditor.AGENT,
         single_phase.AGENT,
     )
 }

@@ -1,0 +1,42 @@
+-- Coverage is decided per subject kind, not per run.
+--
+-- THIS MIGRATION CORRECTS A COMMENT IN V7, which said "PARTIAL never reaps".
+-- That is no longer true and V7's file cannot be edited to say so: it is
+-- already applied on the deployed database, and Flyway validates the checksum
+-- of an applied migration. Editing it would stop the service from starting.
+-- Forward-only means corrections arrive as new migrations, including
+-- corrections that are only words — see backend/MIGRATIONS.md.
+--
+-- WHAT CHANGED AND WHY. `aws.public_exposure_auditor` enumerates S3 buckets and
+-- security groups, then calls IAM. When the IAM call throws, the run has real,
+-- usable coverage of cloud_resource and none at all of principal — and from the
+-- agent's own point of view it produced findings and finished, so it reports
+-- success. A single run-level verdict has to choose between two wrong answers:
+--
+--   COMPLETE  principal findings from previous runs reap against a run that
+--             never looked at them.
+--   PARTIAL   good cloud_resource coverage is thrown away, every single time
+--             one dimension flakes. On an estate with several integrations
+--             that is most runs.
+--
+-- So each element of the subject_scope array now carries its own
+--     "coverage": "COMPLETE" | "PARTIAL" | "SKIPPED"
+-- and the reaper reads THAT. Only COMPLETE grounds a resolution. The buckets
+-- reap; the principals do not; nothing is discarded and nothing is invented.
+--
+-- Two consequences worth stating plainly:
+--
+--   * agent_runs.scope_status is now a ROLL-UP, useful for finding candidate
+--     runs on an index and for an operator reading a list. It is not the
+--     authority. COMPLETE means every kind completed; PARTIAL means mixed.
+--   * A completion scope must account for EVERY kind the run declared.
+--     Omitting one is rejected rather than read as "covered none of it",
+--     because a kind left out is indistinguishable from one that was covered.
+--
+-- No structural change is needed — coverage lives inside the existing JSON
+-- array. What this migration leaves behind is the corrected rule, written where
+-- somebody reading the schema will actually find it.
+
+ALTER TABLE agent_runs
+    MODIFY COLUMN scope_status ENUM('RUNNING','COMPLETE','PARTIAL','FAILED') NULL
+    COMMENT 'Roll-up only. Per-kind coverage inside subject_scope decides what reaps: COMPLETE=all kinds complete, PARTIAL=mixed, FAILED=claim refused or run abandoned (nothing reaps).';

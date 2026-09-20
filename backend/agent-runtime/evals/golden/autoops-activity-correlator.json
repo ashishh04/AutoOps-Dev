@@ -1,0 +1,148 @@
+{
+  "name": "Activity correlator — one estate's night, told as two stories and a gap",
+  "_why": [
+    "The agent that is not about a cloud. Its evidence is the platform's own",
+    "record, so it needs no customer credential and reads the same whether the",
+    "estate is AWS, on-premises or both — which is the difference between a",
+    "catalog of vendor scripts and an agentic platform.",
+    "",
+    "Four behaviours are pinned, and each is one that a model asked to",
+    "'summarise the activity' gets wrong:",
+    "",
+    "  * eleven events become TWO stories, not eleven bullets;",
+    "  * the automation that failed four times is separated out as standing",
+    "    noise rather than being allowed to dominate the live incident;",
+    "  * the approval sitting unactioned since 19:40 is surfaced — nobody",
+    "    watches the inbox overnight, and 'we thought that had run' is a real",
+    "    and common finding;",
+    "  * proximity is reported as a SEQUENCE and explicitly not as a cause,",
+    "    because this evidence cannot see the mechanism."
+  ],
+  "agent": {
+    "ref": "autoops.activity_correlator",
+    "version": "1.0.0",
+    "model": "claude-sonnet-5",
+    "vendor": "ANTHROPIC"
+  },
+  "tools": [
+    {
+      "name": "workflow_81",
+      "description": "Everything that happened in this project inside a time window, in order: the automations that ran and what they returned, the ones that failed and whether they failed together, and the changes parked waiting for a human. Read-only.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "WindowHours": { "type": "number", "description": "Look back (hours)" }
+        },
+        "required": ["WindowHours"]
+      },
+      "mutating": false
+    }
+  ],
+  "steps": [
+    {
+      "event": {
+        "kind": "START",
+        "input": "How did last night go? Anything I should know before the 9am service call?"
+      },
+      "script": [
+        {
+          "type": "structured",
+          "schema": "TriageOut",
+          "value": {
+            "restated": "Summarise what happened in this project overnight and surface anything the service call needs to know.",
+            "observations_needed": [
+              "Every automation run and approval in the overnight window, in order"
+            ],
+            "can_proceed": true,
+            "reason": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "Reading the overnight window — twelve hours covers the shift without making everything look related.",
+          "tool_calls": [
+            { "name": "workflow_81", "args": { "WindowHours": 12 }, "id": "toolu_hist" }
+          ],
+          "input_tokens": 980,
+          "output_tokens": 52
+        }
+      ],
+      "expect": {
+        "directive": "CALL_TOOLS",
+        "phase": "GATHER",
+        "tool_calls": ["workflow_81"]
+      }
+    },
+    {
+      "event": {
+        "kind": "TOOL_RESULTS",
+        "results": [
+          {
+            "call_id": "toolu_hist",
+            "ok": true,
+            "evidence_id": 1101,
+            "content": "at=2026-09-18T19:40:00Z minutes_ago=740 kind=APPROVAL what=workflow AWS Unused EBS Volume Cleanup outcome=PENDING by=s.iyer detail=awaiting a decision\nat=2026-09-18T22:00:00Z minutes_ago=600 kind=RUN what=workflow Nightly Backup outcome=SUCCEEDED by=scheduler detail=612s\nat=2026-09-18T23:15:00Z minutes_ago=525 kind=RUN what=job Log Rotation outcome=FAILED by=scheduler detail=4s · disk quota exceeded on /var\nat=2026-09-19T00:15:00Z minutes_ago=465 kind=RUN what=job Log Rotation outcome=FAILED by=scheduler detail=4s · disk quota exceeded on /var\nat=2026-09-19T01:15:00Z minutes_ago=405 kind=RUN what=job Log Rotation outcome=FAILED by=scheduler detail=4s · disk quota exceeded on /var\nat=2026-09-19T02:04:00Z minutes_ago=356 kind=RUN what=workflow Patch Deployment outcome=SUCCEEDED by=scheduler detail=1840s\nat=2026-09-19T02:11:00Z minutes_ago=349 kind=RUN what=job App Health Probe outcome=FAILED by=scheduler detail=30s · connection refused on app-prod-02\nat=2026-09-19T02:12:00Z minutes_ago=348 kind=RUN what=job Queue Depth Check outcome=FAILED by=scheduler detail=30s · connection refused on app-prod-02\nat=2026-09-19T02:14:00Z minutes_ago=346 kind=RUN what=workflow Synthetic Login outcome=FAILED by=scheduler detail=31s · timeout after 30s\nat=2026-09-19T02:15:00Z minutes_ago=345 kind=RUN what=job Log Rotation outcome=FAILED by=scheduler detail=4s · disk quota exceeded on /var\nat=2026-09-19T06:00:00Z minutes_ago=120 kind=RUN what=workflow Daily Health Report outcome=SUCCEEDED by=scheduler detail=95s\n\nwindow_hours=12 since=2026-09-18T19:00:00Z\nevents_total=11 runs_total=10\nruns_failed=6 runs_succeeded=3 runs_in_flight=0\nautomations_that_failed_more_than_once=Log Rotation x4"
+          }
+        ]
+      },
+      "script": [
+        {
+          "type": "reply",
+          "text": "Eleven events, and they are two separate stories plus one thing nobody has actioned.",
+          "input_tokens": 1900,
+          "output_tokens": 22
+        },
+        {
+          "type": "structured",
+          "schema": "HypothesisOut",
+          "value": {
+            "findings": [
+              {
+                "summary": "Three checks against app-prod-02 failed within four minutes of each other at 02:11–02:14, all with connection or timeout errors. That is one event, not three, and it is the only thing overnight that looks like a real incident.",
+                "severity": "critical",
+                "cites": [1101]
+              },
+              {
+                "summary": "Patch Deployment finished at 02:04, seven minutes before the first of those failures. That is a sequence worth checking and not a cause I can establish from this record.",
+                "severity": "warning",
+                "cites": [1101]
+              },
+              {
+                "summary": "Log Rotation failed four times on the hour with the same disk-quota error. That is a broken automation rather than part of the incident, and it has been failing all night.",
+                "severity": "warning",
+                "cites": [1101]
+              },
+              {
+                "summary": "An EBS volume cleanup has been sitting unapproved since 19:40 — over twelve hours — so anyone assuming it ran is wrong.",
+                "severity": "warning",
+                "cites": [1101]
+              }
+            ],
+            "need_more": false,
+            "collect": ""
+          }
+        },
+        {
+          "type": "reply",
+          "text": "**One real incident on app-prod-02 at 02:11, one automation that has been broken all night, and an approval nobody has actioned since 19:40 [e:1101].**\n\n## The incident — app-prod-02, 02:11 to 02:14\n\nThree checks failed within four minutes, all against the same host [e:1101]:\n\n| Time | What | Error |\n| --- | --- | --- |\n| 02:11 | App Health Probe | connection refused on app-prod-02 [e:1101] |\n| 02:12 | Queue Depth Check | connection refused on app-prod-02 [e:1101] |\n| 02:14 | Synthetic Login | timeout after 30s [e:1101] |\n\nThat is one event. The host stopped answering and three things noticed in turn.\n\nWorth checking first: Patch Deployment finished at 02:04, seven minutes before the first failure [e:1101]. That is a sequence, not a cause — this record shows what our automation did, not what patching changed on the host — but it is the obvious place to look, and whoever ran it will know in a minute whether that host was in scope.\n\nNothing has failed against app-prod-02 since 02:14, and the 06:00 Daily Health Report succeeded [e:1101]. It appears to have recovered on its own, which is worth saying out loud on the call because it means nobody fixed it.\n\n## Standing noise — Log Rotation\n\nLog Rotation failed four times, on the hour, every hour, with the same disk-quota error on /var [e:1101]. That is a broken automation rather than part of last night — it would have failed identically on a quiet night. Different problem, different person, and it should not be described as part of the incident.\n\n## Waiting on a human\n\nThe AWS Unused EBS Volume Cleanup has been pending approval since 19:40, requested by s.iyer [e:1101]. Nobody watches the approvals inbox overnight. If anyone believes that cleanup has run, it has not.\n\n## What this does not show\n\nThis is the record of what AutoOps did in this project. It does not show what an engineer did by hand, what changed in a cloud console, or what the customer's own monitoring saw — so if app-prod-02 was affected in ways nothing here probed, that will not appear above.",
+          "input_tokens": 2600,
+          "output_tokens": 520
+        }
+      ],
+      "expect": {
+        "directive": "FINISH",
+        "phase": "DONE",
+        "tool_calls": [],
+        "citations": [1101],
+        "has_uncited": false,
+        "output_contains": [
+          "That is one event",
+          "That is a sequence, not a cause",
+          "Standing noise",
+          "pending approval since 19:40",
+          "What this does not show"
+        ]
+      }
+    }
+  ]
+}

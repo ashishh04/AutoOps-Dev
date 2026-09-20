@@ -55,9 +55,14 @@ public class RunService {
     private final SubscriptionInfoClient subscriptionInfoClient;
     private final ExecutionEngine executionEngine;
     private final TaskExecutor executionTaskExecutor;
+    /** Workflow runs only — see ExecutionConfig for why it is separate. */
+    private final TaskExecutor workflowTaskExecutor;
     private final ObjectMapper objectMapper;
-    private final DifyWorkflowService difyWorkflows;
     private final NativeInputValidator nativeInputs;
+    /** Answers "can this workspace run this?" before anyone presses Run. */
+    private final WorkflowReadiness readiness;
+    /** Turns {@code library} steps into runnable ones as a run is snapshotted. */
+    private final LibraryStepResolver librarySteps;
     /** Nullable in slice tests that don't import it; QUEUED then goes unannounced. */
     private final LifecycleNotifier lifecycleNotifier;
 
@@ -69,9 +74,11 @@ public class RunService {
                       SubscriptionInfoClient subscriptionInfoClient,
                       ExecutionEngine executionEngine,
                       @Qualifier("executionTaskExecutor") TaskExecutor executionTaskExecutor,
+                      @Qualifier("workflowTaskExecutor") TaskExecutor workflowTaskExecutor,
                       ObjectMapper objectMapper,
-                      DifyWorkflowService difyWorkflows,
                       NativeInputValidator nativeInputs,
+                      WorkflowReadiness readiness,
+                      LibraryStepResolver librarySteps,
                       ObjectProvider<LifecycleNotifier> lifecycleNotifier) {
         this.runRepository = runRepository;
         this.jobRepository = jobRepository;
@@ -81,9 +88,11 @@ public class RunService {
         this.subscriptionInfoClient = subscriptionInfoClient;
         this.executionEngine = executionEngine;
         this.executionTaskExecutor = executionTaskExecutor;
+        this.workflowTaskExecutor = workflowTaskExecutor;
         this.objectMapper = objectMapper;
-        this.difyWorkflows = difyWorkflows;
         this.nativeInputs = nativeInputs;
+        this.readiness = readiness;
+        this.librarySteps = librarySteps;
         this.lifecycleNotifier = lifecycleNotifier.getIfAvailable();
     }
 
@@ -98,13 +107,38 @@ public class RunService {
                 job.getId(), job.getName(), job.getProject().getId(), job.getDefinition());
     }
 
+    /**
+     * The workflow, if this tenant is allowed to reach it DIRECTLY.
+     *
+     * <p>A workflow delivered as an agent component was never sold to the
+     * customer — it exists so the agent they did buy has something to call.
+     * It is already withheld from their listing; this is what stops the same
+     * row being reached by id, which a hidden thing with a sequential
+     * identifier otherwise invites.
+     *
+     * <p>The agent's own path does NOT come through here. It dispatches over
+     * {@code /internal/agent/*} into {@code runFromAgent}, which is the whole
+     * reason this check can be strict without breaking the product it is
+     * protecting.
+     */
+    private WorkflowClient.WorkflowView tenantVisible(String tenantId, Long workflowId) {
+        WorkflowClient.WorkflowView workflow = workflowClient.require(tenantId, workflowId);
+        if (workflow.isAgentComponent()) {
+            // Deliberately the same shape of answer as a workflow that does not
+            // exist. Confirming that a hidden component is present, by id, would
+            // undo the hiding.
+            throw CoreException.notFound("workflow_not_found", "No such workflow");
+        }
+        return workflow;
+    }
+
     @Transactional
     public Run runWorkflow(String tenantId, String actor, String accessToken, Long workflowId) {
         return runWorkflow(tenantId, actor, accessToken, workflowId, null);
     }
 
     /**
-     * @param inputs values for a Dify-backed workflow's published input form.
+     * @param inputs values for the workflow's published input form.
      *               Validated against that form here — this is the authoritative
      *               check, whatever any caller validated earlier — and ignored
      *               for a plain {@code nodes[]} workflow, which has no form to
@@ -115,7 +149,7 @@ public class RunService {
                            Map<String, Object> inputs) {
         // The definition comes from workflow-service now; the run — history,
         // snapshot, execution — stays here.
-        WorkflowClient.WorkflowView workflow = workflowClient.require(tenantId, workflowId);
+        WorkflowClient.WorkflowView workflow = tenantVisible(tenantId, workflowId);
         gate.requireActive(accessToken);
         return queue(tenantId, actor, RunTrigger.MANUAL, RunTargetType.WORKFLOW,
                 workflow.id(), workflow.name(), workflow.projectId(), workflow.definition(),
@@ -130,21 +164,28 @@ public class RunService {
      * the customer's browser learns what to ask for without ever receiving the
      * provider's design.
      *
-     * <p>Deliberately NOT transactional: both calls it makes are HTTP — one to
-     * workflow-service, one to Dify — and wrapping them would pin a pooled DB
-     * connection for the length of two network round trips while touching no
-     * table at all.
+     * <p>Deliberately NOT transactional: the call it makes is HTTP, to
+     * workflow-service, and wrapping it would pin a pooled DB connection for
+     * the length of a network round trip while touching no table at all.
      */
-    public List<DifyWorkflowService.InputField> inputFormFor(String tenantId, Long workflowId) {
-        WorkflowClient.WorkflowView workflow = workflowClient.require(tenantId, workflowId);
-        String slug = difyWorkflows.slugIn(workflow.definition());
-        // A native workflow declares its own inputs[]. Returning an empty list
-        // for one — as this did — left the console with no form to show, so a
-        // tenant pressed Run, nothing was collected, and the run was refused
-        // for missing inputs it was never given the chance to supply.
-        return slug == null
-                ? nativeInputs.formFor(workflow.definition())
-                : difyWorkflows.inputsFor(slug);
+    public List<WorkflowInputField> inputFormFor(String tenantId, Long workflowId) {
+        WorkflowClient.WorkflowView workflow = tenantVisible(tenantId, workflowId);
+        // A workflow declares its own inputs[], and the form is read out of
+        // the definition rather than fetched from a vendor — so it cannot
+        // desynchronise from the variables the workflow actually reads.
+        return nativeInputs.formFor(workflow.definition());
+    }
+
+    /**
+     * What stands between this workspace and running this workflow.
+     *
+     * <p>Not transactional for the same reason {@link #inputFormFor} is not:
+     * the workflow itself comes over HTTP from workflow-service, and pinning a
+     * pooled DB connection across that round trip buys nothing.
+     */
+    public WorkflowReadiness.Readiness readinessFor(String tenantId, Long workflowId) {
+        WorkflowClient.WorkflowView workflow = tenantVisible(tenantId, workflowId);
+        return readiness.check(tenantId, workflow.definition());
     }
 
     /**
@@ -154,18 +195,12 @@ public class RunService {
      * and every field was optional and left blank".
      */
     private String validatedInputs(String definition, Map<String, Object> inputs) {
-        String slug = difyWorkflows.slugIn(definition);
-        Map<String, Object> clean;
-        if (slug == null) {
-            // Native workflow: its own inputs[] is the contract. Until this
-            // existed the answers were dropped here and the run started with
-            // nothing, so a form could be filled in and silently ignored.
-            clean = nativeInputs.validate(definition, inputs);
-            if (clean == null) {
-                return null;
-            }
-        } else {
-            clean = difyWorkflows.validate(slug, inputs);
+        // The workflow's own inputs[] is the contract. Until this existed the
+        // answers were dropped here and the run started with nothing, so a form
+        // could be filled in and silently ignored.
+        Map<String, Object> clean = nativeInputs.validate(definition, inputs);
+        if (clean == null) {
+            return null;
         }
         try {
             return objectMapper.writeValueAsString(clean);
@@ -217,7 +252,7 @@ public class RunService {
     }
 
     /**
-     * @param inputs the agent's values for a Dify-backed workflow's input
+     * @param inputs the agent's values for a workflow's input
      *               form. Re-validated here, as on every other path into
      *               {@code queue}: this is the authoritative check, and an
      *               agent's arguments are no more trustworthy than a browser's.
@@ -240,19 +275,32 @@ public class RunService {
     private Run queue(String tenantId, String actor, RunTrigger trigger, RunTargetType targetType,
                       Long targetId, String targetName, Long projectId, String definition,
                       String inputsJson) {
+        // Library references become real script bodies HERE, before the
+        // snapshot is taken — every trigger (manual, schedule, webhook, agent,
+        // approval release) funnels through this one method, so there is
+        // exactly one place a `library` step can survive unresolved, and it
+        // does not. A reference that cannot be resolved throws, which fails the
+        // trigger loudly instead of queueing a run that would skip the work.
+        String resolved = librarySteps.resolve(tenantId, definition);
+
         Run run = new Run();
         run.setTenantId(tenantId);
         run.setProjectId(projectId);
         run.setTargetType(targetType);
         run.setTargetId(targetId);
         run.setTargetName(targetName);
-        run.setDefinition(definition);
+        run.setDefinition(resolved);
         run.setInputs(inputsJson);
         run.setTrigger(trigger);
         run.setTriggeredBy(actor);
-        run.setStepTotal(countItems(definition, targetType));
+        run.setStepTotal(countItems(resolved, targetType));
         Run saved = runRepository.save(run);
-        submitAfterCommit(saved.getId());
+        // Workflow runs go to their own pool. A workflow holds its thread while
+        // it waits on the runtime, and a workflow with a `job` node causes a
+        // SECOND run that needs a thread — on one shared pool, enough
+        // concurrent workflows occupy every thread and the jobs they are
+        // waiting for can never start. See ExecutionConfig.
+        submitAfterCommit(saved.getId(), targetType == RunTargetType.WORKFLOW);
         log.info("Tenant {} queued run {} ({} {}, {})", tenantId, saved.getId(),
                 targetType, targetId, trigger);
         return saved;
@@ -265,12 +313,13 @@ public class RunService {
      * that a rollback then erased would be reporting something that never
      * happened.
      */
-    private void submitAfterCommit(Long runId) {
+    private void submitAfterCommit(Long runId, boolean isWorkflow) {
+        TaskExecutor executor = isWorkflow ? workflowTaskExecutor : executionTaskExecutor;
         Runnable submit = () -> {
             if (lifecycleNotifier != null) {
                 runRepository.findById(runId).ifPresent(lifecycleNotifier::runQueued);
             }
-            executionTaskExecutor.execute(() -> executionEngine.execute(runId));
+            executor.execute(() -> executionEngine.execute(runId));
         };
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {

@@ -1,0 +1,64 @@
+# ============================================================
+# AutoOps — server hardening overlay. Use on ANY deployed host.
+#
+# The tracked docker-compose.yml publishes a host port for every service so a
+# developer can curl one directly from their laptop. On a server that is not
+# convenience, it is attack surface: those ports bind 0.0.0.0, and the internal
+# services behind them authenticate with X-Internal-Token — a shared secret
+# whose default value is committed to this repository.
+#
+# rundeck-service:8090 is the sharp one. It has no /api/** surface and no
+# gateway route, by design, so that nothing tenant-facing can reach step
+# execution. Publishing the port bypasses that design: a POST to
+# /internal/rundeck/step with the right header runs arbitrary bash, terraform
+# or kubectl on the engine, for any tenant, with no user login involved.
+#
+# Nothing is lost. frontend/nginx (deploy-demo/nginx.demo.conf) proxies /api/
+# and /oauth2/ to api-gateway:8080 over the compose network, so the browser
+# only ever talks to the frontend origin. Every service reaches every other
+# service by compose DNS. The only thing given up is curling a service
+# directly from the host shell — use `docker exec <container> wget -qO- ...`
+# for that instead, which needs no open port.
+#
+# `!reset null` REMOVES the attribute the base file set. `!override []` looks
+# equivalent and is not: Compose keeps the base list and the mapping survives.
+# Verify with:  docker compose config | grep -B2 -A3 'ports:'
+#
+# Append to COMPOSE_FILE in ./.env, AFTER the base file:
+#   COMPOSE_FILE=docker-compose.yml;deploy-demo/docker-compose.demo.yml;docker-compose.aws.yml
+# ============================================================
+services:
+  # --- the one that matters: step execution for every tenant ---
+  rundeck-service:
+    ports: !reset null
+
+  # --- internal services; reachable by compose DNS, never from outside ---
+  auth-service:
+    ports: !reset null
+  subscription-service:
+    ports: !reset null
+  core-service:
+    ports: !reset null
+  workflow-service:
+    ports: !reset null
+  agent-service:
+    ports: !reset null
+  agent-runtime:
+    ports: !reset null
+  plugin-service:
+    ports: !reset null
+  voice-agent:
+    ports: !reset null
+
+  # The database. 3308 on the host is a dev convenience that exposes MySQL to
+  # anything that can route to this instance.
+  mysql:
+    ports: !reset null
+
+  # Observability UI, not part of the product surface.
+  langfuse:
+    ports: !reset null
+
+  # api-gateway and frontend deliberately keep their ports: the gateway is the
+  # authenticated front door, and ngrok forwards to the frontend. If you serve
+  # this box only through the tunnel, reset these two as well.

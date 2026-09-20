@@ -5,8 +5,8 @@
  * AES-GCM encrypted by core-service, and are never returned to the browser —
  * so a configured vendor shows a status, never its secret.
  *
- * There used to be a sibling screen driving the shared Dify workspace. It was
- * removed: Dify is the engine behind workflows, not something a tenant
+ * There used to be a sibling screen driving a shared vendor workspace. It was
+ * removed: the engine behind workflows is not something a tenant
  * configures, and its workspace token never belongs in a browser.
  *
  * "Test" makes a REAL call against the vendor. A provider that has never been

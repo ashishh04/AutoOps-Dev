@@ -117,16 +117,63 @@ public class RuntimeClient {
      *                  never issued for this run must not survive even if the
      *                  runtime's own check is wrong.
      */
+    /**
+     * @param declaredSubjectKinds the kinds this agent's tools can enumerate.
+     *                             A property of the AGENT, present on every
+     *                             reduce, and what the run's opening scope is
+     *                             built from. Deliberately not derived from
+     *                             results seen so far: that would make the
+     *                             declaration a function of which tool happened
+     *                             to run first, and a coverage claim that varies
+     *                             with scheduling has no business near state
+     *                             deletion.
+     * @param subjectScope         what the run actually covered, per kind.
+     *                             Present ONLY on a terminal directive — a run
+     *                             that stopped halfway examined an unknown
+     *                             fraction of what it set out to, and publishing
+     *                             that fraction as coverage is how one bad night
+     *                             reaps a backlog.
+     * @param subjectIds           the ids behind every enumerated element.
+     *                             Travels beside the scope rather than inside
+     *                             it, so the digest the runtime computed can be
+     *                             checked against the subjects it sent.
+     * @param findings             the run's verdicts — what a scheduler
+     *                             deduplicates against, as opposed to the prose
+     *                             report a person reads. Emitted only on a
+     *                             FINISHed run: a half-finished investigation
+     *                             published as verdicts can be dismissed as
+     *                             though it were complete.
+     */
     public record Reduction(String state, Integer stateVersion, String phase,
                             Directive directive, List<ToolCall> toolCalls, String output,
                             String error, long promptTokens, long completionTokens,
                             int modelCalls, String traceId, List<Long> citations,
-                            List<String> uncitedClaims) {
+                            List<String> uncitedClaims, List<String> declaredSubjectKinds,
+                            JsonNode subjectScope, Map<String, List<String>> subjectIds,
+                            JsonNode findings) {
 
         public Reduction {
             toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
             citations = citations == null ? List.of() : List.copyOf(citations);
             uncitedClaims = uncitedClaims == null ? List.of() : List.copyOf(uncitedClaims);
+            declaredSubjectKinds = declaredSubjectKinds == null
+                    ? List.of() : List.copyOf(declaredSubjectKinds);
+            subjectIds = subjectIds == null ? Map.of() : Map.copyOf(subjectIds);
+        }
+
+        /** The verdicts, never null — an absent list reads as no findings. */
+        public List<JsonNode> verdicts() {
+            if (findings == null || !findings.isArray()) {
+                return List.of();
+            }
+            List<JsonNode> out = new ArrayList<>();
+            findings.forEach(out::add);
+            return out;
+        }
+
+        /** True when the runtime reported coverage, which only a finished run does. */
+        public boolean carriesCoverage() {
+            return subjectScope != null && subjectScope.isArray() && !subjectScope.isEmpty();
         }
 
         public boolean failed() {
@@ -225,6 +272,13 @@ public class RuntimeClient {
             entry.put("description", tool.spec().description());
             entry.put("input_schema", tool.spec().inputSchema());
             entry.put("mutating", tool.mutating());
+            // The stable name the agent's author declared against. The runtime
+            // cannot use `name` for this — it is workflow_<id>, a tenant-local
+            // number — and it needs the ref to match a result back to what the
+            // author said the tool returns.
+            if (tool.spec().ref() != null) {
+                entry.put("ref", tool.spec().ref());
+            }
             encoded.add(entry);
         }
         return encoded;
@@ -313,7 +367,35 @@ public class RuntimeClient {
                 asLong(usage.get("prompt_tokens")), asLong(usage.get("completion_tokens")),
                 modelCallsOf(response), str(response.get("trace_id")),
                 longs(response.get("citations")),
-                strings(response.get("uncited_claims")));
+                strings(response.get("uncited_claims")),
+                strings(response.get("declared_subject_kinds")),
+                objectMapper.valueToTree(response.get("subject_scope")),
+                subjectIdsOf(response.get("subject_ids")),
+                objectMapper.valueToTree(response.get("findings")));
+    }
+
+    /**
+     * The ids behind each enumerated element, keyed by subject kind.
+     *
+     * <p>An unreadable shape yields an EMPTY map rather than an exception: the
+     * consequence is a scope agent-service refuses to materialise, which costs
+     * this run its reap. That is the safe direction, and the alternative — a
+     * 500 on the reduce — costs the run its report as well.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, List<String>> subjectIdsOf(Object raw) {
+        if (!(raw instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        map.forEach((kind, ids) -> {
+            if (kind instanceof String name && ids instanceof List<?> rows) {
+                List<String> values = new ArrayList<>();
+                rows.forEach(id -> values.add(String.valueOf(id)));
+                out.put(name, values);
+            }
+        });
+        return out;
     }
 
     /**

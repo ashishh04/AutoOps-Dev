@@ -1,0 +1,68 @@
+{
+  "findings": [
+    {
+      "schema_version": "1.0",
+      "verdict_id": "34be6a7b66d0c97ce5adb52f279ffb10",
+      "idempotency_key": "7c9a4b380782c8da375bea08e27c067e",
+      "stable_key": true,
+      "agent": {
+        "name": "aws.incident_rca_analyst",
+        "version": "1.0.0",
+        "run_id": null
+      },
+      "tenant_id": null,
+      "subject": {
+        "kind": "alert_rule",
+        "id": "me-south-1/cpu-high"
+      },
+      "finding": {
+        "type": "flapping_alarm",
+        "summary": "cpu-high has flapped 14 times in the window.",
+        "severity": "medium"
+      },
+      "autonomy": {
+        "requested_tier": "suggest",
+        "tier_source": "no_mutating_tool",
+        "detail": "This agent holds no state-changing tool, so it can only report."
+      },
+      "evidence": [],
+      "fallback": {
+        "is_fallback": false,
+        "reason": null
+      },
+      "ordinal": 0
+    },
+    {
+      "schema_version": "1.0",
+      "verdict_id": "6dbd3298d147b1af1ddd840d2cff0d34",
+      "idempotency_key": "868f884bcf1a383ccc7f7899896997b5",
+      "stable_key": false,
+      "agent": {
+        "name": "aws.incident_rca_analyst",
+        "version": "1.0.0",
+        "run_id": null
+      },
+      "tenant_id": null,
+      "subject": {
+        "kind": "unknown",
+        "id": ""
+      },
+      "finding": {
+        "type": "unclassified",
+        "summary": "The incident correlates with a deploy, but no single subject.",
+        "severity": "info"
+      },
+      "autonomy": {
+        "requested_tier": "suggest",
+        "tier_source": "no_mutating_tool",
+        "detail": "This agent holds no state-changing tool, so it can only report."
+      },
+      "evidence": [],
+      "fallback": {
+        "is_fallback": false,
+        "reason": null
+      },
+      "ordinal": 1
+    }
+  ]
+}

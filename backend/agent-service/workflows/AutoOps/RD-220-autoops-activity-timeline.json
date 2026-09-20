@@ -1,0 +1,48 @@
+{
+  "taskId": "RD-220",
+  "domain": "AutoOps",
+  "title": "AutoOps Activity Timeline",
+  "description": "Everything that happened in this project inside a time window, in order: the automations that ran and what they returned, the ones that failed and whether they failed together, and the changes parked waiting for a human. Read-only. Vendor-agnostic — it reads the platform's own record, so it is the same evidence whether the estate is AWS, Azure, on-premises or all three.",
+  "category": "Operations",
+  "runtime": "native",
+  "inputs": [
+    {
+      "variable": "WindowHours",
+      "label": "Look back (hours)",
+      "type": "number",
+      "required": true,
+      "min": 1,
+      "max": 168,
+      "default": 24,
+      "help": "How far back to read. Use the window around the incident — a wide window makes everything look related to everything.",
+      "consumedBy": "node"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "title": "Start"
+    },
+    {
+      "id": "history",
+      "type": "platform",
+      "title": "Read this project's activity",
+      "windowHours": "{{#start.WindowHours#}}"
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "title": "End",
+      "outputs": [
+        { "variable": "timeline", "value": "{{#history.timeline#}}" },
+        { "variable": "summary", "value": "{{#history.summary#}}" }
+      ]
+    }
+  ],
+  "edges": [
+    { "source": "start", "target": "history" },
+    { "source": "history", "target": "end" }
+  ],
+  "requires": []
+}

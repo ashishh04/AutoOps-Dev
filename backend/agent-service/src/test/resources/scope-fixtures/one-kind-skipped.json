@@ -1,0 +1,26 @@
+{
+  "subject_scope": [
+    {
+      "kind": "enumerated",
+      "subject_kind": "cloud_resource",
+      "subject_id_count": 3,
+      "subject_ids_digest": "sha256:a56d85541b379a4fc32cf47ade202cea37ccb47e2632b61d513d110512d7e83b",
+      "coverage": "COMPLETE"
+    },
+    {
+      "kind": "enumerated",
+      "subject_kind": "principal",
+      "subject_id_count": 0,
+      "subject_ids_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "coverage": "SKIPPED"
+    }
+  ],
+  "subject_ids": {
+    "cloud_resource": [
+      "me-south-1/eipalloc-1",
+      "me-south-1/vol-1",
+      "me-south-1/vol-2"
+    ],
+    "principal": []
+  }
+}

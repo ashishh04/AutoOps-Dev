@@ -1,0 +1,29 @@
+{
+  "subject_scope": [
+    {
+      "kind": "enumerated",
+      "subject_kind": "cloud_resource",
+      "subject_id_count": 3,
+      "subject_ids_digest": "sha256:a56d85541b379a4fc32cf47ade202cea37ccb47e2632b61d513d110512d7e83b",
+      "coverage": "COMPLETE"
+    },
+    {
+      "kind": "enumerated",
+      "subject_kind": "principal",
+      "subject_id_count": 2,
+      "subject_ids_digest": "sha256:0ddf82e9476c6a7eb67b1333adef5e47c93e3293e775dbf17620cb46baf428f4",
+      "coverage": "COMPLETE"
+    }
+  ],
+  "subject_ids": {
+    "cloud_resource": [
+      "me-south-1/eipalloc-1",
+      "me-south-1/vol-1",
+      "me-south-1/vol-2"
+    ],
+    "principal": [
+      "471112223334/ali.hassan",
+      "471112223334/svc-deploy"
+    ]
+  }
+}

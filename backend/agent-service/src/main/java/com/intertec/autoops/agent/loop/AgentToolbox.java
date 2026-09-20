@@ -139,7 +139,7 @@ public class AgentToolbox {
         specs.add(new ToolSpec(name,
                 "Run the automation job \"" + target.name() + "\". It runs its saved "
                         + "definition; it takes no arguments. Returns the run outcome and log.",
-                ToolSpec.objectSchema(Map.of(), List.of())));
+                ToolSpec.objectSchema(Map.of(), List.of()), ref.ref()));
         byName.put(name, new Tool(name, "JOB", ref.id(), target.name(), ref.mutating()));
     }
 
@@ -187,15 +187,15 @@ public class AgentToolbox {
                 .append(". Returns the run outcome and its full output.");
 
         specs.add(new ToolSpec(name, description.toString(),
-                ToolSpec.objectSchema(properties, required)));
+                ToolSpec.objectSchema(properties, required), ref.ref()));
         byName.put(name, new Tool(name, "WORKFLOW", ref.id(), target.name(), ref.mutating()));
     }
 
     /**
-     * Dify's field types mapped to JSON Schema.
+     * A workflow's field types mapped to JSON Schema.
      *
      * <p>Everything that is not explicitly a number or a fixed choice becomes
-     * a string. That is not laziness: Dify's {@code paragraph}, {@code text-input}
+     * a string. That is not laziness: {@code paragraph}, {@code text-input}
      * and file types all arrive as text on the wire, and inventing a richer
      * type here would produce arguments the workflow cannot read.
      */
@@ -216,7 +216,7 @@ public class AgentToolbox {
         }
         if (field.options() != null && !field.options().isEmpty()) {
             // A select field's options ARE the contract. Passing anything else
-            // fails inside Dify with a message the model cannot act on, so the
+            // fails inside the engine with a message the model cannot act on, so the
             // choice is stated up front where it can be respected.
             schema.put("enum", field.options());
         }
@@ -236,7 +236,13 @@ public class AgentToolbox {
      *                 four delete anything" is not a question their schema can
      *                 answer.
      */
-    private record Ref(String type, Long id, boolean mutating) {
+    /**
+     * @param ref the catalog name the agent's author declared against, carried
+     *            through delivery by {@code RolloutService}. Null on agents
+     *            rolled out before that was added — which costs those agents
+     *            subject extraction and nothing else.
+     */
+    private record Ref(String type, Long id, boolean mutating, String ref) {
     }
 
     /**
@@ -259,7 +265,7 @@ public class AgentToolbox {
                 long id = entry.path("id").asLong(0);
                 if (id > 0) {
                     unique.add(new Ref("WORKFLOW".equals(type) ? "WORKFLOW" : "JOB", id,
-                            mutating(entry)));
+                            mutating(entry), entry.path("ref").asText(null)));
                 }
             }
             return List.copyOf(unique);

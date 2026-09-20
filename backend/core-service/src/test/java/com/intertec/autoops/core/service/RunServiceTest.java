@@ -53,16 +53,14 @@ import static org.mockito.Mockito.when;
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-// The Dify trio is imported rather than mocked: with no key configured the
-// registry is empty and slugIn() returns null for every definition here, so
-// these tests exercise the same "not a Dify workflow" branch production takes
-// for a plain nodes[] canvas. Nothing reaches out to Dify.
 @Import({ProjectService.class, JobService.class, RunService.class,
         JobScheduler.class, ExecutionEngine.class, SimulatedStepExecutor.class,
-        SubscriptionGate.class, DifyWorkflowService.class, NativeInputValidator.class,
-        com.intertec.autoops.core.config.DifyAppRegistry.class,
-        com.intertec.autoops.core.config.DifyProperties.class,
-        com.intertec.autoops.core.client.DifyAppClient.class})
+        SubscriptionGate.class, NativeInputValidator.class,
+        LibraryStepResolver.class,
+        NativeWorkflowService.class,
+        WorkflowReadiness.class,
+        com.intertec.autoops.core.client.WorkflowRuntimeClient.class,
+})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class RunServiceTest {
 
@@ -110,6 +108,14 @@ class RunServiceTest {
     @MockBean
     private SchedulerLeaseService schedulerLeaseService;
 
+    /**
+     * NativeWorkflowService needs it to resolve a workflow's model, but it
+     * drags in repositories, the credential crypto and a vendor probe that
+     * this slice has none of — and no case here runs a graph with an llm node.
+     */
+    @MockBean
+    private ModelProviderService modelProviderService;
+
     @TestConfiguration
     static class TestConfig {
         @Bean
@@ -134,6 +140,18 @@ class RunServiceTest {
          * thread gets clean transaction state, and the trigger call still
          * returns with the run fully finished.
          */
+        /**
+         * Workflow runs use their own pool in production so a workflow cannot
+         * starve the job it is waiting for (see ExecutionConfig). Here both
+         * point at the same joined-thread executor: nothing in this slice runs
+         * a workflow that starts a job, and a second pool would only add a
+         * second way for the test to be non-deterministic.
+         */
+        @Bean(name = "workflowTaskExecutor")
+        TaskExecutor workflowTaskExecutor() {
+            return executionTaskExecutor();
+        }
+
         @Bean(name = "executionTaskExecutor")
         TaskExecutor executionTaskExecutor() {
             return command -> {
@@ -192,6 +210,55 @@ class RunServiceTest {
                 901L, TENANT, project.getId(), name, definition, 3, true);
         when(workflowClient.require(TENANT, view.id())).thenReturn(view);
         return view;
+    }
+
+    /** The same stub, but delivered only so an agent has something to call. */
+    private WorkflowClient.WorkflowView stubComponent(String name, String definition) {
+        WorkflowClient.WorkflowView view = new WorkflowClient.WorkflowView(
+                902L, TENANT, project.getId(), name, definition, 3, true, "AGENT_COMPONENT");
+        when(workflowClient.require(TENANT, view.id())).thenReturn(view);
+        return view;
+    }
+
+    /**
+     * Workflows and agents are licensed separately. A workflow delivered
+     * because an agent names it was never sold to the customer, so they cannot
+     * run it on its own — even by guessing the id, which a hidden row with a
+     * sequential identifier otherwise invites.
+     */
+    @Test
+    void aTenantCannotRunAWorkflowDeliveredAsAnAgentComponent() {
+        WorkflowClient.WorkflowView component =
+                stubComponent("CloudTrail Change Timeline", "{\"nodes\":[{}]}");
+
+        CoreException thrown = assertThrows(CoreException.class,
+                () -> runService.runWorkflow(TENANT, ACTOR, TOKEN, component.id(), null));
+
+        // The same answer as a workflow that does not exist: confirming a
+        // hidden component is present, by id, would undo the hiding.
+        assertEquals("workflow_not_found", thrown.getError());
+    }
+
+    @Test
+    void aTenantCannotReadAnAgentComponentsInputFormOrReadiness() {
+        WorkflowClient.WorkflowView component =
+                stubComponent("CloudTrail Change Timeline", "{\"nodes\":[{}]}");
+
+        assertThrows(CoreException.class,
+                () -> runService.inputFormFor(TENANT, component.id()));
+        assertThrows(CoreException.class,
+                () -> runService.readinessFor(TENANT, component.id()));
+    }
+
+    /** The product half: a workflow they were actually given still runs. */
+    @Test
+    void aWorkflowDeliveredInItsOwnRightStillRuns() {
+        WorkflowClient.WorkflowView workflow =
+                stubWorkflow("Idle Resource Inventory", "{\"nodes\":[{\"label\":\"Scan\"}]}");
+
+        Run run = runService.runWorkflow(TENANT, ACTOR, TOKEN, workflow.id(), null);
+
+        assertNotNull(run.getId());
     }
 
     @Test

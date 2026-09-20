@@ -1,4 +1,3 @@
-import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useStore } from "./store/store";
 import Home from "./pages/Home";
@@ -30,11 +29,15 @@ import Commands from "./pages/app/Commands";
 import Executions from "./pages/app/Executions";
 import ExecutionDetail from "./pages/app/ExecutionDetail";
 import Workflows from "./pages/app/Workflows";
+import AgentsHub from "./pages/app/AgentsHub";
+import WorkflowDetail from "./pages/app/WorkflowDetail";
 import Models from "./pages/app/Models";
 import NotificationChannels from "./pages/app/NotificationChannels";
 import Schedule from "./pages/app/Schedule";
 import Webhooks from "./pages/app/Webhooks";
-import AgentsHub from "./pages/app/AgentsHub";
+import Alerts from "./pages/app/Alerts";
+import AlertDetail from "./pages/app/AlertDetail";
+import AlertProviders from "./pages/app/AlertProviders";
 import Approvals from "./pages/app/Approvals";
 import Audit from "./pages/app/Audit";
 import Governance from "./pages/app/Governance";
@@ -62,11 +65,8 @@ import ProviderSettings from "./pages/provider/ProviderSettings";
 import ProviderLibrary from "./pages/provider/Library";
 import Broadcasts from "./pages/provider/Broadcasts";
 import ProviderNotifications from "./pages/provider/ProviderNotifications";
-import ProviderDifyDesigner from "./pages/provider/ProviderDifyDesigner";
-import PublishWorkflow from "./pages/provider/PublishWorkflow";
-import DifyDesigner from "./pages/app/DifyDesigner";
-import ProviderAgentBuilder from "./pages/provider/ProviderAgentBuilder";
 import ProviderScriptEditor from "./pages/provider/ProviderScriptEditor";
+import ProviderAgentBuilder from "./pages/provider/ProviderAgentBuilder";
 
 // Full-screen loader shown while the session is being restored from a token.
 function BootScreen() {
@@ -221,7 +221,7 @@ export default function App() {
         />
         <Route path="settings" element={<Settings />} />
         {/*
-          ONE model screen: this workspace's own vendor keys. Dify has no
+          ONE model screen: this workspace's own vendor keys. The engine has no
           surface in the tenant console — it is the engine behind workflows,
           and its workspace token can read and delete every app in the shared
           workspace, so it stays server-side.
@@ -271,6 +271,14 @@ export default function App() {
             a route here would have nothing to render. Authoring lives in the
             provider console: /provider/library/workflow/new and /agent/new. */}
         <Route path="projects/:pid/workflows" element={<Workflows />} />
+        {/* Read-and-run. There is no authoring route: an agent's persona is
+            the provider's product and arrives by rollout. */}
+        <Route path="projects/:pid/agents" element={<AgentsHub />} />
+        {/* A workflow's results live INSIDE the workflow, the same way a
+            job's do. A workflow run and a job run are the same row in the
+            same table; to an operator asking "did the 2am automation
+            work" they are the same question. */}
+        <Route path="projects/:pid/workflows/:id" element={<WorkflowDetail />} />
         <Route path="projects/:pid/executions" element={<Executions />} />
         <Route
           path="projects/:pid/executions/:id"
@@ -279,8 +287,12 @@ export default function App() {
         <Route path="projects/:pid/nodes" element={<Nodes />} />
         <Route path="projects/:pid/schedule" element={<Schedule />} />
         <Route path="projects/:pid/webhooks" element={<Webhooks />} />
+        <Route path="projects/:pid/alerts" element={<Alerts />} />
+        {/* Before the :fingerprint route below, or "sources" is parsed as one. */}
+        <Route path="projects/:pid/alerts/sources" element={<AlertProviders />} />
+        {/* Encoded in the link: a fingerprint is opaque and may contain a slash. */}
+        <Route path="projects/:pid/alerts/:fingerprint" element={<AlertDetail />} />
         <Route path="projects/:pid/commands" element={<Commands />} />
-        <Route path="projects/:pid/agents" element={<AgentsHub />} />
         <Route path="projects/:pid/approvals" element={<Approvals />} />
         <Route path="projects/:pid/audit" element={<Audit />} />
         <Route path="projects/:pid/governance" element={<Governance />} />
@@ -311,15 +323,22 @@ export default function App() {
         <Route path="tenants" element={<Tenants />} />
         <Route path="tenants/:id" element={<TenantDetail />} />
         <Route path="library" element={<ProviderLibrary />} />
-        <Route path="library/workflow/new" element={<ProviderDifyDesigner />} />
-        {/* Before library/workflow/:appId, which would otherwise match
-            "publish" as an app id and open the designer on nothing. */}
-        <Route path="library/workflow/publish" element={<PublishWorkflow />} />
-        {/* The designer itself, reused: one canvas, whoever opens it. */}
-        <Route path="library/workflow/:appId" element={<DifyDesigner />} />
-        <Route path="library/agent/new" element={<ProviderAgentBuilder />} />
+        {/* NO WORKFLOW DESIGNER ROUTE. The vendor canvas that used to live at
+            library/workflow/new|:appId was deleted with the engine behind it.
+            Workflow definitions are a node graph the native runtime executes
+            (see backend/agent-runtime/agent_runtime/workflows); until a canvas
+            exists for that, a route here would open an editor that can only
+            produce definitions nothing runs. */}
         <Route path="library/script/new" element={<ProviderScriptEditor />} />
         <Route path="library/script/:id" element={<ProviderScriptEditor />} />
+        {/* The agent builder. Unlike a workflow, an agent has no canvas to
+            delete: it is a persona, a model and a closed allow-list of catalog
+            workflows, and the row this writes is byte-for-byte the one
+            agents/_schema/publish.py writes from a JSON file. Authoring an
+            agent therefore no longer needs a checkout — which is what makes
+            "roll it out to anyone" true from the console. */}
+        <Route path="library/agent/new" element={<ProviderAgentBuilder />} />
+        <Route path="library/agent/:id" element={<ProviderAgentBuilder />} />
         {/* Type-scoped views of the same catalog — /library/scripts|workflows|agents.
             Ranked below the two static routes above, so those still win. */}
         <Route path="library/:type" element={<ProviderLibrary />} />

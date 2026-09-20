@@ -52,13 +52,31 @@ public class WorkflowService {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * What the CUSTOMER sees: everything except sealed agent components.
+     *
+     * <p>A component was delivered because an agent needs something to call,
+     * not because anyone sold it. Listing it invites the fair question "I did
+     * not ask for this, why is it in my environment?", and worse, lets a
+     * customer run a product they were never licensed. The agent still reaches
+     * it — tool resolution goes through {@link #listUnchecked}, which does not
+     * filter.
+     */
     @Transactional(readOnly = true)
     public List<Workflow> list(String tenantId, Long projectId) {
         coreClient.requireProject(tenantId, projectId);
-        return workflowRepository.findByProjectIdAndTenantIdOrderByCreatedAtDesc(projectId, tenantId);
+        return workflowRepository.findByProjectIdAndTenantIdAndDeliveryOrderByCreatedAtDesc(
+                projectId, tenantId, Workflow.Delivery.PRODUCT);
     }
 
-    /** Internal/read path that skips the project round trip (id already known good). */
+    /**
+     * The INTERNAL listing: every row, components included.
+     *
+     * <p>This is what {@code RolloutService.resolveTools} reads to turn an
+     * agent's allow-list of refs into the ids of the copies this project holds.
+     * It must not filter — a component hidden from this would make the agent
+     * that needs it undeliverable.
+     */
     @Transactional(readOnly = true)
     public List<Workflow> listUnchecked(String tenantId, Long projectId) {
         return workflowRepository.findByProjectIdAndTenantIdOrderByCreatedAtDesc(projectId, tenantId);
@@ -82,7 +100,8 @@ public class WorkflowService {
      */
     @Transactional
     public Workflow rollOut(String tenantId, String actor, String accessToken,
-                            Long projectId, Long sourceId, String name, String definition) {
+                            Long projectId, Long sourceId, String name, String definition,
+                            Workflow.Delivery delivery) {
         // One delivered copy per catalog item per project. The name check in
         // doCreate stops the obvious repeat, but only while the names still
         // match: rename the catalog item, roll out again, and it lets a second
@@ -90,7 +109,8 @@ public class WorkflowService {
         // and gives the provider a conflict that says what actually happened
         // instead of "a workflow with this name already exists".
         if (sourceId != null
-                && workflowRepository.existsByProjectIdAndSourceId(projectId, sourceId)) {
+                && workflowRepository.existsByProjectIdAndSourceIdAndDelivery(
+                        projectId, sourceId, delivery)) {
             throw WorkflowException.conflict("already_delivered",
                     "This project already has this workflow. Edit the delivered copy to "
                             + "update it, or roll out to a different project.");
@@ -100,12 +120,13 @@ public class WorkflowService {
         // subscription entirely. core-service checks the RECEIVING customer's
         // subscription before it calls here (RolloutService#requireLiveSubscription).
         Workflow workflow = doCreate(tenantId, actor, accessToken, projectId, name,
-                definition, false);
+                definition, false, delivery);
         workflow.setOrigin(Workflow.Origin.PROVIDER);
         workflow.setSourceId(sourceId);
+        workflow.setDelivery(delivery);
         Workflow saved = workflowRepository.save(workflow);
-        log.info("Rolled catalog workflow {} out to tenant {} project {} as workflow {}",
-                sourceId, tenantId, projectId, saved.getId());
+        log.info("Rolled catalog workflow {} out to tenant {} project {} as workflow {} ({})",
+                sourceId, tenantId, projectId, saved.getId(), delivery);
         return saved;
     }
 
@@ -120,7 +141,8 @@ public class WorkflowService {
     @Transactional
     public Workflow createTrusted(String tenantId, String actor, String accessToken,
                                   Long projectId, String name, String definition) {
-        return doCreate(tenantId, actor, accessToken, projectId, name, definition, true);
+        return doCreate(tenantId, actor, accessToken, projectId, name, definition, true,
+                Workflow.Delivery.PRODUCT);
     }
 
     /**
@@ -130,8 +152,12 @@ public class WorkflowService {
      */
     private Workflow doCreate(String tenantId, String actor, String accessToken,
                               Long projectId, String name, String definition,
-                              boolean planGate) {
-        if (workflowRepository.existsByProjectIdAndName(projectId, name)) {
+                              boolean planGate, Workflow.Delivery delivery) {
+        // Scoped to the delivery kind, because a sealed agent component and a
+        // separately licensed copy of the same catalog workflow carry the same
+        // name by construction. That is not ambiguous to the customer: only the
+        // PRODUCT copy is ever listed to them.
+        if (workflowRepository.existsByProjectIdAndNameAndDelivery(projectId, name, delivery)) {
             throw WorkflowException.conflict("workflow_exists",
                     "A workflow with this name already exists in the project");
         }
@@ -151,6 +177,7 @@ public class WorkflowService {
         workflow.setDefinition(definition);
         workflow.setNodeCount(nodeCount);
         workflow.setCreatedBy(actor);
+        workflow.setDelivery(delivery);
         Workflow saved = workflowRepository.save(workflow);
         log.info("Tenant {} created workflow {} ({} nodes)", tenantId, saved.getId(), nodeCount);
         return saved;

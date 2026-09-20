@@ -18,6 +18,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -54,8 +55,18 @@ public class AgentService {
         this.objectMapper = objectMapper;
     }
 
-    /** One entry of the allow-list, resolved for display. */
-    public record ToolView(String type, Long id, String name, boolean available) {
+    /**
+     * One entry of the allow-list, resolved for display.
+     *
+     * <p>{@code mutating} is carried so an edit can send back what it was
+     * given. A console that reads {type, id} and writes {type, id} silently
+     * DROPS the flag the provider catalog declared, and phase narrowing then
+     * hides the agent's own read-only automations from the phase that
+     * gathers evidence. Null means undeclared, which is a third state and not
+     * the same as false — see ToolRef.
+     */
+    public record ToolView(String type, Long id, String name, boolean available,
+                           Boolean mutating) {
     }
 
     @Transactional(readOnly = true)
@@ -311,7 +322,7 @@ public class AgentService {
                             name != null ? name
                                     : "Deleted " + ref.type().toLowerCase(Locale.ROOT)
                                             + " #" + ref.id(),
-                            name != null);
+                            name != null, ref.mutating());
                 }).toList()));
     }
 
@@ -333,7 +344,33 @@ public class AgentService {
                 + toolTargets.workflowCount(tenantId);
     }
 
-    private record ToolRef(String type, Long id) {
+    /**
+     * A requested tool, and whether its author said it changes customer state.
+     *
+     * <p>{@code mutating} is a {@link Boolean} rather than a primitive because
+     * "not declared" and "declared false" are different facts. Phase narrowing
+     * fails closed on the former — {@code AgentToolbox} treats an unmarked tool
+     * as mutating, which hides it from the evidence-gathering phase — so
+     * flattening the two would silently turn every undeclared tool into a
+     * read-only one. Carrying the null keeps that decision where it belongs.
+     *
+     * <p>Identity is {@code (type, id)} alone. The de-duplicating set must not
+     * treat the same automation declared twice with different flags as two
+     * tools; the first declaration wins, as it does for every other field.
+     */
+    private record ToolRef(String type, Long id, Boolean mutating) {
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof ToolRef ref
+                    && Objects.equals(type, ref.type)
+                    && Objects.equals(id, ref.id);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(type, id);
+        }
     }
 
     /**
@@ -363,6 +400,15 @@ public class AgentService {
             ObjectNode node = out.addObject();
             node.put("type", ref.type());
             node.put("id", ref.id());
+            if (ref.mutating() != null) {
+                // Carried through rather than recomputed. The provider catalog
+                // declares this per tool and validates it against the IAM
+                // permissions the workflow asks for; dropping it here used to
+                // leave every delivered agent's read-only tools looking
+                // state-changing, which hid them from GATHER and produced runs
+                // that reported having collected nothing.
+                node.put("mutating", ref.mutating());
+            }
         }
         return out.toString();
     }
@@ -392,7 +438,16 @@ public class AgentService {
                 throw AgentException.badRequest("invalid_tools",
                         "Each agent tool needs a type of JOB or WORKFLOW and a numeric id");
             }
-            unique.add(new ToolRef(type, id.asLong()));
+            // Absent stays absent: see ToolRef. Anything that is present but
+            // not a boolean is a malformed grant rather than a default, and is
+            // rejected with the rest of the shape validation above.
+            JsonNode declared = entry.path("mutating");
+            if (!declared.isMissingNode() && !declared.isNull() && !declared.isBoolean()) {
+                throw AgentException.badRequest("invalid_tools",
+                        "An agent tool's \"mutating\" flag must be true or false");
+            }
+            unique.add(new ToolRef(type, id.asLong(),
+                    declared.isBoolean() ? declared.asBoolean() : null));
         }
         return new ArrayList<>(unique);
     }
@@ -410,7 +465,13 @@ public class AgentService {
             List<ToolRef> refs = new ArrayList<>();
             for (JsonNode entry : root) {
                 String type = "JOB".equals(entry.path("type").asText()) ? "JOB" : "WORKFLOW";
-                refs.add(new ToolRef(type, entry.path("id").asLong()));
+                // The read side is tolerant by design, so an unreadable flag is
+                // carried as "undeclared" rather than guessed. This parse feeds
+                // counting and description, neither of which consults it —
+                // AgentToolbox re-reads the stored JSON itself.
+                JsonNode declared = entry.path("mutating");
+                refs.add(new ToolRef(type, entry.path("id").asLong(),
+                        declared.isBoolean() ? declared.asBoolean() : null));
             }
             return refs;
         } catch (Exception ex) {

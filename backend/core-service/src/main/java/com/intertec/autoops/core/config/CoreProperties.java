@@ -24,6 +24,8 @@ public class CoreProperties {
 
     private final Workflow workflow = new Workflow();
 
+    private final Runtime runtime = new Runtime();
+
     private final Agent agent = new Agent();
 
     private final Plugin plugin = new Plugin();
@@ -66,6 +68,10 @@ public class CoreProperties {
 
     public Workflow getWorkflow() {
         return workflow;
+    }
+
+    public Runtime getRuntime() {
+        return runtime;
     }
 
     public Agent getAgent() {
@@ -234,6 +240,77 @@ public class CoreProperties {
      * workflow-service: workflow DEFINITIONS moved out of this service, but
      * runs, approvals, governance, compliance and SCM sync still need them.
      */
+    /**
+     * agent-runtime, which executes native workflow graphs on LangGraph.
+     *
+     * <p>Replaces the Dify bridge. api-gateway does not route to this service
+     * at all — the only caller is core-service over the compose network,
+     * holding the shared secret, exactly as agent-service already does.
+     */
+    public static class Runtime {
+
+        private String baseUrl = "http://localhost:8089";
+
+        private Duration connectTimeout = Duration.ofSeconds(2);
+
+        /**
+         * Bounds the gap BETWEEN node events, not the length of the workflow.
+         *
+         * <p>That distinction is what streaming buys. A blocking call sits on
+         * one idle socket for the whole run and dies on the first read timeout;
+         * a streamed one has traffic every few seconds, so a workflow may run
+         * for an hour under a five-minute timeout as long as it keeps making
+         * progress. A node that produces nothing for this long is genuinely
+         * stuck.
+         */
+        private Duration readTimeout = Duration.ofMinutes(5);
+
+        private String internalToken = Subscription.DEV_INTERNAL_TOKEN;
+
+        /** The model a workflow uses when its definition names none. */
+        private String defaultModel = "";
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String baseUrl) {
+            this.baseUrl = baseUrl;
+        }
+
+        public Duration getConnectTimeout() {
+            return connectTimeout;
+        }
+
+        public void setConnectTimeout(Duration connectTimeout) {
+            this.connectTimeout = connectTimeout;
+        }
+
+        public Duration getReadTimeout() {
+            return readTimeout;
+        }
+
+        public void setReadTimeout(Duration readTimeout) {
+            this.readTimeout = readTimeout;
+        }
+
+        public String getInternalToken() {
+            return internalToken;
+        }
+
+        public void setInternalToken(String internalToken) {
+            this.internalToken = internalToken;
+        }
+
+        public String getDefaultModel() {
+            return defaultModel;
+        }
+
+        public void setDefaultModel(String defaultModel) {
+            this.defaultModel = defaultModel;
+        }
+    }
+
     public static class Workflow {
 
         private String baseUrl = "http://localhost:8086";
@@ -347,8 +424,16 @@ public class CoreProperties {
     /** Run execution: worker pool, executor mode, step timing. */
     public static class Execution {
 
-        /** Concurrent runs; excess queue up. */
+        /** Concurrent JOB runs; excess queue up. */
         private int poolSize = 4;
+
+        /**
+         * Concurrent WORKFLOW runs. Separate from {@link #poolSize} because a
+         * workflow holds its thread while it waits on agent-runtime, and a
+         * workflow containing a `job` node causes a second run that needs a
+         * thread of its own. Sharing one pool deadlocks — see ExecutionConfig.
+         */
+        private int workflowPoolSize = 4;
 
         /**
          * {@code simulated} (default) or {@code remote} — remote hands every
@@ -440,6 +525,14 @@ public class CoreProperties {
 
         public void setRetryDelay(Duration retryDelay) {
             this.retryDelay = retryDelay;
+        }
+
+        public int getWorkflowPoolSize() {
+            return workflowPoolSize;
+        }
+
+        public void setWorkflowPoolSize(int workflowPoolSize) {
+            this.workflowPoolSize = workflowPoolSize;
         }
 
         public int getPoolSize() {

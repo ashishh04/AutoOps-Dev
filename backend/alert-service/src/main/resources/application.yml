@@ -1,0 +1,53 @@
+server:
+  port: ${SERVER_PORT:8091}
+
+spring:
+  application:
+    name: alert-service
+
+autoops:
+  alerts:
+    jwks-uri: ${AUTH_JWKS_URI:http://localhost:8081/oauth2/jwks}
+    issuer: ${JWT_ISSUER:autoops-auth-service}
+    # THE ENGINE. One Keep behind the whole product.
+    #
+    # These are the white-label boundary. There is no table holding them, no
+    # endpoint returning them and no screen rendering them - a tenant cannot
+    # learn the engine exists from anything AutoOps serves them.
+    ingest:
+      # Signs the token customers paste into Datadog, Grafana, an Airflow
+      # DAG. Rotating it invalidates every issued token at once.
+      secret: ${ALERT_INGEST_SECRET:dev-alert-ingest-secret-change-me}
+      # The BROWSER-facing origin. A compose service name is useless in a
+      # webhook field on someone else's SaaS.
+      public-base-url: ${PUBLIC_BASE_URL:http://localhost:5173}
+    engine:
+      url: ${KEEP_URL:http://keep-backend:8080}
+      api-key: ${KEEP_API_KEY:}
+      # Write key, used ONLY to connect/disconnect monitoring sources.
+      # The engine has no role between read-only and admin, so this is an
+      # admin key - which is exactly why it is not the one every read uses.
+      admin-api-key: ${KEEP_ADMIN_KEY:}
+      # write:alert only - the public ingest endpoint forwards with this
+      # and it cannot read the alert stream back.
+      ingest-api-key: ${KEEP_INGEST_KEY:}
+      connect-timeout: ${KEEP_CONNECT_TIMEOUT:3s}
+      read-timeout: ${KEEP_READ_TIMEOUT:10s}
+      # Ceiling on ONE fetch from the engine. Filtering happens HERE, in Java,
+      # never by handing the engine a caller-supplied expression - so this is
+      # the size of the window we scan, not the size of the answer. Raising it
+      # costs latency on every list call; it is not free.
+      max-fetch: ${KEEP_MAX_FETCH:1000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

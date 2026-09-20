@@ -17,7 +17,8 @@ from agent_runtime.app.state import (
     Vendor,
 )
 from agent_runtime import agents
-from agent_runtime.agents.spec import AgentSpec, Manifest
+from agent_runtime.agents.spec import AgentSpec, Manifest, ToolRef
+from agent_runtime.app.extraction import SubjectSource
 from agent_runtime.graph import kit
 from agent_runtime.graph.phases import HypothesisOut, TriageOut
 from tests import fakes
@@ -37,6 +38,15 @@ def phased_agent(monkeypatch):
             ref=PHASED_REF, version="1.0.0", name="Phased test agent",
             description="Exercises the phase kit.", domain="Test",
             model="claude-sonnet-5",
+            tools=[
+                ToolRef(
+                    "WORKFLOW", "RD-136-idle-resource-inventory", mutating=False,
+                    subjects=(
+                        SubjectSource("cloud_resource", "unattached_volumes",
+                                      "{region}/{volume_id}"),
+                    ),
+                ),
+            ],
         ),
         persona="You inspect one host and report what you find.",
         build_graph=lambda: kit.build(list(PHASES)),
@@ -471,3 +481,127 @@ def test_a_json_persona_agent_sends_no_ref_and_still_runs(monkeypatch):
     assert response.phase is Phase.RESPOND or response.phase is Phase.DONE
     # It resolved to the compatibility agent and used the tenant's own persona.
     assert "You are a research analyst." in model.seen[0][0].content
+
+
+def test_a_parked_run_declares_its_kinds_but_claims_no_coverage(monkeypatch):
+    """**A field present when it should not be is the easier accident.**
+
+    A non-terminal reduce carries ``declared_subject_kinds`` — a property of the
+    agent, true from the first call — and must carry NO ``subject_scope``.
+
+    The reason is the outage case. A run parked on its first tool has examined
+    an unknown fraction of what it set out to, and publishing that fraction as
+    coverage is exactly how one agent's bad night reaps a backlog. Absence here
+    is the safe state, and absence is easy to lose by accident: moving the
+    coverage fold above the CALL_TOOLS branch would populate it on every
+    boundary and nothing would fail until something reaped.
+    """
+    fakes.install(
+        monkeypatch,
+        fakes.ScriptedModel(
+            script=[
+                TriageOut(restated="Health check on app-prod-01.", can_proceed=True),
+                fakes.reply(
+                    "Collecting.",
+                    [{"name": "workflow_3", "args": {"TargetHost": "app-prod-01"},
+                      "id": "call-1"}],
+                ),
+            ]
+        ),
+    )
+
+    response = reduce(start([HEALTH_CHECK]))
+
+    assert response.directive is Directive.CALL_TOOLS
+    assert response.declared_subject_kinds == ["cloud_resource"]
+    assert response.subject_scope == []
+    assert response.subject_ids == {}
+
+
+def test_an_agent_whose_every_tool_is_mutating_fails_instead_of_narrating(monkeypatch):
+    """The failure that shipped a scratchpad to a customer.
+
+    GATHER is read-only, so an agent granted nothing but mutating tools has a
+    gathering phase that can see none of them. It routes onward, HYPOTHESIZE
+    asks for data that never arrives, and REPORT — instructed to report, handed
+    no observations — writes a paragraph about the tools it intended to call.
+
+    That paragraph used to be returned as a SUCCEEDED run's deliverable. It is
+    now a failure that names the cause, and the narration does not survive into
+    the output.
+    """
+    fakes.install(
+        monkeypatch,
+        fakes.ScriptedModel(
+            script=[
+                TriageOut(restated="Check it.", can_proceed=True),
+                HypothesisOut(findings=[], need_more=False),
+                fakes.reply("I will execute both required automations in one turn."),
+            ]
+        ),
+    )
+
+    response = reduce(start([DESTRUCTIVE]))
+
+    assert response.directive is Directive.FAIL
+    assert "could not collect any evidence" in response.error
+    # The cause is named precisely enough to act on without opening a trace.
+    assert "job_9" in response.error
+    assert '"mutating": false' in response.error
+    # And the model's narration is not what the customer is handed.
+    assert "I will execute both required automations" not in (response.output or "")
+
+
+def test_a_run_whose_every_tool_call_was_rejected_fails_with_the_reason(monkeypatch):
+    """The second shape of the same customer-facing failure.
+
+    Here the tools ARE visible to GATHER and the model does call them — they
+    are simply rejected every time, which is what happens when a model spells
+    an argument in its own casing rather than the schema's. It cannot recover
+    from that by retrying, because the next attempt is spelled identically, so
+    the run burns its rounds and REPORT is asked to write up an investigation
+    that never happened.
+    """
+    fakes.install(
+        monkeypatch,
+        fakes.ScriptedModel(
+            script=[
+                TriageOut(restated="Check it.", can_proceed=True),
+                fakes.reply("Collecting.", [{"name": "workflow_3", "args": {}, "id": "c1"}]),
+            ]
+        ),
+    )
+    first = reduce(start([HEALTH_CHECK]))
+
+    fakes.install(
+        monkeypatch,
+        fakes.ScriptedModel(
+            script=[
+                fakes.reply("Nothing usable came back."),
+                HypothesisOut(findings=[], need_more=False),
+                fakes.reply("I will collect the CloudWatch alarm state."),
+            ]
+        ),
+    )
+    response = reduce(
+        ReduceRequest(
+            agent=descriptor(),
+            tools=[HEALTH_CHECK],
+            state=first.state,
+            event=ToolResultsEvent(
+                results=[
+                    ToolResultWire(
+                        call_id="c1",
+                        ok=False,
+                        content="'region' is not an input this workflow accepts",
+                    )
+                ]
+            ),
+        )
+    )
+
+    assert response.directive is Directive.FAIL
+    assert "all 1 of its tool calls were rejected" in response.error
+    # The wall it hit is named, so nobody has to open a trace to find out.
+    assert "not an input this workflow accepts" in response.error
+    assert "I will collect the CloudWatch alarm state" not in (response.output or "")

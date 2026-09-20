@@ -67,7 +67,7 @@ def record(state: AgentState, results: list[ToolResultWire], phase: Phase) -> li
         content = result.content or ""
         entry = Evidence(
             evidence_id=result.evidence_id,
-            tool=_tool_for(state, result.call_id),
+            tool=tool_for(state, result.call_id),
             ok=result.ok,
             excerpt=content[:EXCERPT_LIMIT],
             digest=digest(content),
@@ -79,7 +79,7 @@ def record(state: AgentState, results: list[ToolResultWire], phase: Phase) -> li
     return added
 
 
-def _tool_for(state: AgentState, call_id: str) -> str:
+def tool_for(state: AgentState, call_id: str) -> str:
     """Which tool produced a result, read back off the transcript.
 
     Java sends results keyed by call id and does not repeat the tool name; the
@@ -147,6 +147,18 @@ _FACTUAL = re.compile(
 #: while a false positive teaches the model to stop hedging honestly.
 _EXEMPT = re.compile(
     r"\b(?:does|did|do|is|are|was|were|has|have|can|could|would)\s+not\b"
+    # The SAME construction with a comma instead of an auxiliary: "that is a
+    # sequence, not a cause"; "this shows what our automation did, not what
+    # changed on the host". Added after the activity correlator's golden case,
+    # where the heuristic flagged the precise sentence that agent's persona
+    # instructs it to write — report proximity as a sequence and explicitly NOT
+    # as a cause. A rule that penalises the hedge it asked for trains the model
+    # out of hedging, which is the failure this module exists to prevent.
+    #
+    # It does let "/var is at 94%, not 85%" through uncited. That is the
+    # documented direction to be wrong in: a missed claim costs one uncited
+    # line, a false positive costs the honesty.
+    r"|,\s*not\b"
     r"|\b(?:cannot|can't|doesn't|didn't|isn't|wasn't|aren't)\b"
     r"|\bno\s+(?:data|output|figures|breakdown|way\s+to)\b"
     r"|\b(?:unknown|unable\s+to|not\s+(?:checked|collected|available|returned|run))\b"

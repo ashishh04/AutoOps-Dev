@@ -171,6 +171,40 @@ class AgentServiceTest {
     }
 
     @Test
+    void theMutatingFlagSurvivesNormalization() {
+        // The bug this pins: normalizeTools rewrote every entry as {type, id}
+        // and dropped the flag. AgentToolbox fails closed on an unmarked tool,
+        // so a delivered agent's read-only automations became invisible to the
+        // evidence-gathering phase and its runs reported collecting nothing.
+        Agent watchdog = rolledOut("RCA", """
+                [{"type":"WORKFLOW","id":%d,"mutating":false},{"type":"JOB","id":%d,"mutating":true}]
+                """.formatted(WORKFLOW_ID, JOB_ID));
+
+        assertTrue(watchdog.getTools().contains("\"mutating\":false"),
+                "a read-only tool stays read-only through delivery");
+        assertTrue(watchdog.getTools().contains("\"mutating\":true"));
+    }
+
+    @Test
+    void anUndeclaredMutatingFlagStaysUndeclared() {
+        // Not defaulted here, on purpose. "Unmarked" has to reach AgentToolbox
+        // intact for it to fail closed; writing a default in would decide the
+        // safety question in the wrong place, and writing `false` would decide
+        // it the wrong way.
+        Agent watchdog = agent("Watchdog", "[{\"type\":\"WORKFLOW\",\"id\":%d}]"
+                .formatted(WORKFLOW_ID));
+
+        assertFalse(watchdog.getTools().contains("mutating"));
+    }
+
+    @Test
+    void aNonBooleanMutatingFlagIsRejected() {
+        assertEquals("invalid_tools", assertThrows(AgentException.class,
+                () -> agent("Watchdog", "[{\"type\":\"WORKFLOW\",\"id\":%d,\"mutating\":\"yes\"}]"
+                        .formatted(WORKFLOW_ID))).getError());
+    }
+
+    @Test
     void aToolFromAnotherProjectIsRefused() {
         when(toolTargets.findJob(TENANT, 99L))
                 .thenReturn(Optional.of(new ToolTargetClient.Target(99L, OTHER_PROJECT, "Theirs")));
@@ -232,6 +266,30 @@ class AgentServiceTest {
         assertEquals(1, tools.size(), "the reference is reported, not swallowed");
         assertFalse(tools.get(0).available());
         assertTrue(tools.get(0).name().contains(String.valueOf(JOB_ID)));
+    }
+
+    @Test
+    void describeToolsCarriesTheMutatingFlagBackOut() {
+        // So an edit can send back what it was given. The console reads this
+        // list and writes it again; when the flag was not in it, saving a
+        // rolled-out agent wiped what the catalog had declared.
+        Agent rca = rolledOut("RCA", """
+                [{"type":"WORKFLOW","id":%d,"mutating":false},{"type":"JOB","id":%d,"mutating":true}]
+                """.formatted(WORKFLOW_ID, JOB_ID));
+
+        List<AgentService.ToolView> tools = agentService.describeTools(TENANT, rca);
+        assertEquals(Boolean.FALSE, tools.get(0).mutating());
+        assertEquals(Boolean.TRUE, tools.get(1).mutating());
+    }
+
+    @Test
+    void anUndeclaredFlagIsReportedAsNullNotFalse() {
+        // Null is the third state. Reporting `false` would tell the console a
+        // read-only decision had been made when none had.
+        Agent watchdog = agent("Watchdog", "[{\"type\":\"WORKFLOW\",\"id\":%d}]"
+                .formatted(WORKFLOW_ID));
+
+        assertNull(agentService.describeTools(TENANT, watchdog).get(0).mutating());
     }
 
     @Test

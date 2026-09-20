@@ -51,14 +51,14 @@ import static org.mockito.Mockito.when;
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-// See RunServiceTest: no key is configured, so every definition here reads as
-// a plain nodes[] canvas and nothing reaches out to Dify.
 @Import({ProjectService.class, JobService.class, RunService.class,
         ApprovalService.class, ApprovalSettingsService.class, ExecutionEngine.class,
-        SimulatedStepExecutor.class, SubscriptionGate.class, DifyWorkflowService.class, NativeInputValidator.class,
-        com.intertec.autoops.core.config.DifyAppRegistry.class,
-        com.intertec.autoops.core.config.DifyProperties.class,
-        com.intertec.autoops.core.client.DifyAppClient.class})
+        SimulatedStepExecutor.class, SubscriptionGate.class, NativeInputValidator.class,
+        LibraryStepResolver.class,
+        NativeWorkflowService.class,
+        WorkflowReadiness.class,
+        com.intertec.autoops.core.client.WorkflowRuntimeClient.class,
+})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class ApprovalServiceTest {
 
@@ -111,6 +111,14 @@ class ApprovalServiceTest {
     @MockBean
     private WorkflowClient workflowClient;
 
+    /**
+     * NativeWorkflowService needs it to resolve a workflow's model, but it
+     * drags in repositories, the credential crypto and a vendor probe that
+     * this slice has none of — and no case here runs a graph with an llm node.
+     */
+    @MockBean
+    private ModelProviderService modelProviderService;
+
     /** Ids for the stubbed workflow views; workflow-service owns the real ones. */
     private long nextWorkflowId = 1;
 
@@ -131,6 +139,18 @@ class ApprovalServiceTest {
         }
 
         /** See RunServiceTest: fresh joined thread, never inline. */
+        /**
+         * Workflow runs use their own pool in production so a workflow cannot
+         * starve the job it is waiting for (see ExecutionConfig). Here both
+         * point at the same joined-thread executor: nothing in this slice runs
+         * a workflow that starts a job, and a second pool would only add a
+         * second way for the test to be non-deterministic.
+         */
+        @Bean(name = "workflowTaskExecutor")
+        TaskExecutor workflowTaskExecutor() {
+            return executionTaskExecutor();
+        }
+
         @Bean(name = "executionTaskExecutor")
         TaskExecutor executionTaskExecutor() {
             return command -> {

@@ -89,6 +89,12 @@ const BADGE = {
   trial: "border-amber-400/30 bg-amber-400/10 text-amber-600",
   suspended: "border-red-400/30 bg-red-400/10 text-red-600",
   overdue: "border-red-400/30 bg-red-400/10 text-red-600",
+  // Alert-plane statuses. Without these, "firing" fell through to the grey
+  // `queued` default and a live incident looked as calm as a queued job.
+  firing: "border-red-400/30 bg-red-400/10 text-red-600",
+  resolved: "border-emerald-400/30 bg-emerald-400/10 text-emerald-600",
+  acknowledged: "border-sky-400/30 bg-sky-400/10 text-sky-600",
+  suppressed: "border-slate-400/30 bg-slate-400/10 text-slate-500",
   paid: "border-emerald-400/30 bg-emerald-400/10 text-emerald-600",
 };
 
@@ -97,7 +103,7 @@ export const StatusBadge = ({ status }) => (
     className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize ${BADGE[status] || BADGE.queued}`}
   >
     <span
-      className={`h-1.5 w-1.5 rounded-full bg-current ${status === "running" ? "animate-pulse-dot" : ""}`}
+      className={`h-1.5 w-1.5 rounded-full bg-current ${status === "running" || status === "firing" ? "animate-pulse-dot" : ""}`}
     />
     {status}
   </span>

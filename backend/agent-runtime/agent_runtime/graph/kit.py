@@ -10,8 +10,7 @@ and the one that is wrong is the one that executes a destructive tool twice.
 So the graph is compiled fresh on every reduce, runs from the phase the state
 says it is in, and stops at the first boundary. What LangGraph gives us is the
 part worth having: declarative routing, a topology that can be rendered, and
-per-node tracing that lands in Langfuse already shaped like the phases an
-operator sees.
+per-node callbacks already shaped like the phases an operator sees.
 
 An agent declares only the phases it needs. A read-only agent has no PLAN,
 GATE, ACT or VERIFY, and :func:`_resolve` walks past anything absent rather
@@ -29,7 +28,7 @@ from agent_runtime.graph.phases import GraphState
 #: The order phases fall through in when an agent has not declared one of them.
 #: This is the canonical shape of an investigation, and every agent is a subset
 #: of it — which is what makes runs comparable across agents in the eval
-#: harness and in Langfuse.
+#: harness.
 ORDER: list[Phase] = [
     Phase.TRIAGE,
     Phase.GATHER,

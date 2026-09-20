@@ -2,11 +2,8 @@ package com.intertec.autoops.core.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.intertec.autoops.core.client.WorkflowClient;
-import com.intertec.autoops.core.config.DifyAppRegistry;
-import com.intertec.autoops.core.client.DifyAppClient;
 import com.intertec.autoops.core.service.ApprovalService;
 import com.intertec.autoops.core.service.ApprovalSettingsService;
-import com.intertec.autoops.core.service.DifyWorkflowService;
 import com.intertec.autoops.core.service.RunService;
 import com.intertec.autoops.core.repo.JobRepository;
 import com.intertec.autoops.core.repo.RunRepository;
@@ -23,10 +20,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * The input form a NATIVE (non-Dify) workflow declares for itself.
+ * The input form a workflow declares for itself.
  *
  * <p>Before this existed the endpoint returned an empty field list for every
- * workflow without a Dify slug, which handed the model a zero-argument tool
+ * workflow, which handed the model a zero-argument tool
  * schema — a parameterised automation it had no way to parameterise. These
  * tests pin the translation from a workflow's {@code inputs[]} to the rows
  * agent-service and the console both read.
@@ -59,12 +56,10 @@ class InternalAgentDispatchControllerInputsTest {
     @BeforeEach
     void setUp() {
         workflowClient = mock(WorkflowClient.class);
-        DifyWorkflowService dify = new DifyWorkflowService(
-                mock(DifyAppRegistry.class), mock(DifyAppClient.class), MAPPER);
         controller = new InternalAgentDispatchController(
                 mock(JobRepository.class), mock(RunRepository.class), mock(RunService.class),
                 mock(ApprovalService.class), mock(ApprovalSettingsService.class),
-                workflowClient, dify, MAPPER);
+                workflowClient, MAPPER);
     }
 
     private void givenDefinition(String definition) {

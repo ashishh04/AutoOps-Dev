@@ -1,0 +1,29 @@
+# ============================================================
+# TEMPORARY — opens the execution engine's own UI on a DEPLOYED host, for
+# operator proof that Rundeck is really running. Remove when done.
+#
+# Bound to 127.0.0.1, NOT 0.0.0.0. The engine's login page must never be
+# reachable from the internet: this host has a public IP, and the tracked
+# docker-compose.yml gives `rundeck` no host port precisely because it is the
+# white-label boundary. Loopback + an SSH tunnel keeps that boundary intact —
+# the port exists only for someone already logged into the box.
+#
+# Reach it from your laptop with:
+#     ssh -L 14440:localhost:14440 ubuntu@23.22.99.22
+# then open http://localhost:14440
+#
+# RUNDECK_GRAILS_URL must match how the BROWSER reaches it, not how the compose
+# network does. Left at http://rundeck:4440 the UI emits absolute links to a
+# hostname that only resolves inside the network, so redirects and assets 404
+# from the tunnel. rundeck-service is unaffected either way — it builds its own
+# URLs from RUNDECK_URL and never follows these href fields.
+#
+# 14440 rather than 4440 only to match the local override, so the tunnel command
+# and the bookmark are the same on both machines.
+# ============================================================
+services:
+  rundeck:
+    ports:
+      - "127.0.0.1:14440:4440"
+    environment:
+      RUNDECK_GRAILS_URL: http://localhost:14440

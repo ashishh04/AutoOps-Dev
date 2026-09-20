@@ -1,0 +1,32 @@
+-- A verdict from a run that never said what it was covering.
+--
+-- WHY THIS IS A SEPARATE COUNTER FROM `unattributed`. The suggestion this
+-- implements was to make run creation and scope declaration a single call, so
+-- that a run without a scope is structurally impossible. That is the right
+-- property and it cannot be had that way here: a scope enumerates subjects —
+-- every EBS volume in a region, every mailbox in a tenant — and an agent does
+-- not know them until it has called the provider, which happens in GATHER,
+-- inside the run. The caller starting the run has nothing to declare yet.
+--
+-- The achievable form of the same guarantee is enforced one step later, where
+-- the information actually exists: A VERDICT MAY NOT BE INGESTED AGAINST A RUN
+-- THAT HAS NOT DECLARED A SCOPE. That closes the identical hole — no unscoped
+-- run can ever ground a reap — at the only point where it can be checked.
+--
+-- Counted apart from `unattributed` because the two are different bugs with
+-- different fixes, and one number for both means the first gets diagnosed as
+-- the second:
+--
+--   unattributed  the agent passes no run_id at all — it has not been updated
+--                 for phase B yet, which is expected and temporary.
+--   unscoped      the agent passes a run_id and emits before declaring a scope
+--                 — it is half-wired. This is the one that would otherwise hide,
+--                 because the attribution gauge would read as healthy while the
+--                 coverage gauge stayed silent, and nothing would connect them.
+--
+-- That pairing is the tell worth watching during phase B: unattributed falling
+-- while unscoped rises means an agent learned to pass run_id and did not learn
+-- to declare what it covered.
+
+ALTER TABLE verdict_attribution_daily
+    ADD COLUMN unscoped BIGINT NOT NULL DEFAULT 0 AFTER unattributed;

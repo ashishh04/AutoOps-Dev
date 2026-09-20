@@ -1,0 +1,51 @@
+{
+  "taskId": "RD-137",
+  "domain": "AWS",
+  "title": "Security Group Ingress Audit",
+  "description": "Finds every security-group rule open to 0.0.0.0/0 or ::/0 in one region, and reports what is actually attached behind each one — instances, load balancers, databases. Read-only. Distinguishes an open rule with something behind it from an open rule on a group attached to nothing.",
+  "category": "Security",
+  "runtime": "python",
+  "inputs": [
+    {
+      "variable": "Region",
+      "label": "Region",
+      "type": "string",
+      "required": true,
+      "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$",
+      "help": "Security groups are regional. One region per run.",
+      "consumedBy": "node",
+      "default": "us-east-1",
+      "placeholder": "eu-west-1"
+    },
+    {
+      "variable": "PortFilter",
+      "label": "Only these ports",
+      "type": "string",
+      "required": false,
+      "pattern": "^\\d{1,5}(,\\d{1,5})*$|^$",
+      "help": "Leave blank for every open rule. Supply a comma-separated list, e.g. 22,3389, to narrow it to specific exposures.",
+      "consumedBy": "node",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "type": "pyscript",
+      "label": "Security Group Ingress Audit",
+      "value": "\"\"\"Security-group ingress audit. Read-only: DescribeSecurityGroups + DescribeNetworkInterfaces.\n\nAn open security group is not by itself an incident — thousands of them sit\nunattached in every estate. What matters is whether anything is BEHIND it, and\nwhat that thing is. So this reports the rule and the attachment together, and\nthe attachment is looked up from network interfaces rather than instances:\na load balancer, an RDS instance and a Lambda ENI are all reachable and none of\nthem is an EC2 instance.\n\"\"\"\nimport json\nimport re\nimport sys\n\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError, NoCredentialsError\n\nREGION = \"{{Region}}\"\nPORT_FILTER = \"{{PortFilter}}\"\n\nif not re.fullmatch(r\"[a-z0-9-]{1,32}\", REGION):\n    sys.exit(\"Region %r is not an AWS region name.\" % REGION)\nif PORT_FILTER and not re.fullmatch(r\"\\d{1,5}(,\\d{1,5})*\", PORT_FILTER):\n    sys.exit(\"PortFilter %r must be a comma-separated list of port numbers.\" % PORT_FILTER)\n\nWANTED_PORTS = {int(p) for p in PORT_FILTER.split(\",\")} if PORT_FILTER else None\nCFG = Config(retries={\"max_attempts\": 5, \"mode\": \"standard\"})\n\n#: Ports whose exposure to the whole internet is a finding on its own, with the\n#: reason stated so the report can say WHY rather than just listing a number.\nNOTORIOUS = {\n    22: \"SSH — remote shell\",\n    23: \"Telnet — remote shell, unencrypted\",\n    445: \"SMB — file sharing, wormable\",\n    1433: \"MSSQL — database\",\n    3306: \"MySQL — database\",\n    3389: \"RDP — remote desktop\",\n    5432: \"PostgreSQL — database\",\n    6379: \"Redis — frequently unauthenticated\",\n    9200: \"Elasticsearch — frequently unauthenticated\",\n    27017: \"MongoDB — frequently unauthenticated\",\n}\nOPEN_V4 = \"0.0.0.0/0\"\nOPEN_V6 = \"::/0\"\n\n\ndef port_range(rule):\n    \"\"\"A rule's ports as (from, to), normalising the all-protocols case.\"\"\"\n    if rule.get(\"IpProtocol\") == \"-1\":\n        return 0, 65535\n    return rule.get(\"FromPort\", 0), rule.get(\"ToPort\", 65535)\n\n\ndef covers(low, high):\n    \"\"\"The notorious ports a rule's range actually opens.\"\"\"\n    return sorted(p for p in NOTORIOUS if low <= p <= high)\n\n\ndef main():\n    ec2 = boto3.client(\"ec2\", region_name=REGION, config=CFG)\n\n    try:\n        groups = []\n        for page in ec2.get_paginator(\"describe_security_groups\").paginate():\n            groups.extend(page[\"SecurityGroups\"])\n    except NoCredentialsError:\n        sys.exit(\"No AWS credentials reached this step. Connect an AWS account to this project.\")\n    except ClientError as exc:\n        sys.exit(\"Could not describe security groups: %s\" % exc)\n\n    # What is actually behind each group. An ENI is the honest unit: it covers\n    # instances, load balancers, RDS, Lambda and anything else with an address.\n    attached = {}\n    try:\n        for page in ec2.get_paginator(\"describe_network_interfaces\").paginate():\n            for eni in page[\"NetworkInterfaces\"]:\n                description = eni.get(\"Description\") or \"\"\n                kind = eni.get(\"InterfaceType\", \"interface\")\n                public = eni.get(\"Association\", {}).get(\"PublicIp\")\n                label = \"%s%s%s\" % (\n                    kind,\n                    \"/\" + description[:48] if description else \"\",\n                    \" public_ip=\" + public if public else \"\",\n                )\n                for group in eni.get(\"Groups\", []):\n                    attached.setdefault(group[\"GroupId\"], []).append(label)\n        eni_error = None\n    except ClientError as exc:\n        # Reported, not fatal. The rules are still worth having; the agent is\n        # told the attachment half is missing so it does not read silence as\n        # \"nothing is behind these\".\n        eni_error = exc.response.get(\"Error\", {}).get(\"Code\", \"Unknown\")\n\n    print(\"SECURITY GROUP INGRESS AUDIT\")\n    print(\"region=%s security_groups_examined=%d\" % (REGION, len(groups)))\n    if WANTED_PORTS:\n        print(\"filtered_to_ports=%s\" % sorted(WANTED_PORTS))\n    if eni_error:\n        print(\"attachment_lookup_failed=%s (rules below are complete; \"\n              \"what is behind them is NOT known)\" % eni_error)\n    print(\"\")\n\n    findings = []\n    for group in sorted(groups, key=lambda g: g[\"GroupId\"]):\n        gid = group[\"GroupId\"]\n        for rule in group.get(\"IpPermissions\", []):\n            worlds = [r[\"CidrIp\"] for r in rule.get(\"IpRanges\", []) if r.get(\"CidrIp\") == OPEN_V4]\n            worlds += [\n                r[\"CidrIpv6\"] for r in rule.get(\"Ipv6Ranges\", []) if r.get(\"CidrIpv6\") == OPEN_V6\n            ]\n            if not worlds:\n                continue\n\n            low, high = port_range(rule)\n            hits = covers(low, high)\n            if WANTED_PORTS and not (WANTED_PORTS & set(range(low, min(high, 65535) + 1))):\n                continue\n\n            behind = attached.get(gid, [])\n            finding = {\n                \"group_id\": gid,\n                \"group_name\": group.get(\"GroupName\", \"\"),\n                \"vpc\": group.get(\"VpcId\", \"EC2-Classic\"),\n                \"protocol\": rule.get(\"IpProtocol\"),\n                \"ports\": \"all\" if (low, high) == (0, 65535) else (\n                    str(low) if low == high else \"%d-%d\" % (low, high)\n                ),\n                \"open_to\": \",\".join(worlds),\n                \"notorious_ports_opened\": \",\".join(\n                    \"%d(%s)\" % (p, NOTORIOUS[p].split(\" — \")[0]) for p in hits\n                ) or \"none\",\n                \"attached_to_count\": len(behind),\n                \"attached_to\": \";\".join(sorted(set(behind))[:5]) or (\n                    \"UNKNOWN\" if eni_error else \"nothing\"\n                ),\n            }\n            findings.append(finding)\n            print(\" \".join(\"%s=%s\" % (k, v) for k, v in finding.items()))\n\n    live = [f for f in findings if f[\"attached_to_count\"] > 0]\n    dangerous = [f for f in live if f[\"notorious_ports_opened\"] != \"none\"]\n    dormant = [f for f in findings if f[\"attached_to_count\"] == 0]\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"world_open_rules_total=%d\" % len(findings))\n    print(\"world_open_rules_with_something_behind_them=%d\" % len(live))\n    print(\"world_open_rules_on_notorious_ports_with_something_behind_them=%d %s\"\n          % (len(dangerous), sorted({f[\"group_id\"] for f in dangerous})))\n    print(\"world_open_rules_on_groups_attached_to_nothing=%d %s\"\n          % (len(dormant), sorted({f[\"group_id\"] for f in dormant})))\n    print(\"\")\n    print(\"JSON \" + json.dumps(\n        {\"region\": REGION, \"rules\": findings, \"attachment_lookup_failed\": eni_error},\n        sort_keys=True,\n    ))\n\n\nmain()\n",
+      "retries": 0,
+      "continueOnError": false
+    }
+  ],
+  "requires": [
+    {
+      "kind": "cloud_connection",
+      "platform": "AWS",
+      "customerText": "An AWS account we can read from. The access we need is read-only — nothing in this check can change anything.",
+      "permissions": [
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeNetworkInterfaces"
+      ]
+    }
+  ]
+}

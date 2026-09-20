@@ -1,0 +1,61 @@
+{
+  "taskId": "RD-210",
+  "domain": "AWS",
+  "title": "CloudWatch Alarm State Audit",
+  "description": "Lists every alarm not in OK with the resource it is about (from its dimensions, not its name), how long it has been in that state, and how many times it has flipped in the window. Read-only. Groups alarms whose first state change falls in the same ten minutes, which is the raw material for deciding whether nine alarms are nine problems or one.",
+  "category": "Incident Response",
+  "runtime": "python",
+  "inputs": [
+    {
+      "variable": "Region",
+      "label": "Region",
+      "type": "string",
+      "required": true,
+      "pattern": "^[a-z]{2}(-gov)?-[a-z]+-\\d$",
+      "help": "Alarms are regional. One region per run.",
+      "consumedBy": "node",
+      "default": "us-east-1"
+    },
+    {
+      "variable": "LookbackHours",
+      "label": "Lookback (hours)",
+      "type": "number",
+      "required": true,
+      "min": 1,
+      "max": 168,
+      "default": 6,
+      "help": "How far back to read state changes. Use the window around the incident, not the whole week — a wider window buries the cluster you are looking for.",
+      "consumedBy": "node"
+    },
+    {
+      "variable": "AlarmNamePrefix",
+      "label": "Alarm name prefix",
+      "type": "string",
+      "required": false,
+      "pattern": "^[A-Za-z0-9 ._:\\-/]{0,255}$",
+      "help": "Leave blank for every alarm. Narrow it when one naming convention covers the affected service.",
+      "consumedBy": "node",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "type": "pyscript",
+      "label": "CloudWatch Alarm State Audit",
+      "value": "\"\"\"What is broken, and since when. Read-only CloudWatch.\n\nThe raw material for correlation. An incident is rarely one alarm — it is nine\nalarms that fired within four minutes of each other because one thing underneath\nthem moved. To see that, three things have to be reported together and usually\nare not:\n\n* **the resource**, from the alarm's dimensions, not its name. Alarm names are\n  written by whoever created them and say whatever that person felt like;\n  dimensions say `InstanceId=i-0abc` and `LoadBalancer=app/prod-lb`, which is\n  what lets two alarms be recognised as being about the same thing.\n* **the transition time**, to the second. Correlation is a question about\n  clustering in time, and \"in ALARM\" without \"since when\" cannot answer it.\n* **the flapping count**. An alarm that has changed state eleven times in an\n  hour is a different problem from one that went to ALARM once and stayed\n  there, and treating them alike is how the noisy one gets muted and the real\n  one gets missed.\n\nINSUFFICIENT_DATA is reported alongside ALARM and never merged with OK. A check\nthat stopped reporting is not a check that passed — it frequently means the\nthing being measured has gone away entirely, which during an incident is the\nmost informative state of the three.\n\"\"\"\nimport json\nimport re\nimport sys\nfrom datetime import datetime, timedelta, timezone\n\nimport boto3\nfrom botocore.config import Config\nfrom botocore.exceptions import ClientError, NoCredentialsError\n\nREGION = \"{{Region}}\"\nLOOKBACK_HOURS = int(\"{{LookbackHours}}\")\nNAME_PREFIX = \"{{AlarmNamePrefix}}\"\n\nif not re.fullmatch(r\"[a-z0-9-]{1,32}\", REGION):\n    sys.exit(\"Region %r is not an AWS region name.\" % REGION)\nif not 1 <= LOOKBACK_HOURS <= 168:\n    sys.exit(\"LookbackHours %d is outside 1-168.\" % LOOKBACK_HOURS)\nif NAME_PREFIX and not re.fullmatch(r\"[A-Za-z0-9 ._:\\-/]{0,255}\", NAME_PREFIX):\n    sys.exit(\"AlarmNamePrefix %r contains characters an alarm name cannot have.\" % NAME_PREFIX)\n\nCFG = Config(retries={\"max_attempts\": 5, \"mode\": \"standard\"})\nNOW = datetime.now(timezone.utc)\nSINCE = NOW - timedelta(hours=LOOKBACK_HOURS)\n\n#: Alarms whose first state change is within this of each other are treated as\n#: one cluster. Ten minutes is wide enough to cover a failure propagating from a\n#: target group to a load balancer to a synthetic canary, and narrow enough that\n#: two genuinely separate incidents in the same hour stay separate.\nCLUSTER_GAP_MINUTES = 10\n\n\ndef resource_of(alarm):\n    \"\"\"The thing an alarm is about, from its dimensions.\n\n    Falls back to the metric and namespace when an alarm has no dimensions —\n    a metric-math or composite alarm — rather than inventing a resource id.\n    \"\"\"\n    dimensions = alarm.get(\"Dimensions\") or []\n    if dimensions:\n        return \",\".join(\"%s=%s\" % (d.get(\"Name\"), d.get(\"Value\")) for d in dimensions)\n    return \"%s/%s\" % (alarm.get(\"Namespace\", \"?\"), alarm.get(\"MetricName\", \"?\"))\n\n\ndef main():\n    cloudwatch = boto3.client(\"cloudwatch\", region_name=REGION, config=CFG)\n\n    alarms = []\n    try:\n        paginator = cloudwatch.get_paginator(\"describe_alarms\")\n        kwargs = {\"AlarmTypes\": [\"MetricAlarm\", \"CompositeAlarm\"]}\n        if NAME_PREFIX:\n            kwargs[\"AlarmNamePrefix\"] = NAME_PREFIX\n        for page in paginator.paginate(**kwargs):\n            alarms.extend(page.get(\"MetricAlarms\", []))\n            alarms.extend(page.get(\"CompositeAlarms\", []))\n    except NoCredentialsError:\n        sys.exit(\"No AWS credentials reached this step. Connect an AWS account to this project.\")\n    except ClientError as exc:\n        sys.exit(\"Could not describe alarms: %s\" % exc)\n\n    print(\"CLOUDWATCH ALARM STATE AUDIT\")\n    print(\"region=%s lookback_hours=%d window_start=%s alarms_examined=%d\"\n          % (REGION, LOOKBACK_HOURS, SINCE.isoformat(timespec=\"seconds\"), len(alarms)))\n    if NAME_PREFIX:\n        print(\"filtered_to_prefix=%s\" % NAME_PREFIX)\n    print(\"\")\n\n    rows = []\n    starts = []\n    history_failures = []\n    for alarm in alarms:\n        state = alarm.get(\"StateValue\", \"?\")\n        if state == \"OK\":\n            # A healthy alarm is not evidence in an incident, and a report that\n            # lists four hundred of them buries the nine that matter.\n            continue\n\n        name = alarm.get(\"AlarmName\", \"?\")\n        changed = alarm.get(\"StateUpdatedTimestamp\")\n        row = {\n            \"alarm\": name,\n            \"state\": state,\n            \"resource\": resource_of(alarm),\n            \"metric\": \"%s/%s\" % (alarm.get(\"Namespace\", \"?\"), alarm.get(\"MetricName\", \"-\")),\n            \"in_state_since\": changed.isoformat(timespec=\"seconds\") if changed else \"unknown\",\n            \"minutes_in_state\": (\n                int((NOW - changed).total_seconds() // 60) if changed else \"unknown\"\n            ),\n            \"reason\": (alarm.get(\"StateReason\") or \"\")[:120].replace(\"\\n\", \" \"),\n        }\n\n        # How often it has flipped inside the window. This is what separates a\n        # genuine outage from a threshold set too tightly.\n        first_change = None\n        try:\n            history = cloudwatch.describe_alarm_history(\n                AlarmName=name,\n                HistoryItemType=\"StateUpdate\",\n                StartDate=SINCE,\n                EndDate=NOW,\n                MaxRecords=100,\n            )\n            transitions = history.get(\"AlarmHistoryItems\", [])\n            row[\"state_changes_in_window\"] = len(transitions)\n            if transitions:\n                first_change = min(item[\"Timestamp\"] for item in transitions)\n                row[\"first_change_in_window\"] = first_change.isoformat(timespec=\"seconds\")\n        except ClientError as exc:\n            history_failures.append(\"%s:%s\" % (name, exc.response.get(\"Error\", {}).get(\"Code\", \"?\")))\n            row[\"state_changes_in_window\"] = \"unreadable\"\n\n        rows.append(row)\n        starts.append((first_change, row[\"alarm\"]))\n        print(\" \".join(\"%s=%s\" % kv for kv in row.items()))\n\n    firing = [r for r in rows if r[\"state\"] == \"ALARM\"]\n    blind = [r for r in rows if r[\"state\"] == \"INSUFFICIENT_DATA\"]\n    flapping = [\n        r for r in rows\n        if isinstance(r[\"state_changes_in_window\"], int) and r[\"state_changes_in_window\"] >= 4\n    ]\n\n    # The correlation hint: alarms that started within CLUSTER_GAP_MINUTES of\n    # each other are very likely one incident. Computed here rather than left to\n    # the model, because bucketing forty timestamps by hand is exactly the\n    # arithmetic a model gets subtly wrong — and a wrong bucket is a wrong\n    # incident boundary.\n    #\n    # Gap-based, NOT a fixed grid. Flooring each timestamp to a ten-minute slot\n    # is the obvious implementation and it is wrong in the most common case:\n    # two alarms ninety seconds apart at 12:39 and 12:41 land in different\n    # slots and get reported as two incidents. Clustering on the GAP between\n    # consecutive starts has no boundary to fall the wrong side of.\n    ordered = sorted((when, name) for when, name in starts if when is not None)\n    clusters = []\n    current = []\n    previous = None\n    for when, name in ordered:\n        if previous is not None and (when - previous).total_seconds() > CLUSTER_GAP_MINUTES * 60:\n            if len(current) > 1:\n                clusters.append((current[0][0], [n for _, n in current]))\n            current = []\n        current.append((when, name))\n        previous = when\n    if len(current) > 1:\n        clusters.append((current[0][0], [n for _, n in current]))\n    clusters = [(when.isoformat(timespec=\"seconds\"), names) for when, names in clusters]\n\n    print(\"\")\n    print(\"SUMMARY\")\n    print(\"alarms_not_ok=%d in_alarm=%d insufficient_data=%d\"\n          % (len(rows), len(firing), len(blind)))\n    print(\"flapping_4_or_more_changes=%d %s\"\n          % (len(flapping), sorted(r[\"alarm\"] for r in flapping)))\n    if clusters:\n        print(\"time_clusters=%d (alarms that started within %d minutes of each other)\"\n              % (len(clusters), CLUSTER_GAP_MINUTES))\n        for when, names in clusters:\n            print(\"cluster_at=%s count=%d alarms=%s\" % (when, len(names), sorted(names)))\n    else:\n        print(\"time_clusters=0 (no two alarms started within %d minutes of each other)\"\n              % CLUSTER_GAP_MINUTES)\n    if blind:\n        print(\"note=INSUFFICIENT_DATA is not OK. A check that stopped reporting often means \"\n              \"the thing it measured has gone away.\")\n    if history_failures:\n        print(\"alarm_history_unreadable=%s\" % history_failures[:10])\n    print(\"\")\n    print(\"JSON \" + json.dumps({\n        \"region\": REGION,\n        \"window_start\": SINCE.isoformat(),\n        \"alarms\": rows,\n        \"clusters\": [{\"at\": when, \"alarms\": names} for when, names in clusters],\n    }, sort_keys=True, default=str))\n\n\nmain()\n",
+      "retries": 0,
+      "continueOnError": false
+    }
+  ],
+  "requires": [
+    {
+      "kind": "cloud_connection",
+      "platform": "AWS",
+      "customerText": "An AWS account we can read from. The access we need is read-only — nothing in this check can change anything.",
+      "permissions": [
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:DescribeAlarmHistory"
+      ]
+    }
+  ]
+}

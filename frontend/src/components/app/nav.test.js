@@ -3,7 +3,7 @@ import { projectNav } from "./AppLayout";
 import { ROLE_CAPS } from "../../store/store";
 
 // A page can have a route, a component and passing tests and still be
-// unreachable because nothing links to it. That has happened twice (the Dify
+// unreachable because nothing links to it. That has happened twice (the
 // designer, then Compliance Reports), so the sidebar gets asserted directly.
 
 const canFor = (role) => (cap) => !!ROLE_CAPS[role]?.[cap];
@@ -42,7 +42,7 @@ describe("project sidebar", () => {
   });
 
   /**
-   * There is ONE workflow concept and Dify is the engine behind it. A second
+   * There is ONE workflow concept and the native runtime is the engine. A second
    * "AI Workflows" entry would imply a second kind of workflow with a second
    * designer, which is exactly the split that was removed.
    */
@@ -51,6 +51,20 @@ describe("project sidebar", () => {
     expect(found).toContain("Workflows");
     expect(found).not.toContain("AI Workflows");
     expect(byLabel(adminNav(), "Workflows").to).toBe(`${B}/workflows`);
+  });
+
+  /**
+   * The ONLY place a delivered agent can appear.
+   *
+   * An agent's tool workflows are delivered as sealed AGENT_COMPONENTs and are
+   * deliberately filtered out of the Workflows list, so a customer who has
+   * been rolled out an agent and has no entry here sees nothing at all — which
+   * is exactly what happened while this entry was missing.
+   */
+  it("offers AI Agents, which is the only surface a rolled-out agent has", () => {
+    const found = labels(adminNav());
+    expect(found).toContain("AI Agents");
+    expect(byLabel(adminNav(), "AI Agents").to).toBe(`${B}/agents`);
   });
 
   it("gives every item a destination and an icon", () => {
