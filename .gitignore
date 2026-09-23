@@ -96,3 +96,9 @@ reports/
 *.mysqldump
 # Local-only compose overrides (host port clashes, per-machine tweaks).
 docker-compose.override.yml
+
+# Database dumps from scripts/backup-databases.sh. NEVER committed: they carry
+# every user's BCrypt hash, every tenant's encrypted credentials and the whole
+# catalog. A backup in the repository is a breach waiting for the repository to
+# be shared.
+backups/

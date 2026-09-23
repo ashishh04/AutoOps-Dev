@@ -44,6 +44,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # agent-runtime is Python, not Maven, so it is absent from ci.yml's
+          # backend matrix by design — it has its own job there. It was absent
+          # from THIS matrix too, and that was not by design: the service that
+          # runs every agent and executes every native workflow was tested on
+          # each PR and then never built, never pushed, never deployed.
+          #
+          # Nothing failed visibly. The stack came up on whatever image the
+          # registry already held, so agent behaviour silently stayed at
+          # whatever it was the last time somebody built it by hand.
+          - service: agent-runtime
+            context: backend/agent-runtime
           - service: agent-service
             context: backend/agent-service
           - service: alert-service

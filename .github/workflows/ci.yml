@@ -5,7 +5,15 @@
 # code compile and do the tests pass", so it needs no cloud credentials at all
 # and is safe to run on pull requests from any branch.
 #
-# Deployment lives in cd.yml, which runs only after this succeeds on main.
+# Deployment is NOT in this file and not in a cd.yml — there is no such file.
+# It is build-images.yml, which pushes to ECR on a green main and then
+# dispatches to a separate DEPLOY repo holding docker-compose.prod.yml:
+#
+#   source (here) --build--> ECR --dispatch--> deploy repo --> EC2
+#
+# Said plainly because the previous wording pointed at a cd.yml that has never
+# existed, and anyone auditing this repo for a deployment path concluded there
+# was none.
 # ============================================================================
 name: CI
 
