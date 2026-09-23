@@ -53,7 +53,9 @@ log = logging.getLogger(__name__)
 def reduce(request: ReduceRequest) -> ReduceResponse:
     """Advances one run by one boundary."""
     try:
-        resolution = agents.resolve(request.agent.ref, request.agent.version)
+        resolution = agents.resolve(
+            request.agent.ref, request.agent.version, request.agent.phases
+        )
     except agents.UnknownAgent as exc:
         return _fail(None, str(exc))
 
@@ -113,6 +115,7 @@ def reduce(request: ReduceRequest) -> ReduceResponse:
 
     return _respond(
         state, context, resolution, trace_id,
+        request=request,
         run_id=request.run_id,
         tenant_id=request.tenant_id,
         # The window an idempotency key is scoped to. A run id would make every
@@ -180,13 +183,13 @@ def _observe(
     agent that does not author its own coverage claim cannot overclaim one.
     """
     try:
-        spec = agents.resolve(request.agent.ref, request.agent.version).spec
+        spec = agents.resolve(
+            request.agent.ref, request.agent.version, request.agent.phases
+        ).spec
     except agents.UnknownAgent:
         return
 
-    declared = {
-        tool.ref: tool.subjects for tool in spec.manifest.tools if tool.subjects
-    }
+    declared = _declared_sources(request, spec)
     if not declared:
         return
 
@@ -208,6 +211,74 @@ def _observe(
                     "reason": found.reason,
                 }
             )
+
+
+def _declared_sources(
+    request: ReduceRequest, spec: agents.AgentSpec
+) -> dict[str, list[extraction.SubjectSource]]:
+    """Every subject source this agent declared, by tool ref.
+
+    Two origins, and they never overlap. A Python-authored agent declares in its
+    module, which ships in this image. A console-authored agent has no module,
+    so its declaration arrives on the descriptor — which is the only way it can
+    claim coverage at all, and therefore the only way its findings can ever be
+    reaped.
+
+    **The module wins where both exist.** A shipped agent's declaration is part
+    of what was reviewed and released; letting a database row override it would
+    mean a hand-edited catalog entry could redirect subject extraction at a
+    different field of a tool's output and produce a coverage claim over
+    something the agent never examined. The catalog is the provider's, but it is
+    still a row, and rows get edited.
+
+    Both origins are STATIC with respect to this run: the module's is fixed at
+    build time, and the descriptor's is sent identically on every reduce because
+    it hangs off the agent, not off the per-run tool list. That property is the
+    one that matters — a declaration that varied with which tool happened to run
+    first would make a coverage claim a function of scheduling.
+    """
+    declared: dict[str, list[extraction.SubjectSource]] = {
+        ref: list(sources)
+        for ref, sources in (
+            (tool.ref, tool.subjects) for tool in spec.manifest.tools
+        )
+        if sources
+    }
+    for ref, wired in (request.agent.subjects or {}).items():
+        if ref and wired and ref not in declared:
+            declared[ref] = [
+                extraction.SubjectSource(
+                    subject_kind=source.subject_kind,
+                    items=source.items,
+                    id_template=source.id_template,
+                    total_field=source.total_field,
+                    truncated_field=source.truncated_field,
+                )
+                for source in wired
+            ]
+    return declared
+
+
+def _declared_kinds(request: ReduceRequest, spec: agents.AgentSpec) -> list[str]:
+    """The subject kinds this run INTENDS to cover.
+
+    Read from the declaration, never from results so far. That distinction has
+    already cost this codebase once: an agent that audits S3, then security
+    groups, then IAM would declare only ``cloud_resource`` after the first two
+    calls, its completion would name ``cloud_resource`` and ``principal``, and
+    the narrowing check would reject the claim — correctly, because a completion
+    may never introduce a kind the run did not set out to cover. The
+    declaration would have been wrong, not the validation.
+
+    Order is preserved and duplicates removed, so the opening claim reads the
+    same on every reduce of the same run.
+    """
+    kinds: list[str] = []
+    for sources in _declared_sources(request, spec).values():
+        for source in sources:
+            if source.subject_kind not in kinds:
+                kinds.append(source.subject_kind)
+    return kinds
 
 
 def _absorb(state: AgentState, results: list[ToolResultWire]) -> None:
@@ -298,6 +369,9 @@ def _respond(
     resolution: agents.Resolution,
     trace_id: str | None,
     *,
+    # Carried so the reply can read the agent's own declaration, which for a
+    # console-authored agent lives on the descriptor rather than in this image.
+    request: ReduceRequest,
     run_id: int | None = None,
     tenant_id: str | None = None,
     window: str = "",
@@ -318,7 +392,7 @@ def _respond(
             # property of a finished run. A parked run has examined an unknown
             # fraction of what it set out to, and publishing that fraction is
             # how one bad night reaps a backlog.
-            declared_subject_kinds=list(resolution.spec.declared_subject_kinds()),
+            declared_subject_kinds=_declared_kinds(request, resolution.spec),
         )
 
     coverage = _coverage(state)
@@ -384,7 +458,7 @@ def _respond(
             window=window,
             has_mutating=has_mutating,
         ),
-        declared_subject_kinds=list(resolution.spec.declared_subject_kinds()),
+        declared_subject_kinds=_declared_kinds(request, resolution.spec),
         # The COMPLETION claim, and only on a finished run. A run that stopped
         # halfway examined an unknown fraction of what it set out to, and
         # publishing that as coverage is how an outage reaps a backlog.

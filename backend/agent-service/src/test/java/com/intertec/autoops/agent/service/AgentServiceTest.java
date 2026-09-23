@@ -109,7 +109,7 @@ class AgentServiceTest {
     private Agent rolledOut(String name, String tools) {
         return agentService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID, name,
                 "Watches production", "gpt-4o", "Escalate anything you cannot fix.",
-                null, null, tools);
+                null, null, tools, null);
     }
 
     // ------ quota ------
@@ -195,6 +195,101 @@ class AgentServiceTest {
                 .formatted(WORKFLOW_ID));
 
         assertFalse(watchdog.getTools().contains("mutating"));
+    }
+
+    @Test
+    void theCatalogRefSurvivesNormalization() {
+        // **The reason nothing has ever been reaped.**
+        //
+        // RolloutService writes `ref` into the delivered allow-list with a
+        // paragraph explaining that it is the stable name the agent's author
+        // declared subject sources against. normalizeTools then rebuilt every
+        // entry from (type, id, mutating) and silently dropped it, so
+        // AgentToolbox read it back as null for EVERY delivered agent. The
+        // runtime received no ref, matched no tool result to a declaration,
+        // enumerated no subjects, and no run ever produced a coverage claim.
+        //
+        // Nothing failed. The rollout succeeded, the agent ran, the report was
+        // fine. The only symptom was a reaper that never reaped, which is
+        // indistinguishable from an estate with nothing to clean up.
+        Agent rca = rolledOut("RCA", """
+                [{"type":"WORKFLOW","id":%d,"ref":"RD-210-cloudwatch-alarm-inventory"}]
+                """.formatted(WORKFLOW_ID));
+
+        assertTrue(rca.getTools().contains("RD-210-cloudwatch-alarm-inventory"),
+                "without the ref the runtime cannot match a result to a declaration");
+    }
+
+    @Test
+    void subjectDeclarationsSurviveNormalization() {
+        // An agent authored in the console has no module, so this is the only
+        // path its subject declaration has. Dropped here, it can claim no
+        // coverage and its findings are structurally unreapable.
+        Agent finops = rolledOut("FinOps", """
+                [{"type":"WORKFLOW","id":%d,"ref":"RD-136","subjects":[
+                   {"subject_kind":"cloud_resource","items":"unattached_volumes",
+                    "id_template":"{region}/{volume_id}"}]}]
+                """.formatted(WORKFLOW_ID));
+
+        assertTrue(finops.getTools().contains("\"subject_kind\":\"cloud_resource\""));
+        assertTrue(finops.getTools().contains("{region}/{volume_id}"),
+                "the TEMPLATE has to survive: a bare volume id is region-scoped, and two "
+                        + "regions' resources collapsing into one subject is a finding "
+                        + "closed by evidence about something else");
+    }
+
+    @Test
+    void aSubjectDeclarationWithNoIdTemplateIsRefused() {
+        // Refused here rather than left to the runtime, because a malformed
+        // declaration does not fail — it enumerates nothing, the run claims no
+        // coverage, and the agent quietly stops being reapable. This is the
+        // last point at which somebody can be told which field was wrong.
+        assertEquals("invalid_tools", assertThrows(AgentException.class,
+                () -> agent("Watchdog", """
+                        [{"type":"WORKFLOW","id":%d,"ref":"RD-136","subjects":[
+                           {"subject_kind":"cloud_resource","items":"volumes"}]}]
+                        """.formatted(WORKFLOW_ID))).getError());
+    }
+
+    @Test
+    void aSubjectDeclarationThatIsNotAnArrayIsRefused() {
+        assertEquals("invalid_tools", assertThrows(AgentException.class,
+                () -> agent("Watchdog", """
+                        [{"type":"WORKFLOW","id":%d,"subjects":{"subject_kind":"x"}}]
+                        """.formatted(WORKFLOW_ID))).getError());
+    }
+
+    @Test
+    void anAgentWithNoSubjectDeclarationStoresNone() {
+        // Absent stays absent rather than becoming an empty array. The runtime
+        // reads "no declaration" as "enumerate nothing", which is the safe
+        // failure; an empty array would mean the same thing but would make a
+        // stored row look like somebody had considered the question.
+        Agent watchdog = agent("Watchdog", "[{\"type\":\"WORKFLOW\",\"id\":%d}]"
+                .formatted(WORKFLOW_ID));
+
+        assertFalse(watchdog.getTools().contains("subjects"));
+    }
+
+    @Test
+    void aRolledOutConsoleAgentKeepsItsDeclaredPhases() {
+        Agent agent = agentService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID,
+                "Cost Analyst", "Finds waste", "gpt-4o", "You are a cost analyst.",
+                null, null, null, "TRIAGE,GATHER,REPORT");
+
+        assertEquals("TRIAGE,GATHER,REPORT", agent.getPhases());
+    }
+
+    @Test
+    void aRolledOutPythonAgentStoresNoPhases() {
+        // Its phases are in its graph. A second copy on the row would create
+        // two answers to the same question, with the one a hand edit can reach
+        // being the one the runtime read.
+        Agent agent = agentService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID,
+                "RCA", "Investigates", "claude-sonnet-5", null,
+                "aws.incident_rca_analyst", "1.0.0", null, "ACT,REPORT");
+
+        assertNull(agent.getPhases());
     }
 
     @Test
@@ -498,7 +593,7 @@ class AgentServiceTest {
     void aRolledOutPythonAgentStoresItsGraphRefAndNoPersona() {
         Agent agent = agentService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID,
                 "Linux Server Health Check Agent", "Checks a host", "claude-sonnet-5",
-                null, "linux.server_health_check", "1.0.0", null);
+                null, "linux.server_health_check", "1.0.0", null, null);
 
         assertEquals("linux.server_health_check", agent.getGraphRef());
         assertEquals("1.0.0", agent.getGraphVersion());
@@ -528,7 +623,7 @@ class AgentServiceTest {
 
         Agent second = agentService.rollOut(TENANT, ACTOR, TOKEN, OTHER_PROJECT, CATALOG_ID,
                 "Banking Ops Copilot", "Watches production", "gpt-4o", "Escalate.",
-                null, null, null);
+                null, null, null, null);
 
         assertEquals(OTHER_PROJECT, second.getProjectId());
         assertEquals(2, agentRepository.count());

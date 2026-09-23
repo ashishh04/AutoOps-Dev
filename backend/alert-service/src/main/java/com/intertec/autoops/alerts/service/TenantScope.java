@@ -78,6 +78,33 @@ public final class TenantScope {
      *                  caller passing someone else's project id gets nothing
      *                  rather than something.
      */
+    /**
+     * A scope for the {@code /internal/**} surface, where there is no JWT.
+     *
+     * <p><b>Deliberately NOT a provider scope.</b> A provider scope skips the
+     * ownership filter entirely and sees every incident in the engine; this one
+     * goes through exactly the same visibility rules a signed-in user of that
+     * tenant would. The caller is trusted to state a tenant, not to widen what
+     * the tenant can see.
+     *
+     * <p>The project id is required rather than optional, because
+     * {@code IncidentService.enrich} can only resolve which monitoring sources
+     * a tenant owns when it has one — and with no owned sources the ownership
+     * filter matches nothing. Passing null here would return an empty list that
+     * reads like "no incidents" rather than "wrong question".
+     */
+    public static TenantScope internal(String tenantId, Long projectId) {
+        if (tenantId == null || tenantId.isBlank()) {
+            throw new IllegalArgumentException("internal scope needs a tenant");
+        }
+        if (projectId == null) {
+            throw new IllegalArgumentException(
+                    "internal scope needs a project: without one no monitoring source can be "
+                            + "resolved as owned, and the answer would be empty rather than wrong");
+        }
+        return new TenantScope(tenantId, false, projectId, java.util.Set.of());
+    }
+
     public static TenantScope of(Jwt jwt, Long projectId) {
         String tenantId = jwt.getClaimAsString("tenantId");
         boolean provider = "PROVIDER".equals(jwt.getClaimAsString("role"));

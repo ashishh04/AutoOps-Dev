@@ -3,7 +3,6 @@ package com.intertec.autoops.alerts.web;
 import com.intertec.autoops.alerts.service.AlertQueryService;
 import com.intertec.autoops.alerts.service.TenantScope;
 import com.intertec.autoops.alerts.web.dto.AlertView;
-import com.intertec.autoops.alerts.web.dto.IncidentView;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -64,12 +63,6 @@ public class AlertController {
                          @RequestParam(required = false) Long projectId,
                          @AuthenticationPrincipal Jwt jwt) {
         return alerts.get(TenantScope.of(jwt, projectId), fingerprint);
-    }
-
-    @GetMapping("/api/incidents")
-    public List<IncidentView> incidents(@RequestParam(defaultValue = "100") int limit,
-                                        @AuthenticationPrincipal Jwt jwt) {
-        return alerts.incidents(TenantScope.of(jwt, null), page(limit));
     }
 
     /** Clamped, not validated: a silly limit is a bad request to answer, not to reject. */

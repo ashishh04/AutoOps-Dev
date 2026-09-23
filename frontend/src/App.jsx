@@ -38,6 +38,8 @@ import Webhooks from "./pages/app/Webhooks";
 import Alerts from "./pages/app/Alerts";
 import AlertDetail from "./pages/app/AlertDetail";
 import AlertProviders from "./pages/app/AlertProviders";
+import Incidents from "./pages/app/Incidents";
+import IncidentDetail from "./pages/app/IncidentDetail";
 import Approvals from "./pages/app/Approvals";
 import Audit from "./pages/app/Audit";
 import Governance from "./pages/app/Governance";
@@ -55,6 +57,7 @@ import Viewer from "./pages/app/Viewer";
 import ProviderLayout from "./components/provider/ProviderLayout";
 import ProviderDashboard from "./pages/provider/ProviderDashboard";
 import Tenants from "./pages/provider/Tenants";
+import ProviderFleet from "./pages/provider/ProviderFleet";
 import TenantDetail from "./pages/provider/TenantDetail";
 import Billing from "./pages/provider/Billing";
 import Plans from "./pages/provider/Plans";
@@ -66,6 +69,7 @@ import ProviderLibrary from "./pages/provider/Library";
 import Broadcasts from "./pages/provider/Broadcasts";
 import ProviderNotifications from "./pages/provider/ProviderNotifications";
 import ProviderScriptEditor from "./pages/provider/ProviderScriptEditor";
+import ProviderWorkflowDesigner from "./pages/provider/ProviderWorkflowDesigner";
 import ProviderAgentBuilder from "./pages/provider/ProviderAgentBuilder";
 
 // Full-screen loader shown while the session is being restored from a token.
@@ -290,6 +294,8 @@ export default function App() {
         <Route path="projects/:pid/alerts" element={<Alerts />} />
         {/* Before the :fingerprint route below, or "sources" is parsed as one. */}
         <Route path="projects/:pid/alerts/sources" element={<AlertProviders />} />
+        <Route path="projects/:pid/incidents" element={<Incidents />} />
+        <Route path="projects/:pid/incidents/:id" element={<IncidentDetail />} />
         {/* Encoded in the link: a fingerprint is opaque and may contain a slash. */}
         <Route path="projects/:pid/alerts/:fingerprint" element={<AlertDetail />} />
         <Route path="projects/:pid/commands" element={<Commands />} />
@@ -321,14 +327,23 @@ export default function App() {
       >
         <Route index element={<ProviderDashboard />} />
         <Route path="tenants" element={<Tenants />} />
+        <Route path="fleet" element={<ProviderFleet />} />
         <Route path="tenants/:id" element={<TenantDetail />} />
         <Route path="library" element={<ProviderLibrary />} />
-        {/* NO WORKFLOW DESIGNER ROUTE. The vendor canvas that used to live at
-            library/workflow/new|:appId was deleted with the engine behind it.
-            Workflow definitions are a node graph the native runtime executes
-            (see backend/agent-runtime/agent_runtime/workflows); until a canvas
-            exists for that, a route here would open an editor that can only
-            produce definitions nothing runs. */}
+        {/* The workflow designer, finally. The vendor canvas that used to live
+            here was deleted with the engine behind it, and this route stayed
+            empty on the correct reasoning that an editor producing definitions
+            nothing runs is worse than no editor — which left "New workflow" in
+            the library header navigating nowhere.
+
+            What closes it is not a canvas. The runtime publishes its own node
+            types and fields at /v1/authoring/schema, derived from the Pydantic
+            models that judge the saved definition, and this page renders
+            exactly that. There is no palette in the frontend to go stale — the
+            failure that has already hit NativeWorkflowService.GRAPH_NODE_TYPES
+            twice. */}
+        <Route path="library/workflow/new" element={<ProviderWorkflowDesigner />} />
+        <Route path="library/workflow/:id" element={<ProviderWorkflowDesigner />} />
         <Route path="library/script/new" element={<ProviderScriptEditor />} />
         <Route path="library/script/:id" element={<ProviderScriptEditor />} />
         {/* The agent builder. Unlike a workflow, an agent has no canvas to

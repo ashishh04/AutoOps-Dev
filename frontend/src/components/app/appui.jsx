@@ -3,11 +3,30 @@ import Icon from "../Icon";
 
 // ...rest so a Card can be made interactive (onClick, role, aria-*) without a
 // wrapper div stealing the hover/group styling that lives on the card itself.
-export const Card = ({ children, className = "", ...rest }) => (
+/**
+ * A panel, optionally with a heading.
+ *
+ * `title` is DESTRUCTURED rather than left in `...rest`, and that is the whole
+ * change. Spread onto the div it became the HTML `title` attribute — a tooltip
+ * — so every `<Card title="Steps">` rendered a panel with no visible heading
+ * and a label that only appeared if you hovered and waited. Eleven of them
+ * across the fleet view and the workflow designer.
+ *
+ * It went unnoticed because a test asserting `getByText("Tenants with no
+ * signal")` passed: the fleet page also has a StatCard carrying that exact
+ * label, so the assertion was satisfied by a different element than the one it
+ * was written for.
+ */
+export const Card = ({ children, className = "", title, ...rest }) => (
   <div
     className={`rounded-2xl border border-slate-200 bg-slate-50 ${className}`}
     {...rest}
   >
+    {title && (
+      <h3 className="border-b border-slate-200 px-4 py-3 text-sm font-semibold text-slate-900">
+        {title}
+      </h3>
+    )}
     {children}
   </div>
 );

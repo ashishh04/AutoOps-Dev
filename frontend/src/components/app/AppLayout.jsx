@@ -194,8 +194,9 @@ export const projectNav = (b, can) =>
     {
       group: "Operate",
       items: [
-        { to: `${b}/alerts`, label: "Alerts", icon: "radar", end: true },
-        { to: `${b}/alerts/sources`, label: "Monitoring Sources", icon: "pulse" },
+        { to: `${b}/incidents`, label: "Incidents", icon: "pulse" },
+        { to: `${b}/alerts`, label: "Alert Feed", icon: "radar", end: true },
+        { to: `${b}/alerts/sources`, label: "Monitoring Sources", icon: "cube" },
         { to: `${b}/executions`, label: "Executions", icon: "play" },
         { to: `${b}/nodes`, label: "Nodes", icon: "server" },
         { to: `${b}/integrations`, label: "Cloud", icon: "cloud" },

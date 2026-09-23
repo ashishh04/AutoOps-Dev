@@ -96,7 +96,7 @@ public class AgentService {
     public Agent rollOut(String tenantId, String actor, String accessToken, Long projectId,
                          Long sourceId, String name, String description, String model,
                          String instructions, String graphRef, String graphVersion,
-                         String tools) {
+                         String tools, String phases) {
         // One delivered copy per catalog item per project. The name check in
         // doCreate stops the obvious repeat, but only while the names still
         // match: rename the catalog item, roll out again, and it lets a second
@@ -121,6 +121,11 @@ public class AgentService {
         // the only legitimate way to acquire one is to be given it.
         agent.setGraphRef(blankToNull(graphRef));
         agent.setGraphVersion(blankToNull(graphVersion));
+        // Set only where there is no module. A shipped agent's phases are in
+        // its graph, and storing a second copy beside it would create two
+        // answers to the same question — with the row, the thing a hand edit
+        // can reach, being the one the runtime read.
+        agent.setPhases(graphRef == null ? blankToNull(phases) : null);
         Agent saved = agentRepository.save(agent);
         log.info("Rolled catalog agent {} out to tenant {} project {} as agent {}",
                 sourceId, tenantId, projectId, saved.getId());
@@ -358,7 +363,8 @@ public class AgentService {
      * treat the same automation declared twice with different flags as two
      * tools; the first declaration wins, as it does for every other field.
      */
-    private record ToolRef(String type, Long id, Boolean mutating) {
+    private record ToolRef(String type, Long id, Boolean mutating, String ref,
+                          JsonNode subjects) {
 
         @Override
         public boolean equals(Object other) {
@@ -409,6 +415,33 @@ public class AgentService {
                 // that reported having collected nothing.
                 node.put("mutating", ref.mutating());
             }
+            if (ref.ref() != null) {
+                // **This line is why anything has ever been reapable.**
+                //
+                // RolloutService writes `ref` into the catalog's allow-list with
+                // a paragraph explaining that it is the stable name the agent's
+                // author declared subject sources against, and that its absence
+                // costs the agent subject extraction. This method then rebuilt
+                // every entry from (type, id, mutating) and silently discarded
+                // it — so `AgentToolbox.parse` read it back as null for EVERY
+                // delivered agent, the runtime received no ref, matched no
+                // result to a declaration, enumerated no subjects, and no run
+                // has ever produced a coverage claim it could reap against.
+                //
+                // Nothing failed. The rollout succeeded, the agent ran, the
+                // report was fine. The only symptom was a reaper that never
+                // reaped, which looks exactly like an estate with nothing to
+                // clean up.
+                node.put("ref", ref.ref());
+            }
+            if (ref.subjects() != null) {
+                // Where that tool's output names the things the run examined.
+                // A Python-authored agent declares this in its module; an agent
+                // authored in the provider console has no module, so this is
+                // the only path its declaration has. Dropped here, a
+                // console-authored agent can claim no coverage at all.
+                node.set("subjects", ref.subjects());
+            }
         }
         return out.toString();
     }
@@ -447,9 +480,123 @@ public class AgentService {
                         "An agent tool's \"mutating\" flag must be true or false");
             }
             unique.add(new ToolRef(type, id.asLong(),
-                    declared.isBoolean() ? declared.asBoolean() : null));
+                    declared.isBoolean() ? declared.asBoolean() : null,
+                    toolRefName(entry.path("ref")),
+                    subjectSources(entry.path("subjects"))));
         }
         return new ArrayList<>(unique);
+    }
+
+    /** How many subject declarations one tool may carry. */
+    private static final int MAX_SUBJECT_SOURCES = 8;
+
+    /** How long a catalog ref may be. */
+    private static final int MAX_REF = 128;
+
+    /**
+     * The catalog name this tool was declared against.
+     *
+     * <p>Bounded and type-checked, but deliberately NOT authorised against
+     * anything. It is a label used to match a tool result back to what the
+     * agent's author said that tool returns; the decision about what an agent
+     * may touch is made above, from {@code (type, id)} against the project, and
+     * must stay there. Treating the ref as meaningful for access would put a
+     * caller-supplied string on the authorisation path.
+     */
+    private String toolRefName(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw AgentException.badRequest("invalid_tools",
+                    "An agent tool's \"ref\" must be a string");
+        }
+        String ref = value.asText().trim();
+        if (ref.isEmpty()) {
+            return null;
+        }
+        if (ref.length() > MAX_REF) {
+            throw AgentException.badRequest("invalid_tools",
+                    "An agent tool's \"ref\" is longer than " + MAX_REF + " characters");
+        }
+        return ref;
+    }
+
+    /**
+     * Where this tool's output names the subjects a run examined.
+     *
+     * <p>Validated here rather than left to the runtime because a malformed
+     * declaration does not fail — it enumerates nothing, the run claims no
+     * coverage, and the agent quietly stops being reapable. That is the failure
+     * this whole path exists to end, so it is refused at the point somebody can
+     * still be told which field was wrong.
+     *
+     * <p>{@code subject_kind} and {@code id_template} are required. The template
+     * is required specifically because a bare resource id is not unique — a
+     * volume id is region-scoped, an IAM user is account-scoped — so an
+     * unqualified id collapses two different resources into one subject, and a
+     * finding then gets closed by evidence about something else.
+     *
+     * <p>{@code total_field} stays optional, and should be OMITTED rather than
+     * pointed at anything derived from the list: a total that equals the list by
+     * construction agrees with it in every case including the broken ones, so it
+     * reads as verification while providing none.
+     */
+    private JsonNode subjectSources(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isArray()) {
+            throw AgentException.badRequest("invalid_tools",
+                    "An agent tool's \"subjects\" must be an array of declarations");
+        }
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (value.size() > MAX_SUBJECT_SOURCES) {
+            throw AgentException.badRequest("invalid_tools",
+                    "A tool may declare at most " + MAX_SUBJECT_SOURCES + " subject sources");
+        }
+        ArrayNode out = objectMapper.createArrayNode();
+        for (JsonNode source : value) {
+            ObjectNode entry = out.addObject();
+            entry.put("subject_kind", requiredText(source, "subject_kind"));
+            entry.put("id_template", requiredText(source, "id_template"));
+            // Empty means "the document itself is the list", which is a real
+            // shape, so it is kept rather than treated as absent.
+            entry.put("items", optionalText(source, "items", ""));
+            String total = optionalText(source, "total_field", null);
+            if (total != null) {
+                entry.put("total_field", total);
+            }
+            String truncated = optionalText(source, "truncated_field", null);
+            if (truncated != null) {
+                entry.put("truncated_field", truncated);
+            }
+        }
+        return out;
+    }
+
+    private String requiredText(JsonNode source, String field) {
+        JsonNode value = source.path(field);
+        if (!value.isTextual() || value.asText().trim().isEmpty()) {
+            throw AgentException.badRequest("invalid_tools",
+                    "A subject declaration needs a \"" + field + "\"");
+        }
+        return value.asText().trim();
+    }
+
+    private String optionalText(JsonNode source, String field, String absent) {
+        JsonNode value = source.path(field);
+        if (value.isMissingNode() || value.isNull()) {
+            return absent;
+        }
+        if (!value.isTextual()) {
+            throw AgentException.badRequest("invalid_tools",
+                    "A subject declaration's \"" + field + "\" must be a string");
+        }
+        String text = value.asText().trim();
+        return text.isEmpty() ? absent : text;
     }
 
     /** Read-side parse: tolerant, because this JSON was written by us. */
@@ -470,8 +617,11 @@ public class AgentService {
                 // counting and description, neither of which consults it —
                 // AgentToolbox re-reads the stored JSON itself.
                 JsonNode declared = entry.path("mutating");
+                // ref and subjects are left null here on purpose: this parse
+                // feeds counting and description only, and AgentToolbox
+                // re-reads the stored JSON itself for anything that uses them.
                 refs.add(new ToolRef(type, entry.path("id").asLong(),
-                        declared.isBoolean() ? declared.asBoolean() : null));
+                        declared.isBoolean() ? declared.asBoolean() : null, null, null));
             }
             return refs;
         } catch (Exception ex) {

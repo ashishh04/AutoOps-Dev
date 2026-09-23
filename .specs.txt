@@ -1,0 +1,2868 @@
+Here are the three built out to the same contract, plus the parts that usually break.
+
+---
+
+# 1. Alert Quality Agent
+
+The only agent in the set that operates on your alerting *system* rather than on incidents. It runs on a schedule, not on events.
+
+**Trigger:** nightly batch over a rolling 30d window, plus on-demand before an alert rule PR merges.
+
+**Inputs**
+- Alert fire/clear history per rule (not per incident)
+- Incident records with `detection_source` (alert / customer / manual / synthetic)
+- Action log: what anyone or anything actually did between page and resolve
+- Dedupe decisions from the Correlation Agent
+- Page delivery outcomes from the Escalation Agent (acked, timed out, escalated)
+- Rule metadata: owner, severity, compliance-mandated flag, as-code source path
+
+**Core metrics per rule**
+
+| Metric | Definition | Why it matters |
+|---|---|---|
+| Actionability rate | fires where a state-changing action followed | the real precision proxy |
+| Auto-resolve rate | fires that cleared with zero action | flapping or self-healing |
+| Duplicate ratio | fires absorbed into an existing incident | correlation is already handling it |
+| Flap index | fire→clear cycles per hour | needs `for:` duration, not a threshold change |
+| Off-hours noise | 22:00–08:00 pages with no action | weight this 3–5× |
+| MTTA | page to ack | routing problem or fatigue signal |
+| Detection gap contribution | incidents with `detection_source != alert` touching this service | the false-negative side |
+
+**Output**
+
+```
+rule_id, window, quality_score(0-100), verdict,
+evidence[{metric, value, percentile_vs_fleet}],
+recommendation{type, params, est_noise_reduction, est_recall_risk},
+confidence
+```
+
+Recommendation types worth supporting: `raise_threshold`, `add_for_duration`, `add_dependency_suppression`, `demote_to_ticket`, `convert_to_slo_burn_rate`, `merge_with_sibling`, `retire`, `no_change`.
+
+**The hard part.** Recall is not observable from alert data. You can only learn about misses from incidents found some other way, which means `detection_source` has to be a mandatory field on every incident, enforced at close. Without it this agent will confidently recommend deleting the only rule that would have caught the next outage.
+
+**Anti-gaming.** Quality score alone is trivially improved by suppressing everything. Always report it paired with detection-gap count for the same service, and never let a single number be the team's target.
+
+**Guardrails.** Proposes only, by default. If you allow autonomous action, restrict it to opening a PR against alerts-as-code with the diff and evidence attached. Never touch rules flagged compliance-mandated. Require a minimum sample (say 20 fires) before any retirement recommendation.
+
+**Idempotency:** `hash(rule_id + window_end + recommendation_type)`. Dismissals persist with a TTL so the agent doesn't re-file the same finding weekly.
+
+**Fallback:** insufficient sample → emit `no_change` with `reason: low_volume`, not silence.
+
+---
+
+# 2. Cost / FinOps Agent
+
+**Trigger:** daily on billing ingest, hourly on near-real-time usage, and event-driven on deploy/scale/provision events.
+
+**Inputs**
+- Billing export (FOCUS or CUR), which lags 6–24h and is *revised retroactively*
+- k8s requests/limits vs actual p95 usage per workload
+- Tag/label allocation map, plus the untagged bucket
+- Commitment inventory: RIs, savings plans, CUDs, expiry dates, coverage
+- Change events from the Change Detection Agent
+- SLO headroom from the burn-rate agent
+- A unit denominator: requests, tenants, orders, GB ingested
+
+**Think in unit cost, not absolute cost.** Without a denominator, every growth quarter looks like a regression and the agent files noise. `cost_per_unit` is the primary series; absolute spend is secondary.
+
+**Sub-capabilities, roughly in build order**
+
+1. **Allocation** — % unallocated spend, per-service showback. Nothing else works until this is under ~10%.
+2. **Spend anomaly + attribution** — reuse your anomaly detection on cost series, then join to change events within the window. "Spend up 40% on service X, correlated with deploy abc123 at 14:02" is the output that gets acted on. A spike with no attribution gets a lower confidence.
+3. **Rightsizing** — requests vs p95+headroom. Must consume SLO headroom before recommending.
+4. **Waste sweep** — unattached volumes, aged snapshots, orphaned LBs and IPs, idle non-prod, zombie preview environments, oversized dev clusters.
+5. **Commitment coverage** — uncovered steady-state on-demand, expiring commitments, over-commitment risk.
+6. **Retention and tiering** — worth flagging for you specifically: on an observability platform, telemetry storage and ingest are frequently a top-three line item. Log retention, metric cardinality, and trace sampling rates are legitimate cost findings, and cardinality explosions usually trace back to a single bad label.
+7. **Egress** — cross-AZ and cross-region chatter, often an accidental topology problem.
+8. **Forecast and budget burn** — with the same multi-window burn-rate logic you use for SLOs.
+
+**Output**
+
+```
+finding_id, category, resource_ref, est_monthly_savings,
+risk_tier(low|med|high), confidence, evidence[],
+remediation{action, reversible, requires_slo_check},
+data_freshness{billing_through, is_partial}
+```
+
+Sort the backlog by `savings / risk`, not savings alone.
+
+**Guardrails.** This is the agent most likely to cause an outage. Rules I'd hard-code:
+- Non-prod before prod, always. Separate autonomy tiers per environment.
+- No scale-down recommendation without current SLO headroom, and none at all during an open incident or change freeze.
+- Cap any single action's blast radius (one workload, one AZ).
+- Deletions of stateful resources are suggest-only, permanently. Snapshots and volumes come back to haunt people.
+
+**Idempotency:** `hash(resource_arn + finding_category + billing_period)`. Critical here — daily runs will otherwise reopen the same 400 tickets.
+
+**Fallback:** billing incomplete or revised → emit findings with `is_partial: true` and suppress anomaly alerts entirely rather than firing on a half-loaded day. Late-arriving cost data is the single biggest source of false positives in this agent.
+
+---
+
+# 3. Escalation & Routing Agent
+
+**Trigger:** incident declared, severity change, ack timeout, burn-rate acceleration, responder unavailable.
+
+**Inputs**
+- Service catalog / CMDB ownership
+- On-call schedules, overrides, holidays, time zones
+- Ranked root cause + member services from the Correlation and RCA agents
+- Blast radius and severity
+- Responder state: current open incidents, pages in last 7d, ack history
+- Expertise map, derived from who resolved similar incidents before
+- Notification channel policy per severity
+
+**Decisions it owns**
+
+1. **Which team.** Page the owner of the *ranked root cause*; notify, don't page, the owners of symptom services. Get this wrong and a single correlated incident wakes six teams, which is the failure mode that makes people distrust the whole platform.
+2. **Which human.** Rotation → override → escalation policy, with load-awareness as a tiebreak when the rotation has multiple eligible responders.
+3. **Which channel.** Ticket / chat / push / phone, mapped from severity × time-of-day × burn rate.
+4. **When to escalate.** Unacked timer (severity-scaled), burn-rate acceleration, or explicit request. Escalation depth capped.
+5. **When to widen.** Multi-team incident → summon an incident commander rather than paging more engineers laterally.
+6. **When not to page at all.** Maintenance window, low burn rate, ticket-tier rule, already-acked duplicate.
+
+**Output**
+
+```
+incident_id, escalation_level, target{team, user, channel},
+rationale{ownership_source, root_cause_service, confidence},
+timers{ack_deadline, next_escalation_at},
+suppressed{bool, reason}
+```
+
+**Hard parts**
+- **Ambiguous ownership.** Multiple candidate owners, or none. Resolution order: explicit service annotation → catalog → repo CODEOWNERS → last deployer → default escalation path.
+- **Ack deduplication** across chat, mobile, and phone. Ack is a single state on the incident, not per-channel.
+- **Rotation boundary mid-incident.** Don't reassign an active incident silently; hand off explicitly with the outgoing responder notified, or hold them until relieved.
+- **Fatigue.** Track pages per responder per week and off-hours pages specifically. Rebalance where the schedule permits, and emit the fatigue signal to the Alert Quality Agent, which is where the actual fix lives.
+
+**Guardrails.** The non-negotiable one: **never silently drop a page.** Unresolvable ownership must fall through to a default escalation path with a loud "routing failed" annotation. Every other guardrail is secondary to this. Beyond that: rate-limit executive notification, cap auto-escalation depth, and make suppression decisions fully auditable with the rule that caused them.
+
+**Idempotency:** `hash(incident_id + escalation_level + target)`. Retries and restarts double-page without it.
+
+**Feedback metric:** routing accuracy = 1 − reassignment rate. Reassignments are cheap to capture and are the single best proxy for whether your ownership data is real or aspirational.
+
+---
+
+## How the three close a loop
+
+Escalation emits page outcomes and fatigue → Alert Quality consumes them as its actionability and noise signals → its rule changes reduce page volume → Escalation's accuracy improves because there's less to route. Meanwhile FinOps depends on SLO headroom from the same detection layer, and its own actions must be published back as change events so the Correlation Agent can blame them when something breaks twenty minutes later. That last one is easy to forget and causes genuinely baffling incidents.
+
+If you want, I can write out the full JSON schemas and state machines for any one of these, or put the whole set in a doc you can iterate on.
+
+Do u want the schemass..??
+
+@@@@@SPLIT@@@@@
+
+Six files. One shared envelope, one per agent, plus the change event that closes the loop. JSON Schema draft 2020-12.
+
+---
+
+## 1. `common.json` — the shared envelope
+
+Every agent emits this. If an agent can't express its output in this shape, it's doing two jobs.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/common.json",
+  "title": "AgentVerdict",
+  "type": "object",
+  "required": [
+    "schema_version", "verdict_id", "idempotency_key", "agent",
+    "emitted_at", "tenant_id", "subject", "finding", "confidence", "autonomy"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+$" },
+    "verdict_id":     { "type": "string", "format": "uuid" },
+    "idempotency_key":{ "type": "string", "maxLength": 128,
+      "description": "Stable hash of (subject + finding_type + window). Replays MUST collapse." },
+    "agent": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name":    { "type": "string" },
+        "version": { "type": "string" },
+        "run_id":  { "type": "string" }
+      }
+    },
+    "emitted_at": { "type": "string", "format": "date-time" },
+    "tenant_id":  { "type": "string" },
+    "environment":{ "enum": ["prod", "staging", "dev", "test", "unknown"] },
+
+    "subject": { "$ref": "#/$defs/SubjectRef" },
+
+    "finding": {
+      "type": "object",
+      "required": ["type", "summary"],
+      "properties": {
+        "type":    { "type": "string" },
+        "summary": { "type": "string", "maxLength": 280 },
+        "detail":  { "type": "string" },
+        "severity":{ "enum": ["info", "low", "medium", "high", "critical"] }
+      }
+    },
+
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "confidence_band": { "enum": ["low", "medium", "high", "very_high"] },
+
+    "autonomy": {
+      "type": "object",
+      "required": ["requested_tier", "granted_tier"],
+      "properties": {
+        "requested_tier": { "$ref": "#/$defs/AutonomyTier" },
+        "granted_tier":   { "$ref": "#/$defs/AutonomyTier" },
+        "tier_source":    { "enum": ["policy", "confidence_band", "operator_override", "environment_default"] },
+        "downgraded_reason": { "type": "string" }
+      }
+    },
+
+    "evidence": { "type": "array", "items": { "$ref": "#/$defs/Evidence" } },
+    "suggested_action": { "oneOf": [ { "$ref": "#/$defs/Action" }, { "type": "null" } ] },
+
+    "guardrails_evaluated": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["guardrail_id", "result"],
+        "properties": {
+          "guardrail_id": { "type": "string" },
+          "result": { "enum": ["pass", "block", "downgrade", "not_applicable"] },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+
+    "fallback": {
+      "type": "object",
+      "required": ["is_fallback"],
+      "properties": {
+        "is_fallback": { "type": "boolean" },
+        "reason": { "enum": [
+          "insufficient_data", "low_volume", "upstream_timeout",
+          "partial_data", "ambiguous", "policy_blocked", "tool_error"
+        ]}
+      },
+      "description": "An agent that cannot decide emits a fallback verdict. Never silence."
+    },
+
+    "data_freshness": {
+      "type": "object",
+      "properties": {
+        "as_of":      { "type": "string", "format": "date-time" },
+        "is_partial": { "type": "boolean", "default": false },
+        "lag_seconds":{ "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "correlation": {
+      "type": "object",
+      "properties": {
+        "incident_id": { "type": "string" },
+        "trace_id":    { "type": "string" },
+        "parent_verdict_id": { "type": "string", "format": "uuid" }
+      }
+    }
+  },
+
+  "$defs": {
+    "AutonomyTier": {
+      "enum": ["observe", "suggest", "act_with_approval", "act_and_notify"],
+      "description": "Ordered. Platform maps confidence_band x environment x risk_tier to granted_tier."
+    },
+
+    "SubjectRef": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["alert_rule", "cloud_resource", "incident", "service", "workload", "responder"] },
+        "id":   { "type": "string" },
+        "service_ref": { "type": "string" },
+        "display_name":{ "type": "string" }
+      }
+    },
+
+    "Evidence": {
+      "type": "object",
+      "required": ["kind", "label"],
+      "properties": {
+        "kind":  { "enum": ["metric", "query_result", "log_sample", "event", "historical", "topology", "billing"] },
+        "label": { "type": "string" },
+        "value": {},
+        "unit":  { "type": "string" },
+        "comparison": {
+          "type": "object",
+          "properties": {
+            "baseline":            {},
+            "delta_pct":           { "type": "number" },
+            "percentile_vs_fleet": { "type": "number", "minimum": 0, "maximum": 100 }
+          }
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "system": { "type": "string" },
+            "query":  { "type": "string" },
+            "link":   { "type": "string", "format": "uri" }
+          }
+        },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "weight": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+
+    "BlastRadius": {
+      "type": "object",
+      "required": ["scope"],
+      "properties": {
+        "scope": { "enum": ["none", "workload", "service", "az", "region", "account", "global"] },
+        "affected_count": { "type": "integer", "minimum": 0 },
+        "environments":   { "type": "array", "items": { "type": "string" } },
+        "customer_facing":{ "type": "boolean" }
+      }
+    },
+
+    "Action": {
+      "type": "object",
+      "required": ["action_id", "type", "reversible", "blast_radius"],
+      "properties": {
+        "action_id":  { "type": "string" },
+        "type":       { "type": "string" },
+        "params":     { "type": "object" },
+        "reversible": { "type": "boolean" },
+        "blast_radius": { "$ref": "#/$defs/BlastRadius" },
+        "preconditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["check"],
+            "properties": {
+              "check": { "enum": [
+                "no_open_incident", "no_change_freeze", "slo_headroom_available",
+                "outside_business_hours", "approval_recorded", "min_sample_met"
+              ]},
+              "satisfied": { "type": "boolean" },
+              "detail": { "type": "string" }
+            }
+          }
+        },
+        "rollback": {
+          "type": "object",
+          "properties": {
+            "method": { "enum": ["inverse_action", "snapshot_restore", "git_revert", "none"] },
+            "ref":    { "type": "string" },
+            "ttl_seconds": { "type": "integer" }
+          }
+        },
+        "emits_change_event": { "type": "boolean", "default": true }
+      }
+    }
+  }
+}
+```
+
+Two fields carry most of the weight. `guardrails_evaluated` makes every suppression and downgrade auditable after the fact, which is what you'll want the first time someone asks why an agent didn't act. `emits_change_event` defaults true so that agents which mutate the world show up in your own correlation window.
+
+---
+
+## 2. `alert-quality.input.json`
+
+One record per rule per window. Pre-aggregated — don't make the agent scan raw fire history.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/alert-quality.input.json",
+  "title": "AlertRuleWindow",
+  "type": "object",
+  "required": ["rule", "window", "fire_stats", "action_linkage", "detection_gap"],
+  "properties": {
+    "rule": {
+      "type": "object",
+      "required": ["rule_id", "source_system"],
+      "properties": {
+        "rule_id":       { "type": "string" },
+        "name":          { "type": "string" },
+        "service_ref":   { "type": "string" },
+        "owner_team":    { "type": "string" },
+        "severity":      { "enum": ["page", "ticket", "info"] },
+        "source_system": { "enum": ["prometheus", "datadog", "cloudwatch", "snmp", "syslog", "custom"] },
+        "as_code_path":  { "type": "string", "description": "Repo path. Null means the agent can only propose, never PR." },
+        "compliance_mandated": { "type": "boolean", "default": false },
+        "for_duration_s": { "type": "integer", "minimum": 0 },
+        "created_at":     { "type": "string", "format": "date-time" },
+        "last_modified_at": { "type": "string", "format": "date-time" }
+      }
+    },
+
+    "window": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end":   { "type": "string", "format": "date-time" },
+        "duration_hours": { "type": "number" }
+      }
+    },
+
+    "fire_stats": {
+      "type": "object",
+      "required": ["total_fires"],
+      "properties": {
+        "total_fires":           { "type": "integer", "minimum": 0 },
+        "distinct_fingerprints": { "type": "integer", "minimum": 0 },
+        "auto_resolved":         { "type": "integer", "minimum": 0 },
+        "absorbed_as_duplicate": { "type": "integer", "minimum": 0,
+          "description": "From the Correlation Agent. Fires folded into an existing incident." },
+        "off_hours_fires":       { "type": "integer", "minimum": 0 },
+        "suppressed_by_maintenance": { "type": "integer", "minimum": 0 },
+        "median_duration_s":     { "type": "number" },
+        "flap_cycles":           { "type": "integer", "minimum": 0,
+          "description": "fire->clear->fire on the same fingerprint" }
+      }
+    },
+
+    "action_linkage": {
+      "type": "object",
+      "required": ["fires_with_state_change"],
+      "properties": {
+        "fires_with_state_change": { "type": "integer", "minimum": 0,
+          "description": "A restart, scale, rollback, config change, or failover followed within the incident window." },
+        "fires_with_investigation_only": { "type": "integer", "minimum": 0 },
+        "fires_with_no_action":    { "type": "integer", "minimum": 0 },
+        "action_types_observed":   { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "page_outcomes": {
+      "type": "object",
+      "description": "Emitted by the Escalation & Routing Agent.",
+      "properties": {
+        "paged":        { "type": "integer" },
+        "acked":        { "type": "integer" },
+        "ack_timeouts": { "type": "integer" },
+        "escalated":    { "type": "integer" },
+        "reassigned":   { "type": "integer" },
+        "mtta_p50_s":   { "type": "number" },
+        "mtta_p90_s":   { "type": "number" }
+      }
+    },
+
+    "detection_gap": {
+      "type": "object",
+      "required": ["incidents_on_service", "detected_by_this_rule"],
+      "properties": {
+        "incidents_on_service":   { "type": "integer", "minimum": 0 },
+        "detected_by_this_rule":  { "type": "integer", "minimum": 0 },
+        "detected_by_other_source": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "detection_source": { "enum": ["alert", "customer", "manual", "synthetic", "downstream_team"] },
+              "count":            { "type": "integer" },
+              "max_severity":     { "type": "string" }
+            }
+          }
+        }
+      },
+      "description": "The only observable proxy for recall. detection_source MUST be mandatory at incident close or this agent will recommend deleting rules that were your last line of defence."
+    },
+
+    "fleet_baseline": {
+      "type": "object",
+      "description": "Percentiles across comparable rules, for relative scoring.",
+      "properties": {
+        "actionability_p50": { "type": "number" },
+        "flap_index_p50":    { "type": "number" },
+        "off_hours_share_p50": { "type": "number" }
+      }
+    },
+
+    "prior_recommendations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "recommendation_type": { "type": "string" },
+          "issued_at":  { "type": "string", "format": "date-time" },
+          "outcome":    { "enum": ["accepted", "dismissed", "expired", "pending"] },
+          "dismiss_ttl_until": { "type": "string", "format": "date-time" }
+        }
+      },
+      "description": "Dismissals persist with a TTL. Without this the agent refiles the same finding every week."
+    }
+  }
+}
+```
+
+---
+
+## 3. `alert-quality.output.json`
+
+Extends the envelope. `finding.type = "alert_quality"`.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/alert-quality.output.json",
+  "allOf": [ { "$ref": "https://autoops/schemas/common.json" } ],
+  "type": "object",
+  "required": ["metrics", "quality_score", "verdict_class", "recommendation"],
+  "properties": {
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "actionability_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "auto_resolve_rate":  { "type": "number", "minimum": 0, "maximum": 1 },
+        "duplicate_ratio":    { "type": "number", "minimum": 0, "maximum": 1 },
+        "flap_index":         { "type": "number", "minimum": 0, "description": "cycles per hour" },
+        "off_hours_noise_score": { "type": "number", "description": "off-hours no-action fires, weighted 3-5x" },
+        "mtta_p50_s":         { "type": "number" },
+        "detection_gap_count":{ "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "quality_score": { "type": "number", "minimum": 0, "maximum": 100 },
+
+    "verdict_class": {
+      "enum": ["healthy", "noisy", "flapping", "redundant", "low_signal", "under_covered", "insufficient_data"]
+    },
+
+    "recommendation": {
+      "type": "object",
+      "required": ["type", "sample_size", "min_sample_met"],
+      "properties": {
+        "type": { "enum": [
+          "no_change", "raise_threshold", "add_for_duration", "add_dependency_suppression",
+          "demote_to_ticket", "convert_to_slo_burn_rate", "merge_with_sibling", "retire"
+        ]},
+        "params": { "type": "object" },
+        "est_noise_reduction_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "est_recall_risk": { "enum": ["none", "low", "medium", "high", "unknown"] },
+        "sample_size":    { "type": "integer", "minimum": 0 },
+        "min_sample_met": { "type": "boolean" },
+        "delivery": {
+          "enum": ["proposal_only", "open_pr"],
+          "default": "proposal_only"
+        },
+        "pr_diff": { "type": "string", "description": "Populated only when delivery=open_pr and rule.as_code_path is set." }
+      },
+
+      "allOf": [
+        { "if":   { "properties": { "type": { "const": "raise_threshold" } } },
+          "then": { "required": ["params"],
+                    "properties": { "params": {
+                      "required": ["current", "proposed", "basis"],
+                      "properties": {
+                        "current":  { "type": "number" },
+                        "proposed": { "type": "number" },
+                        "basis":    { "enum": ["p95_observed", "p99_observed", "slo_derived"] }
+                      }}}}},
+
+        { "if":   { "properties": { "type": { "const": "add_for_duration" } } },
+          "then": { "properties": { "params": {
+                      "required": ["proposed_for_s"],
+                      "properties": { "proposed_for_s": { "type": "integer", "minimum": 1 } }}}}},
+
+        { "if":   { "properties": { "type": { "const": "add_dependency_suppression" } } },
+          "then": { "properties": { "params": {
+                      "required": ["suppress_when_service_ref_firing"],
+                      "properties": { "suppress_when_service_ref_firing": { "type": "string" } }}}}},
+
+        { "if":   { "properties": { "type": { "const": "merge_with_sibling" } } },
+          "then": { "properties": { "params": {
+                      "required": ["sibling_rule_ids"],
+                      "properties": { "sibling_rule_ids": { "type": "array", "items": { "type": "string" } } }}}}},
+
+        { "if":   { "properties": { "type": { "const": "retire" } } },
+          "then": { "properties": {
+                      "min_sample_met":  { "const": true },
+                      "est_recall_risk": { "enum": ["none", "low"] } },
+                    "required": ["min_sample_met", "est_recall_risk"] },
+          "description": "Retirement is structurally impossible below the sample floor or above low recall risk." }
+      ]
+    },
+
+    "anti_gaming": {
+      "type": "object",
+      "required": ["paired_detection_gap"],
+      "properties": {
+        "paired_detection_gap": { "type": "integer" },
+        "service_coverage_after": { "type": "integer" }
+      },
+      "description": "quality_score must never be rendered without this. Suppressing everything is the trivial way to score 100."
+    }
+  }
+}
+```
+
+The `retire` branch is the important one — the constraint lives in the schema, not in prompt text, so a model that gets enthusiastic still can't emit a valid retirement verdict on nine data points.
+
+---
+
+## 4. `finops.input.json`
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/finops.input.json",
+  "title": "CostAssessmentInput",
+  "type": "object",
+  "required": ["billing", "resource", "cost"],
+  "properties": {
+    "billing": {
+      "type": "object",
+      "required": ["period_start", "period_end", "data_through", "is_partial"],
+      "properties": {
+        "period_start": { "type": "string", "format": "date" },
+        "period_end":   { "type": "string", "format": "date" },
+        "data_through": { "type": "string", "format": "date-time" },
+        "is_partial":   { "type": "boolean" },
+        "revision_count": { "type": "integer", "minimum": 0,
+          "description": "Cost data is restated retroactively. A high count means suppress anomaly findings." },
+        "source_format": { "enum": ["focus", "cur", "gcp_billing_export", "azure_amortized", "vendor_api"] }
+      }
+    },
+
+    "resource": {
+      "type": "object",
+      "required": ["resource_ref", "provider"],
+      "properties": {
+        "resource_ref": { "type": "string", "description": "ARN / URN / fully-qualified id" },
+        "provider":     { "enum": ["aws", "gcp", "azure", "onprem", "saas"] },
+        "account_id":   { "type": "string" },
+        "region":       { "type": "string" },
+        "az":           { "type": "string" },
+        "service":      { "type": "string" },
+        "kind":         { "enum": ["compute", "storage", "network", "database", "telemetry", "license", "other"] },
+        "stateful":     { "type": "boolean", "default": false },
+        "tags":         { "type": "object", "additionalProperties": { "type": "string" } },
+        "allocation": {
+          "type": "object",
+          "properties": {
+            "is_allocated": { "type": "boolean" },
+            "service_ref":  { "type": "string" },
+            "team_ref":     { "type": "string" },
+            "environment":  { "enum": ["prod", "staging", "dev", "test", "unknown"] }
+          }
+        }
+      }
+    },
+
+    "cost": {
+      "type": "object",
+      "required": ["currency", "current_period_amount"],
+      "properties": {
+        "currency": { "type": "string", "minLength": 3, "maxLength": 3 },
+        "current_period_amount": { "type": "number" },
+        "prior_period_amount":   { "type": "number" },
+        "daily_series": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "date":   { "type": "string", "format": "date" },
+              "amount": { "type": "number" },
+              "is_estimated": { "type": "boolean" }
+            }
+          }
+        },
+        "amortization": { "enum": ["amortized", "unblended", "blended"] }
+      }
+    },
+
+    "unit_economics": {
+      "type": "object",
+      "required": ["denominator_name", "denominator_value"],
+      "properties": {
+        "denominator_name":  { "type": "string", "examples": ["requests", "tenants", "orders", "gb_ingested"] },
+        "denominator_value": { "type": "number", "exclusiveMinimum": 0 },
+        "cost_per_unit":       { "type": "number" },
+        "cost_per_unit_prior": { "type": "number" }
+      },
+      "description": "Primary series. Without a denominator every growth quarter reads as a cost regression."
+    },
+
+    "utilization": {
+      "type": "object",
+      "properties": {
+        "cpu_request":  { "type": "number" },
+        "cpu_p95":      { "type": "number" },
+        "mem_request_bytes": { "type": "integer" },
+        "mem_p95_bytes":     { "type": "integer" },
+        "gpu_util_p95": { "type": "number" },
+        "idle_hours":   { "type": "number" },
+        "sample_count": { "type": "integer" },
+        "observation_days": { "type": "integer" }
+      }
+    },
+
+    "telemetry_profile": {
+      "type": "object",
+      "description": "For observability platforms this is frequently a top-three line item.",
+      "properties": {
+        "signal":            { "enum": ["logs", "metrics", "traces"] },
+        "ingest_gb_per_day": { "type": "number" },
+        "retention_days":    { "type": "integer" },
+        "active_series":     { "type": "integer" },
+        "cardinality_drivers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label_key":       { "type": "string" },
+              "distinct_values": { "type": "integer" },
+              "series_share_pct":{ "type": "number" }
+            }
+          },
+          "description": "Cardinality explosions almost always trace to one bad label."
+        },
+        "queried_share_pct": { "type": "number", "description": "Share of stored data actually read in window." },
+        "sampling_rate":     { "type": "number" }
+      }
+    },
+
+    "commitment": {
+      "type": "object",
+      "properties": {
+        "covered_pct":     { "type": "number", "minimum": 0, "maximum": 100 },
+        "commitment_type": { "enum": ["ri", "savings_plan", "cud", "none"] },
+        "expires_at":      { "type": "string", "format": "date-time" },
+        "on_demand_steady_state_amount": { "type": "number" }
+      }
+    },
+
+    "slo_context": {
+      "type": "object",
+      "required": ["has_open_incident", "change_freeze_active"],
+      "properties": {
+        "service_ref":               { "type": "string" },
+        "error_budget_remaining_pct":{ "type": "number" },
+        "burn_rate_1h":              { "type": "number" },
+        "burn_rate_6h":              { "type": "number" },
+        "has_open_incident":         { "type": "boolean" },
+        "change_freeze_active":      { "type": "boolean" },
+        "headroom_verdict":          { "enum": ["ample", "adequate", "tight", "none", "unknown"] }
+      },
+      "description": "Mandatory gate for any scale-down. No headroom, no recommendation."
+    },
+
+    "recent_change_events": {
+      "type": "array",
+      "items": { "$ref": "https://autoops/schemas/change-event.json" }
+    }
+  }
+}
+```
+
+---
+
+## 5. `finops.output.json`
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/finops.output.json",
+  "allOf": [ { "$ref": "https://autoops/schemas/common.json" } ],
+  "type": "object",
+  "required": ["category", "est_monthly_savings", "risk_tier", "priority_score"],
+  "properties": {
+    "category": {
+      "enum": [
+        "allocation_gap", "spend_anomaly", "rightsizing", "waste",
+        "commitment_coverage", "retention_tiering", "cardinality", "egress", "forecast_breach"
+      ]
+    },
+
+    "est_monthly_savings": {
+      "type": "object",
+      "required": ["amount", "currency", "method"],
+      "properties": {
+        "amount":   { "type": "number" },
+        "currency": { "type": "string" },
+        "method":   { "enum": ["measured", "modeled", "heuristic"] },
+        "low":      { "type": "number" },
+        "high":     { "type": "number" }
+      }
+    },
+
+    "risk_tier": { "enum": ["low", "medium", "high"] },
+
+    "priority_score": { "type": "number",
+      "description": "savings / risk_weight. Sort the backlog on this, never on savings alone." },
+
+    "attribution": {
+      "type": "object",
+      "description": "Required when category=spend_anomaly.",
+      "properties": {
+        "change_ref":          { "type": "string" },
+        "change_type":         { "type": "string" },
+        "correlation_window_s":{ "type": "integer" },
+        "attribution_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "unattributed":        { "type": "boolean",
+          "description": "True forces confidence_band down. A spike nobody can explain is a weaker finding, not a stronger one." }
+      }
+    },
+
+    "remediation": {
+      "type": "object",
+      "required": ["action", "requires_slo_check", "environment_tier"],
+      "properties": {
+        "action": { "enum": [
+          "resize_requests", "scale_down_replicas", "schedule_nonprod_shutdown",
+          "delete_orphan", "snapshot_then_delete", "purchase_commitment",
+          "reduce_retention", "tier_to_cold", "drop_label", "reduce_sampling",
+          "relocate_workload", "tag_resource", "no_action"
+        ]},
+        "params": { "type": "object" },
+        "requires_slo_check": { "type": "boolean" },
+        "environment_tier":   { "enum": ["nonprod_first", "prod_gated", "prod_blocked"] },
+        "reversible":         { "type": "boolean" },
+        "blast_radius_cap": {
+          "type": "object",
+          "properties": {
+            "max_workloads": { "type": "integer", "maximum": 1 },
+            "max_azs":       { "type": "integer", "maximum": 1 }
+          }
+        }
+      },
+
+      "allOf": [
+        { "if": { "properties": { "action": { "enum": [
+              "scale_down_replicas", "resize_requests", "reduce_sampling", "reduce_retention" ] } } },
+          "then": { "properties": { "requires_slo_check": { "const": true } },
+                    "required": ["requires_slo_check"] } },
+
+        { "if": { "properties": { "action": { "enum": ["delete_orphan", "snapshot_then_delete"] } } },
+          "then": { "properties": { "environment_tier": { "const": "prod_blocked" } },
+                    "description": "Stateful deletions are suggest-only, permanently." } }
+      ]
+    },
+
+    "data_freshness": {
+      "type": "object",
+      "required": ["billing_through", "is_partial"],
+      "properties": {
+        "billing_through": { "type": "string", "format": "date-time" },
+        "is_partial":      { "type": "boolean" },
+        "anomaly_findings_suppressed": { "type": "boolean",
+          "description": "Set true when is_partial. Late-arriving cost data is the top source of false positives here." }
+      }
+    }
+  },
+
+  "if":   { "properties": { "category": { "const": "spend_anomaly" } } },
+  "then": { "required": ["attribution"] }
+}
+```
+
+---
+
+## 6. `escalation.json` — request, decision, state machine
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/escalation.json",
+
+  "$defs": {
+
+    "RoutingRequest": {
+      "type": "object",
+      "required": ["incident", "trigger", "ownership_candidates"],
+      "properties": {
+        "incident": {
+          "type": "object",
+          "required": ["incident_id", "severity", "declared_at"],
+          "properties": {
+            "incident_id":  { "type": "string" },
+            "severity":     { "enum": ["sev1", "sev2", "sev3", "sev4"] },
+            "declared_at":  { "type": "string", "format": "date-time" },
+            "status":       { "enum": ["open", "acked", "mitigated", "resolved"] },
+            "blast_radius": { "$ref": "https://autoops/schemas/common.json#/$defs/BlastRadius" },
+            "burn_rate_1h": { "type": "number" },
+            "burn_rate_6h": { "type": "number" },
+            "slo_refs":     { "type": "array", "items": { "type": "string" } }
+          }
+        },
+
+        "trigger": {
+          "type": "object",
+          "required": ["type", "at"],
+          "properties": {
+            "type": { "enum": [
+              "declared", "severity_change", "ack_timeout",
+              "burn_acceleration", "responder_unavailable", "manual_request", "rotation_boundary"
+            ]},
+            "at": { "type": "string", "format": "date-time" }
+          }
+        },
+
+        "correlation": {
+          "type": "object",
+          "properties": {
+            "root_cause_ranking": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "service_ref": { "type": "string" },
+                  "score":       { "type": "number", "minimum": 0, "maximum": 1 },
+                  "rank":        { "type": "integer", "minimum": 1 }
+                }
+              }
+            },
+            "symptom_services": { "type": "array", "items": { "type": "string" },
+              "description": "Notify. Do not page. Getting this wrong wakes six teams for one incident." },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+
+        "ownership_candidates": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "type": "object",
+            "required": ["service_ref", "source", "precedence"],
+            "properties": {
+              "service_ref": { "type": "string" },
+              "team_ref":    { "type": "string" },
+              "source":      { "enum": ["service_annotation", "catalog", "codeowners", "last_deployer", "default_path"] },
+              "precedence":  { "type": "integer", "minimum": 1, "maximum": 5,
+                "description": "1=annotation .. 5=default. Resolve in ascending order." },
+              "stale_since": { "type": "string", "format": "date-time" }
+            }
+          }
+        },
+
+        "schedules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "team_ref":       { "type": "string" },
+              "current_oncall": { "type": "array", "items": { "type": "string" } },
+              "override_active":{ "type": "boolean" },
+              "timezone":       { "type": "string" },
+              "rotation_ends_at": { "type": "string", "format": "date-time" },
+              "escalation_policy_depth": { "type": "integer" }
+            }
+          }
+        },
+
+        "responder_state": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "user_ref":           { "type": "string" },
+              "availability":       { "enum": ["available", "busy", "unreachable", "pto"] },
+              "open_incidents":     { "type": "integer" },
+              "pages_7d":           { "type": "integer" },
+              "off_hours_pages_7d": { "type": "integer" },
+              "ack_rate_30d":       { "type": "number", "minimum": 0, "maximum": 1 },
+              "local_time":         { "type": "string" }
+            }
+          }
+        },
+
+        "expertise": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "user_ref":       { "type": "string" },
+              "service_ref":    { "type": "string" },
+              "resolved_count": { "type": "integer" },
+              "last_resolved_at": { "type": "string", "format": "date-time" }
+            }
+          },
+          "description": "Tiebreak only. Never overrides the rotation."
+        },
+
+        "suppression_context": {
+          "type": "object",
+          "properties": {
+            "maintenance_windows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "window_id":   { "type": "string" },
+                  "service_refs":{ "type": "array", "items": { "type": "string" } },
+                  "ends_at":     { "type": "string", "format": "date-time" }
+                }
+              }
+            },
+            "change_freeze_active": { "type": "boolean" },
+            "ticket_tier_rule_ids": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+
+        "prior_decisions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RoutingDecision" }
+        }
+      }
+    },
+
+    "RoutingDecision": {
+      "allOf": [ { "$ref": "https://autoops/schemas/common.json" } ],
+      "type": "object",
+      "required": ["incident_id", "escalation_level", "targets", "rationale", "timers", "delivery_guarantee"],
+      "properties": {
+        "incident_id":      { "type": "string" },
+        "escalation_level": { "type": "integer", "minimum": 0 },
+
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["kind", "reason"],
+            "properties": {
+              "kind":     { "enum": ["page", "notify", "ticket", "ic_summon", "status_page"] },
+              "team_ref": { "type": "string" },
+              "user_ref": { "type": "string" },
+              "channel":  { "enum": ["phone", "push", "sms", "chat", "email", "ticket_queue"] },
+              "reason":   { "enum": [
+                "root_cause_owner", "symptom_owner", "expertise_match", "escalation_policy",
+                "load_balanced", "default_path", "multi_team_coordination"
+              ]},
+              "dedupe_key": { "type": "string" }
+            }
+          },
+          "description": "minItems 1. A decision that targets nobody is invalid by construction."
+        },
+
+        "rationale": {
+          "type": "object",
+          "required": ["ownership_source"],
+          "properties": {
+            "ownership_source":     { "enum": ["service_annotation", "catalog", "codeowners", "last_deployer", "default_path"] },
+            "root_cause_service":   { "type": "string" },
+            "root_cause_confidence":{ "type": "number" },
+            "tiebreak_applied":     { "enum": ["none", "load", "expertise", "timezone"] },
+            "candidates_rejected": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "team_ref": { "type": "string" },
+                  "reason":   { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+
+        "timers": {
+          "type": "object",
+          "required": ["ack_deadline"],
+          "properties": {
+            "ack_deadline":     { "type": "string", "format": "date-time" },
+            "next_escalation_at": { "type": "string", "format": "date-time" },
+            "max_depth":        { "type": "integer", "maximum": 4 },
+            "current_depth":    { "type": "integer" }
+          }
+        },
+
+        "ack": {
+          "type": "object",
+          "description": "Singular on the incident, not per channel. Multi-channel acks collapse to this.",
+          "properties": {
+            "acked_by":   { "type": "string" },
+            "acked_at":   { "type": "string", "format": "date-time" },
+            "via_channel":{ "type": "string" }
+          }
+        },
+
+        "suppressed": {
+          "type": "object",
+          "required": ["is_suppressed"],
+          "properties": {
+            "is_suppressed": { "type": "boolean" },
+            "rule_id":       { "type": "string" },
+            "rule_type":     { "enum": ["maintenance_window", "ticket_tier", "low_burn_rate", "duplicate_of_acked"] },
+            "expires_at":    { "type": "string", "format": "date-time" }
+          },
+          "if":   { "properties": { "is_suppressed": { "const": true } } },
+          "then": { "required": ["rule_id", "rule_type"] }
+        },
+
+        "delivery_guarantee": {
+          "type": "object",
+          "required": ["routing_resolved"],
+          "properties": {
+            "routing_resolved": { "type": "boolean" },
+            "failure_reason":   { "enum": ["no_owner", "no_oncall", "all_unreachable", "schedule_lookup_failed", "ambiguous_ownership"] },
+            "fallback_path_used": { "type": "string" },
+            "loud_annotation":  { "type": "string" }
+          },
+          "if":   { "properties": { "routing_resolved": { "const": false } } },
+          "then": { "required": ["failure_reason", "fallback_path_used", "loud_annotation"],
+                    "description": "Unresolvable ownership falls through to the default path with a visible routing-failed marker. A page is never silently dropped." }
+        },
+
+        "handoff": {
+          "type": "object",
+          "description": "Rotation boundary during an active incident. Never reassign silently.",
+          "properties": {
+            "outgoing_user_ref": { "type": "string" },
+            "incoming_user_ref": { "type": "string" },
+            "acknowledged_by_outgoing": { "type": "boolean" },
+            "hold_until_relieved": { "type": "boolean" }
+          }
+        },
+
+        "fatigue_signal": {
+          "type": "object",
+          "description": "Emitted to the Alert Quality Agent. The fix lives there, not here.",
+          "properties": {
+            "user_ref":           { "type": "string" },
+            "pages_7d":           { "type": "integer" },
+            "off_hours_pages_7d": { "type": "integer" },
+            "contributing_rule_ids": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+
+        "outcome": {
+          "type": "object",
+          "description": "Backfilled at incident close. Feeds routing accuracy = 1 - reassignment_rate.",
+          "properties": {
+            "was_reassigned":    { "type": "boolean" },
+            "reassigned_to":     { "type": "string" },
+            "time_to_ack_s":     { "type": "integer" },
+            "resolved_by_initial_target": { "type": "boolean" }
+          }
+        }
+      }
+    },
+
+    "RoutingStateMachine": {
+      "const": {
+        "initial": "pending_route",
+        "terminal": ["resolved", "suppressed"],
+        "states": [
+          "pending_route", "routed", "acked", "escalating",
+          "widened", "routing_failed", "suppressed", "resolved"
+        ],
+        "transitions": [
+          { "from": "pending_route", "to": "suppressed",      "on": "suppression_rule_match", "emits": "suppressed{rule_id}" },
+          { "from": "pending_route", "to": "routing_failed",  "on": "ownership_unresolvable", "emits": "delivery_guarantee{routing_resolved:false}" },
+          { "from": "pending_route", "to": "routed",          "on": "target_selected",        "emits": "page|notify|ticket" },
+          { "from": "routing_failed","to": "routed",          "on": "default_path_engaged" },
+          { "from": "routed",        "to": "acked",           "on": "ack_received",           "guard": "single_ack_state" },
+          { "from": "routed",        "to": "escalating",      "on": "ack_deadline_exceeded",  "guard": "current_depth < max_depth" },
+          { "from": "routed",        "to": "escalating",      "on": "burn_rate_acceleration" },
+          { "from": "escalating",    "to": "acked",           "on": "ack_received" },
+          { "from": "escalating",    "to": "widened",         "on": "depth_exhausted || multi_team_detected", "emits": "ic_summon" },
+          { "from": "acked",         "to": "escalating",      "on": "severity_increase" },
+          { "from": "acked",         "to": "acked",           "on": "rotation_boundary",      "emits": "handoff", "guard": "acknowledged_by_outgoing" },
+          { "from": "widened",       "to": "resolved",        "on": "incident_resolved" },
+          { "from": "acked",         "to": "resolved",        "on": "incident_resolved" }
+        ],
+        "invariants": [
+          "No transition may produce zero targets.",
+          "escalating never increases lateral page count; widening summons an IC instead.",
+          "suppressed requires a rule_id for audit.",
+          "ack is a single incident-level state; duplicate channel acks are idempotent no-ops."
+        ]
+      }
+    }
+  }
+}
+```
+
+---
+
+## 7. `change-event.json` — the thing that closes the loop
+
+Any agent that mutates infrastructure publishes this. Easy to skip, and skipping it is what produces incidents nobody can explain twenty minutes after a FinOps rightsizing action.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/change-event.json",
+  "type": "object",
+  "required": ["change_id", "at", "type", "actor", "targets", "reversible"],
+  "properties": {
+    "change_id": { "type": "string" },
+    "at":        { "type": "string", "format": "date-time" },
+    "type": { "enum": [
+      "deploy", "rollback", "config", "feature_flag", "scale",
+      "resize", "retention_change", "sampling_change", "alert_rule_change",
+      "infra_provision", "infra_delete"
+    ]},
+    "actor": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind":       { "enum": ["human", "agent", "pipeline"] },
+        "agent_name": { "type": "string" },
+        "verdict_id": { "type": "string", "format": "uuid",
+          "description": "Back-reference to the verdict that authorised this. Makes agent actions auditable and blameable." },
+        "approver":   { "type": "string" }
+      }
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "service_ref":  { "type": "string" },
+          "resource_ref": { "type": "string" },
+          "environment":  { "type": "string" }
+        }
+      }
+    },
+    "reversible":  { "type": "boolean" },
+    "rollback_ref":{ "type": "string" },
+    "blast_radius": { "$ref": "https://autoops/schemas/common.json#/$defs/BlastRadius" }
+  }
+}
+```
+
+---
+
+## Versioning rules
+
+Three that keep this stable as you add agents:
+
+1. **Additive-only within a major.** New optional fields, new enum members at the end. Consumers ignore unknown fields rather than rejecting.
+2. **Enum extension is a minor bump, enum removal is major.** Handlers need a `default:` branch for unrecognized values — particularly `finding.type`, `recommendation.type`, and `remediation.action`.
+3. **`idempotency_key` composition is frozen at the major version.** Changing what goes into the hash silently reopens every finding you've ever closed.
+
+Happy to write the guardrail policy schema that sits in front of every write action — the one that maps confidence band × environment × risk tier to a granted autonomy tier — or put this whole set in a doc so you can iterate on it.
+
+guardrails
+
+Here's the layer that sits in front of every write. Five parts: where it lives, the policy document, evaluation semantics, the decision record, and a worked instance covering the three agents.
+
+---
+
+## 1. Where it sits
+
+Not a library agents call. A service in the call path, between verdict emission and tool execution:
+
+```
+agent → verdict → [POLICY ENGINE] → reservation → executor → change_event
+                        ↓
+                  decision record (always written, allow or block)
+```
+
+Four properties that have to hold, or the rest is decoration:
+
+- **Deny by default.** No matching rule is a block, not an allow.
+- **Fail closed.** Engine timeout, missing precondition data, unreachable authority → block. A guardrail that fails open is worse than none, because people trust it.
+- **Preconditions are re-evaluated, never trusted.** The agent's verdict says `no_open_incident: satisfied`. The engine ignores that field and asks the incident store itself. Self-attested preconditions are the single most common way this layer gets quietly bypassed.
+- **Monotonic downgrade only.** Rules can lower the granted tier. No rule can raise it above what an earlier rule granted. This makes evaluation order-independent for safety, which is what lets you add rules without re-auditing the whole set.
+
+---
+
+## 2. `guardrail-policy.json` — the policy document
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/guardrail-policy.json",
+  "title": "GuardrailPolicy",
+  "type": "object",
+  "required": ["policy_id", "version", "default_decision", "tier_matrix", "rules"],
+  "properties": {
+    "policy_id": { "type": "string" },
+    "version":   { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "effective_from": { "type": "string", "format": "date-time" },
+    "owner_team": { "type": "string" },
+    "as_code_path": { "type": "string" },
+
+    "default_decision": {
+      "const": "block",
+      "description": "Frozen. Deny-by-default is not configurable."
+    },
+
+    "fail_mode": {
+      "const": "closed",
+      "description": "Frozen. Applies to engine timeout, precondition lookup failure, and schema violation."
+    },
+
+    "evaluation_timeout_ms": { "type": "integer", "maximum": 2000, "default": 750 },
+
+    "tier_matrix": {
+      "type": "object",
+      "required": ["dimensions", "cells", "ceiling"],
+      "properties": {
+        "dimensions": {
+          "type": "array",
+          "items": { "enum": ["confidence_band", "environment", "risk_tier", "blast_radius_scope", "time_of_day"] },
+          "description": "Order defines cell key composition."
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["match", "granted_tier"],
+            "properties": {
+              "match": {
+                "type": "object",
+                "properties": {
+                  "confidence_band":    { "type": "array", "items": { "enum": ["low", "medium", "high", "very_high"] } },
+                  "environment":        { "type": "array", "items": { "enum": ["prod", "staging", "dev", "test", "unknown"] } },
+                  "risk_tier":          { "type": "array", "items": { "enum": ["low", "medium", "high"] } },
+                  "blast_radius_scope": { "type": "array", "items": { "enum": ["none","workload","service","az","region","account","global"] } },
+                  "time_of_day":        { "type": "array", "items": { "enum": ["business_hours", "off_hours"] } }
+                }
+              },
+              "granted_tier": { "enum": ["observe", "suggest", "act_with_approval", "act_and_notify"] }
+            }
+          }
+        },
+        "ceiling": {
+          "type": "object",
+          "description": "Hard caps applied after cell lookup. Cannot be exceeded by any rule or override.",
+          "properties": {
+            "global":            { "enum": ["observe","suggest","act_with_approval","act_and_notify"] },
+            "by_environment":    { "type": "object", "additionalProperties": { "type": "string" } },
+            "by_agent":          { "type": "object", "additionalProperties": { "type": "string" } },
+            "unknown_environment": { "const": "suggest",
+              "description": "Unresolvable environment can never act. Misattributed prod is the failure this prevents." }
+          }
+        }
+      }
+    },
+
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Rule" }
+    },
+
+    "action_classes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/ActionClass" },
+      "description": "Intrinsic properties of an action type, independent of who requested it."
+    },
+
+    "budgets":     { "type": "array", "items": { "$ref": "#/$defs/Budget" } },
+    "break_glass": { "$ref": "#/$defs/BreakGlass" }
+  },
+
+  "$defs": {
+
+    "Rule": {
+      "type": "object",
+      "required": ["rule_id", "effect", "when"],
+      "properties": {
+        "rule_id":     { "type": "string" },
+        "description": { "type": "string" },
+        "priority":    { "type": "integer", "minimum": 0,
+          "description": "Tiebreak for reporting only. Safety does not depend on it — blocks always win." },
+
+        "effect": {
+          "enum": ["block", "downgrade_to", "require_precondition", "require_approval", "annotate"],
+          "description": "No 'allow' effect exists. Rules can only restrict."
+        },
+        "downgrade_to": { "enum": ["observe", "suggest", "act_with_approval"] },
+
+        "when": {
+          "type": "object",
+          "description": "All present clauses must match (AND). Arrays within a clause are OR.",
+          "properties": {
+            "agents":         { "type": "array", "items": { "type": "string" } },
+            "action_types":   { "type": "array", "items": { "type": "string" } },
+            "action_classes": { "type": "array", "items": { "type": "string" } },
+            "environments":   { "type": "array", "items": { "type": "string" } },
+            "risk_tiers":     { "type": "array", "items": { "type": "string" } },
+            "confidence_below": { "type": "number", "minimum": 0, "maximum": 1 },
+            "blast_radius_at_least": { "enum": ["workload","service","az","region","account","global"] },
+            "resource_selector": {
+              "type": "object",
+              "properties": {
+                "tags":            { "type": "object", "additionalProperties": { "type": "string" } },
+                "service_refs":    { "type": "array", "items": { "type": "string" } },
+                "stateful":        { "type": "boolean" },
+                "compliance_flagged": { "type": "boolean" },
+                "service_tier_at_most": { "type": "integer", "description": "1 = most critical" }
+              }
+            },
+            "temporal": {
+              "type": "object",
+              "properties": {
+                "change_freeze_active":   { "type": "boolean" },
+                "open_incident_on_service": { "type": "boolean" },
+                "off_hours":              { "type": "boolean" },
+                "within_deploy_window_s": { "type": "integer" }
+              }
+            },
+            "verdict_flags": {
+              "type": "object",
+              "properties": {
+                "is_fallback":     { "type": "boolean" },
+                "data_is_partial": { "type": "boolean" },
+                "unattributed":    { "type": "boolean" }
+              }
+            }
+          }
+        },
+
+        "require": {
+          "type": "object",
+          "properties": {
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["check", "authority"],
+                "properties": {
+                  "check": { "enum": [
+                    "no_open_incident", "no_change_freeze", "slo_headroom_available",
+                    "min_sample_met", "snapshot_exists", "rollback_available",
+                    "outside_business_hours", "nonprod_validated_first"
+                  ]},
+                  "authority": { "type": "string",
+                    "description": "System of record queried live. NEVER the agent's own verdict." },
+                  "max_staleness_s": { "type": "integer", "default": 60 },
+                  "on_lookup_failure": { "const": "block" }
+                }
+              }
+            },
+            "approval": {
+              "type": "object",
+              "properties": {
+                "approver_role":  { "type": "array", "items": { "type": "string" } },
+                "quorum":         { "type": "integer", "minimum": 1, "default": 1 },
+                "exclude_requester": { "type": "boolean", "default": true },
+                "ttl_s":          { "type": "integer", "default": 900 },
+                "reusable":       { "const": false,
+                  "description": "One approval authorises exactly one action_id. No blanket approvals." }
+              }
+            },
+            "canary": {
+              "type": "object",
+              "properties": {
+                "environment_order": { "type": "array", "items": { "type": "string" },
+                  "examples": [["dev", "staging", "prod"]] },
+                "soak_seconds":      { "type": "integer" },
+                "verification_agent_must_pass": { "type": "boolean", "default": true }
+              }
+            }
+          }
+        },
+
+        "immutable": { "type": "boolean", "default": false,
+          "description": "Cannot be disabled by break-glass or operator override. Use for stateful deletion and compliance rules." }
+      }
+    },
+
+    "ActionClass": {
+      "type": "object",
+      "required": ["reversibility", "default_risk_tier"],
+      "properties": {
+        "reversibility": { "enum": ["trivial", "reversible_with_state_loss", "irreversible"] },
+        "default_risk_tier": { "enum": ["low", "medium", "high"] },
+        "max_blast_radius":  { "enum": ["none","workload","service","az","region"] },
+        "requires_change_event": { "const": true },
+        "requires_verification": { "type": "boolean", "default": true,
+          "description": "Verification Agent must run post-action and may recommend undo." }
+      }
+    },
+
+    "Budget": {
+      "type": "object",
+      "required": ["budget_id", "scope", "window_s", "max_actions"],
+      "properties": {
+        "budget_id": { "type": "string" },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "agent":        { "type": "string" },
+            "environment":  { "type": "string" },
+            "action_class": { "type": "string" },
+            "service_ref":  { "type": "string" }
+          }
+        },
+        "window_s":     { "type": "integer" },
+        "max_actions":  { "type": "integer" },
+        "max_affected_resources": { "type": "integer" },
+        "on_exhaustion": { "enum": ["block", "downgrade_to_suggest"], "default": "block" },
+        "reset_requires_human": { "type": "boolean", "default": false }
+      },
+      "description": "Per-action blast radius caps do not compose. 400 individually-safe actions in an hour is still an outage."
+    },
+
+    "BreakGlass": {
+      "type": "object",
+      "properties": {
+        "enabled":        { "type": "boolean" },
+        "max_duration_s": { "type": "integer", "maximum": 3600 },
+        "requires_roles": { "type": "array", "items": { "type": "string" } },
+        "quorum":         { "type": "integer", "minimum": 2 },
+        "cannot_override_immutable_rules": { "const": true },
+        "cannot_raise_above": { "enum": ["act_with_approval"],
+          "description": "Break-glass never grants unattended action." },
+        "notifies":       { "type": "array", "items": { "type": "string" } },
+        "auto_postmortem": { "const": true }
+      }
+    }
+  }
+}
+```
+
+---
+
+## 3. Evaluation semantics
+
+Deterministic, in this order. Written as pseudocode because the ordering is the actual specification:
+
+```
+evaluate(verdict, action):
+
+  1.  schema_valid(verdict, action)            else BLOCK(schema_violation)
+  2.  resolve environment from authority       else environment = "unknown"
+  3.  tier = tier_matrix.lookup(
+              confidence_band, environment, risk_tier,
+              blast_radius_scope, time_of_day)
+      tier = min(tier, ceiling.global,
+                       ceiling.by_environment[env],
+                       ceiling.by_agent[agent],
+                       action_class.max_tier)
+
+  4.  for each rule where when(...) matches:          # order irrelevant
+        block            -> BLOCK(rule_id)            # terminal, short-circuit
+        downgrade_to      -> tier = min(tier, rule.downgrade_to)
+        require_precond   -> collect
+        require_approval  -> collect
+        annotate          -> collect
+
+  5.  for each collected precondition:
+        result = query(authority, max_staleness_s)     # live, not from verdict
+        unsatisfied      -> BLOCK(precondition_failed, check)
+        lookup_failed    -> BLOCK(precondition_unavailable, check)   # fail closed
+
+  6.  budgets: reserve(action) atomically
+        exhausted -> on_exhaustion (BLOCK | tier = suggest)
+
+  7.  if tier >= act_with_approval and approval required:
+        approval_valid_for_this_action_id?  else BLOCK(approval_missing)
+
+  8.  if tier in {observe, suggest}: ALLOW_AS_PROPOSAL
+      else:                          ALLOW_WITH_TIER(tier)
+
+  9.  write decision record, always, both paths
+```
+
+Three things worth calling out:
+
+**Step 4 is order-independent.** Because `downgrade_to` uses `min()` and `block` short-circuits, you get the same answer regardless of rule order. `priority` exists only so the decision record can name the *most specific* rule for human reading.
+
+**Step 5 runs after step 4** on purpose. Rules determine which preconditions apply; you don't want to pay for live SLO lookups on actions a rule already blocked.
+
+**Step 6 reserves rather than checks.** Two agents evaluating concurrently against a budget of one will both see capacity if you only read. Reserve with a TTL, confirm on execution, release on failure.
+
+---
+
+## 4. `guardrail-decision.json` — the audit record
+
+Written on every evaluation, including allows. This is the artefact you'll actually be asked for after an incident.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autoops/schemas/guardrail-decision.json",
+  "type": "object",
+  "required": ["decision_id", "evaluated_at", "policy_version", "verdict_ref",
+               "action_ref", "outcome", "granted_tier", "rules_fired"],
+  "properties": {
+    "decision_id":    { "type": "string", "format": "uuid" },
+    "evaluated_at":   { "type": "string", "format": "date-time" },
+    "policy_id":      { "type": "string" },
+    "policy_version": { "type": "string" },
+    "evaluation_ms":  { "type": "integer" },
+
+    "verdict_ref": {
+      "type": "object",
+      "properties": {
+        "verdict_id":     { "type": "string", "format": "uuid" },
+        "agent":          { "type": "string" },
+        "requested_tier": { "type": "string" },
+        "confidence":     { "type": "number" }
+      }
+    },
+
+    "action_ref": {
+      "type": "object",
+      "properties": {
+        "action_id":    { "type": "string" },
+        "type":         { "type": "string" },
+        "action_class": { "type": "string" },
+        "resource_refs":{ "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "resolved_context": {
+      "type": "object",
+      "description": "What the engine determined independently of the agent's claims.",
+      "properties": {
+        "environment":        { "type": "string" },
+        "environment_source": { "enum": ["tag", "cluster", "account_map", "unresolved"] },
+        "risk_tier":          { "type": "string" },
+        "blast_radius_scope": { "type": "string" },
+        "time_of_day":        { "type": "string" },
+        "service_tier":       { "type": "integer" }
+      }
+    },
+
+    "outcome": { "enum": ["allow", "allow_as_proposal", "block", "pending_approval", "pending_canary"] },
+
+    "granted_tier": { "enum": ["observe", "suggest", "act_with_approval", "act_and_notify"] },
+
+    "tier_derivation": {
+      "type": "object",
+      "properties": {
+        "matrix_cell_tier":  { "type": "string" },
+        "ceilings_applied":  { "type": "array", "items": { "type": "string" } },
+        "downgrades_applied": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": { "type": "string" },
+              "to_tier": { "type": "string" }
+            }
+          }
+        },
+        "final_tier": { "type": "string" }
+      },
+      "description": "Reconstructs the arithmetic. Required for any post-incident 'why did it act' question."
+    },
+
+    "rules_fired": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "effect"],
+        "properties": {
+          "rule_id":   { "type": "string" },
+          "effect":    { "type": "string" },
+          "matched_on":{ "type": "array", "items": { "type": "string" } },
+          "immutable": { "type": "boolean" }
+        }
+      }
+    },
+
+    "preconditions_evaluated": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "authority", "satisfied"],
+        "properties": {
+          "check":        { "type": "string" },
+          "authority":    { "type": "string" },
+          "satisfied":    { "type": "boolean" },
+          "observed_value": {},
+          "staleness_s":  { "type": "integer" },
+          "agent_claimed":{ "type": "boolean",
+            "description": "Recorded for drift detection only. Divergence from 'satisfied' is a bug worth alerting on." }
+        }
+      }
+    },
+
+    "budget_state": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "budget_id":     { "type": "string" },
+          "consumed":      { "type": "integer" },
+          "max_actions":   { "type": "integer" },
+          "reservation_id":{ "type": "string" },
+          "reservation_ttl_s": { "type": "integer" }
+        }
+      }
+    },
+
+    "approval": {
+      "type": "object",
+      "properties": {
+        "required":    { "type": "boolean" },
+        "approvers":   { "type": "array", "items": { "type": "string" } },
+        "quorum_met":  { "type": "boolean" },
+        "granted_at":  { "type": "string", "format": "date-time" },
+        "expires_at":  { "type": "string", "format": "date-time" },
+        "bound_action_id": { "type": "string" }
+      }
+    },
+
+    "break_glass": {
+      "type": "object",
+      "properties": {
+        "active":      { "type": "boolean" },
+        "session_id":  { "type": "string" },
+        "authorised_by": { "type": "array", "items": { "type": "string" } },
+        "expires_at":  { "type": "string", "format": "date-time" },
+        "immutable_rules_still_enforced": { "const": true }
+      }
+    },
+
+    "block_reason": {
+      "type": "object",
+      "properties": {
+        "code": { "enum": [
+          "default_deny", "rule_block", "precondition_failed", "precondition_unavailable",
+          "budget_exhausted", "approval_missing", "approval_expired",
+          "schema_violation", "engine_timeout", "authority_unreachable"
+        ]},
+        "detail":           { "type": "string" },
+        "operator_guidance":{ "type": "string" },
+        "appealable":       { "type": "boolean" }
+      }
+    },
+
+    "post_execution": {
+      "type": "object",
+      "description": "Backfilled by the executor. Closes the loop for reversal.",
+      "properties": {
+        "executed":         { "type": "boolean" },
+        "change_event_id":  { "type": "string" },
+        "verification_verdict_id": { "type": "string" },
+        "reverted":         { "type": "boolean" },
+        "revert_reason":    { "type": "string" }
+      }
+    }
+  },
+
+  "allOf": [
+    { "if":   { "properties": { "outcome": { "const": "block" } } },
+      "then": { "required": ["block_reason"] } },
+    { "if":   { "properties": { "outcome": { "const": "allow" } } },
+      "then": { "required": ["preconditions_evaluated", "budget_state"] } }
+  ]
+}
+```
+
+`agent_claimed` next to `satisfied` is deliberate. Alert on divergence — when an agent's self-assessment stops matching the authority's answer, either the agent has a bug or its context source has drifted, and both are worth knowing before the guardrail is the only thing standing between you and an outage.
+
+---
+
+## 5. Worked policy instance
+
+Covering the three agents from earlier. This is what the file actually looks like in your repo.
+
+```json
+{
+  "policy_id": "autoops-core",
+  "version": "1.4.0",
+  "owner_team": "platform-sre",
+  "as_code_path": "policies/autoops-core.json",
+  "default_decision": "block",
+  "fail_mode": "closed",
+  "evaluation_timeout_ms": 750,
+
+  "tier_matrix": {
+    "dimensions": ["confidence_band", "environment", "risk_tier"],
+    "cells": [
+      { "match": { "confidence_band": ["very_high"], "environment": ["dev","test"],    "risk_tier": ["low"] },          "granted_tier": "act_and_notify" },
+      { "match": { "confidence_band": ["high","very_high"], "environment": ["staging"], "risk_tier": ["low","medium"] }, "granted_tier": "act_and_notify" },
+      { "match": { "confidence_band": ["very_high"], "environment": ["prod"],          "risk_tier": ["low"] },          "granted_tier": "act_with_approval" },
+      { "match": { "confidence_band": ["high"],      "environment": ["prod"],          "risk_tier": ["low","medium"] }, "granted_tier": "suggest" },
+      { "match": { "confidence_band": ["medium"],    "environment": ["prod","staging"] },                               "granted_tier": "suggest" },
+      { "match": { "confidence_band": ["low"] },                                                                        "granted_tier": "observe" }
+    ],
+    "ceiling": {
+      "global": "act_and_notify",
+      "by_environment": { "prod": "act_with_approval" },
+      "by_agent": {
+        "alert-quality": "suggest",
+        "finops":        "act_with_approval",
+        "escalation-routing": "act_and_notify"
+      },
+      "unknown_environment": "suggest"
+    }
+  },
+
+  "action_classes": {
+    "alert_rule_mutation":  { "reversibility": "trivial", "default_risk_tier": "medium", "max_blast_radius": "service" },
+    "capacity_change":      { "reversibility": "trivial", "default_risk_tier": "medium", "max_blast_radius": "workload" },
+    "telemetry_config":     { "reversibility": "reversible_with_state_loss", "default_risk_tier": "high", "max_blast_radius": "service" },
+    "stateful_deletion":    { "reversibility": "irreversible", "default_risk_tier": "high", "max_blast_radius": "none" },
+    "notification_dispatch":{ "reversibility": "irreversible", "default_risk_tier": "low", "max_blast_radius": "none", "requires_verification": false }
+  },
+
+  "rules": [
+    {
+      "rule_id": "GR-001-stateful-deletion",
+      "description": "Irreversible deletion of stateful resources is never automated.",
+      "effect": "downgrade_to",
+      "downgrade_to": "suggest",
+      "immutable": true,
+      "when": { "action_classes": ["stateful_deletion"] }
+    },
+    {
+      "rule_id": "GR-002-compliance-alerts",
+      "description": "Compliance-mandated alert rules cannot be modified by an agent.",
+      "effect": "block",
+      "immutable": true,
+      "when": {
+        "action_classes": ["alert_rule_mutation"],
+        "resource_selector": { "compliance_flagged": true }
+      }
+    },
+    {
+      "rule_id": "GR-010-freeze",
+      "description": "No mutation during change freeze.",
+      "effect": "block",
+      "when": { "temporal": { "change_freeze_active": true } }
+    },
+    {
+      "rule_id": "GR-011-open-incident",
+      "description": "No cost or capacity action against a service with an open incident.",
+      "effect": "block",
+      "when": {
+        "agents": ["finops"],
+        "temporal": { "open_incident_on_service": true }
+      }
+    },
+    {
+      "rule_id": "GR-012-partial-billing",
+      "description": "Partial or revised billing data cannot authorise action.",
+      "effect": "downgrade_to",
+      "downgrade_to": "observe",
+      "when": {
+        "agents": ["finops"],
+        "verdict_flags": { "data_is_partial": true }
+      }
+    },
+    {
+      "rule_id": "GR-013-unattributed-spike",
+      "description": "A spend anomaly nobody can explain is weaker evidence, not stronger.",
+      "effect": "downgrade_to",
+      "downgrade_to": "suggest",
+      "when": { "agents": ["finops"], "verdict_flags": { "unattributed": true } }
+    },
+    {
+      "rule_id": "GR-014-scale-down-slo",
+      "description": "Scale-down requires live SLO headroom and prior nonprod validation.",
+      "effect": "require_precondition",
+      "when": { "action_types": ["scale_down_replicas", "resize_requests", "reduce_sampling", "reduce_retention"] },
+      "require": {
+        "preconditions": [
+          { "check": "slo_headroom_available", "authority": "slo-service",      "max_staleness_s": 60,  "on_lookup_failure": "block" },
+          { "check": "no_open_incident",       "authority": "incident-store",   "max_staleness_s": 30,  "on_lookup_failure": "block" },
+          { "check": "nonprod_validated_first","authority": "change-log",       "max_staleness_s": 86400, "on_lookup_failure": "block" }
+        ],
+        "canary": { "environment_order": ["staging", "prod"], "soak_seconds": 1800, "verification_agent_must_pass": true }
+      }
+    },
+    {
+      "rule_id": "GR-020-alert-retire",
+      "description": "Rule retirement is proposal-only and needs sample floor plus PR review.",
+      "effect": "downgrade_to",
+      "downgrade_to": "suggest",
+      "when": { "action_types": ["retire", "demote_to_ticket"] },
+      "require": {
+        "preconditions": [
+          { "check": "min_sample_met", "authority": "alert-history-store", "on_lookup_failure": "block" }
+        ]
+      }
+    },
+    {
+      "rule_id": "GR-030-tier1-service",
+      "description": "Tier-1 services always require human approval.",
+      "effect": "downgrade_to",
+      "downgrade_to": "act_with_approval",
+      "when": { "resource_selector": { "service_tier_at_most": 1 } },
+      "require": {
+        "approval": { "approver_role": ["service-owner", "sre-oncall"], "quorum": 1, "exclude_requester": true, "ttl_s": 900, "reusable": false }
+      }
+    },
+    {
+      "rule_id": "GR-031-off-hours-prod",
+      "description": "Unattended prod action is business-hours only.",
+      "effect": "downgrade_to",
+      "downgrade_to": "act_with_approval",
+      "when": { "environments": ["prod"], "temporal": { "off_hours": true } }
+    },
+    {
+      "rule_id": "GR-040-fallback-verdict",
+      "description": "A fallback verdict is an admission of uncertainty. It never acts.",
+      "effect": "downgrade_to",
+      "downgrade_to": "observe",
+      "when": { "verdict_flags": { "is_fallback": true } }
+    },
+    {
+      "rule_id": "GR-050-page-delivery",
+      "description": "Page dispatch is exempt from blocking. Suppression is decided by the routing agent and audited there, never silently by this engine.",
+      "effect": "annotate",
+      "immutable": true,
+      "when": { "agents": ["escalation-routing"], "action_classes": ["notification_dispatch"] }
+    },
+    {
+      "rule_id": "GR-051-exec-notification",
+      "description": "Executive and status-page notification needs approval.",
+      "effect": "require_approval",
+      "when": { "agents": ["escalation-routing"], "action_types": ["status_page", "exec_notify"] },
+      "require": { "approval": { "approver_role": ["incident-commander"], "quorum": 1, "ttl_s": 600 } }
+    }
+  ],
+
+  "budgets": [
+    { "budget_id": "finops-prod-hourly",   "scope": { "agent": "finops", "environment": "prod" }, "window_s": 3600, "max_actions": 5,  "max_affected_resources": 5, "on_exhaustion": "block" },
+    { "budget_id": "finops-nonprod-hourly","scope": { "agent": "finops", "environment": "dev" },  "window_s": 3600, "max_actions": 50, "on_exhaustion": "downgrade_to_suggest" },
+    { "budget_id": "alert-rule-daily",     "scope": { "agent": "alert-quality", "action_class": "alert_rule_mutation" }, "window_s": 86400, "max_actions": 10, "on_exhaustion": "block" },
+    { "budget_id": "telemetry-config-daily","scope": { "action_class": "telemetry_config" }, "window_s": 86400, "max_actions": 2, "on_exhaustion": "block", "reset_requires_human": true },
+    { "budget_id": "pages-per-incident",   "scope": { "agent": "escalation-routing", "action_class": "notification_dispatch" }, "window_s": 900, "max_actions": 12, "on_exhaustion": "downgrade_to_suggest" }
+  ],
+
+  "break_glass": {
+    "enabled": true,
+    "max_duration_s": 1800,
+    "requires_roles": ["sre-lead", "incident-commander"],
+    "quorum": 2,
+    "cannot_override_immutable_rules": true,
+    "cannot_raise_above": "act_with_approval",
+    "notifies": ["#incidents", "security-audit"],
+    "auto_postmortem": true
+  }
+}
+```
+
+`GR-050` is the odd one and worth explaining. Page dispatch must not be blockable by this engine, because a guardrail bug would then silently drop pages — the exact failure the routing agent's `delivery_guarantee` exists to prevent. Suppression decisions stay inside the routing agent where they're recorded with a `rule_id`. Two layers deciding independently not to page is how incidents go unnoticed for forty minutes.
+
+---
+
+## 6. Testing the policy
+
+The policy is code, so it gets tests. A minimal harness shape:
+
+```json
+{
+  "test_id": "finops-cannot-scale-prod-during-incident",
+  "given": {
+    "verdict": { "agent": "finops", "confidence": 0.94, "confidence_band": "very_high" },
+    "action":  { "type": "scale_down_replicas", "action_class": "capacity_change" },
+    "context": { "environment": "prod", "open_incident_on_service": true, "risk_tier": "low" }
+  },
+  "expect": {
+    "outcome": "block",
+    "block_reason.code": "rule_block",
+    "rules_fired[*].rule_id": ["GR-011-open-incident"]
+  }
+}
+```
+
+The cases I'd insist on before this goes near production:
+
+- Every `immutable` rule has a test proving break-glass doesn't lift it
+- Unknown environment resolves to `suggest`, never higher
+- Every precondition authority has a test where lookup fails → block
+- Budget exhaustion under concurrent reservation
+- An approval from the requesting identity is rejected
+- An approval bound to action A is rejected for action B
+- A fallback verdict at confidence 0.99 still lands on `observe`
+- The empty policy (no matching rule) blocks
+
+That last one catches the regression that matters most — someone refactors the matcher, nothing matches any more, and without the test the system fails open while every dashboard looks green.
+
+---
+
+If it's useful I can write the executor contract next — reservation confirm/release, the verification handoff, and automatic revert on failed verification — or put the whole schema set into a doc you can iterate on.
+
+@@@@@SPLIT@@@@@
+
+Agreed on sequencing — reservation/confirm/release in front of a door that only opens for a human is ceremony. Here's the store.
+
+## Model
+
+Three concepts, and conflating any two of them is where this usually goes wrong:
+
+- **Verdict** — one emission from one agent run. Immutable, disposable after ingest.
+- **Observation** — an accepted verdict, persisted. Append-only.
+- **Finding** — the durable entity keyed by `idempotency_key`, carrying lifecycle state, dismissal, and counters. Mutable head over an append-only tail.
+
+`POST /findings` takes a verdict and returns what it did with it. The agent side becomes testable the moment that disposition is explicit.
+
+---
+
+## 1. Schema
+
+```sql
+CREATE TYPE finding_state AS ENUM (
+  'open', 'acknowledged', 'suppressed', 'resolved', 'stale', 'superseded'
+);
+
+CREATE TYPE actor_kind AS ENUM ('human', 'agent', 'system');
+
+CREATE TABLE finding (
+  finding_id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id               text        NOT NULL,
+
+  -- identity
+  idempotency_key         text        NOT NULL,
+  idempotency_key_version smallint    NOT NULL,
+  content_hash            text        NOT NULL,
+
+  -- provenance
+  agent_name              text        NOT NULL,
+  agent_version           text        NOT NULL,
+  category                text        NOT NULL,      -- finding.type
+
+  -- subject
+  subject_kind            text        NOT NULL,
+  subject_id              text        NOT NULL,
+  service_ref             text,
+  environment             text        NOT NULL DEFAULT 'unknown',
+
+  -- scoring (denormalised from payload for query)
+  severity                text,
+  risk_tier               text,
+  confidence              numeric(4,3),
+  confidence_band         text,
+  priority_score          numeric(12,4),
+
+  -- lifecycle
+  state                   finding_state NOT NULL DEFAULT 'open',
+  state_reason            text,
+  first_seen_at           timestamptz NOT NULL,
+  last_seen_at            timestamptz NOT NULL,
+  last_material_change_at timestamptz NOT NULL,
+  state_changed_at        timestamptz NOT NULL,
+  updated_at              timestamptz NOT NULL,
+
+  -- counters
+  occurrence_count        integer     NOT NULL DEFAULT 1,
+  episode_count           integer     NOT NULL DEFAULT 1,
+  material_change_count   integer     NOT NULL DEFAULT 0,
+
+  -- current body
+  head_observation_id     uuid,
+  payload                 jsonb       NOT NULL,
+
+  -- provenance of the run that last touched it
+  last_run_id             uuid,
+
+  CONSTRAINT finding_identity
+    UNIQUE (tenant_id, idempotency_key, idempotency_key_version)
+);
+
+CREATE INDEX finding_worklist ON finding
+  (tenant_id, service_ref, priority_score DESC)
+  WHERE state IN ('open', 'acknowledged');
+
+CREATE INDEX finding_cursor ON finding (tenant_id, updated_at, finding_id);
+
+CREATE INDEX finding_by_subject ON finding (tenant_id, subject_kind, subject_id);
+
+CREATE INDEX finding_reaper ON finding (tenant_id, agent_name, last_seen_at)
+  WHERE state IN ('open', 'acknowledged', 'suppressed');
+```
+
+Observations, partitioned because this is the table that grows:
+
+```sql
+CREATE TABLE finding_observation (
+  observation_id  uuid        NOT NULL DEFAULT gen_random_uuid(),
+  tenant_id       text        NOT NULL,
+  finding_id      uuid        NOT NULL,
+  verdict_id      uuid        NOT NULL,
+  run_id          uuid,
+  agent_version   text        NOT NULL,
+  observed_at     timestamptz NOT NULL,
+  content_hash    text        NOT NULL,
+  is_material     boolean     NOT NULL,
+  payload         jsonb       NOT NULL,
+  PRIMARY KEY (observed_at, observation_id)
+) PARTITION BY RANGE (observed_at);
+
+-- exact-verdict replay protection, independent of finding identity
+CREATE UNIQUE INDEX observation_verdict_uniq
+  ON finding_observation (tenant_id, verdict_id, observed_at);
+```
+
+Suppressions — dismissal is a first-class record, not a flag on the finding:
+
+```sql
+CREATE TYPE suppression_scope AS ENUM (
+  'finding',          -- this one finding
+  'subject_category', -- this category on this subject
+  'service_category', -- this category anywhere on this service
+  'category_global'   -- this category, tenant-wide
+);
+
+CREATE TABLE finding_suppression (
+  suppression_id  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id       text NOT NULL,
+  scope           suppression_scope NOT NULL,
+
+  finding_id      uuid,
+  subject_kind    text,
+  subject_id      text,
+  service_ref     text,
+  category        text,
+
+  reason          text NOT NULL,
+  reason_code     text,
+  created_by      text NOT NULL,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  expires_at      timestamptz,          -- NULL = permanent
+  revoked_at      timestamptz,
+  revoked_by      text,
+
+  survives_material_change boolean NOT NULL DEFAULT false,
+
+  CONSTRAINT scope_targets_coherent CHECK (
+    (scope = 'finding'          AND finding_id  IS NOT NULL) OR
+    (scope = 'subject_category' AND subject_id  IS NOT NULL AND category IS NOT NULL) OR
+    (scope = 'service_category' AND service_ref IS NOT NULL AND category IS NOT NULL) OR
+    (scope = 'category_global'  AND category    IS NOT NULL)
+  )
+);
+
+CREATE INDEX suppression_active ON finding_suppression
+  (tenant_id, scope, category, service_ref, subject_id)
+  WHERE revoked_at IS NULL;
+
+CREATE INDEX suppression_expiry ON finding_suppression (expires_at)
+  WHERE revoked_at IS NULL AND expires_at IS NOT NULL;
+```
+
+State audit, separate from observations because the actors differ:
+
+```sql
+CREATE TABLE finding_transition (
+  transition_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id     text NOT NULL,
+  finding_id    uuid NOT NULL,
+  from_state    finding_state,
+  to_state      finding_state NOT NULL,
+  at            timestamptz NOT NULL DEFAULT now(),
+  actor_kind    actor_kind NOT NULL,
+  actor_ref     text,
+  reason_code   text NOT NULL,
+  detail        text,
+  ref_id        uuid            -- suppression_id | observation_id | decision_id
+);
+
+CREATE INDEX transition_by_finding ON finding_transition (finding_id, at DESC);
+```
+
+And the one that makes the reaper safe:
+
+```sql
+CREATE TABLE agent_run (
+  run_id            uuid PRIMARY KEY,
+  tenant_id         text NOT NULL,
+  agent_name        text NOT NULL,
+  agent_version     text NOT NULL,
+  window_start      timestamptz,
+  window_end        timestamptz,
+  started_at        timestamptz NOT NULL,
+  completed_at      timestamptz,
+  status            text NOT NULL,     -- running | complete | partial | failed
+  subject_scope     jsonb NOT NULL,    -- what this run claims to have covered
+  subjects_evaluated integer,
+  verdicts_emitted  integer
+);
+
+CREATE INDEX run_latest ON agent_run (tenant_id, agent_name, completed_at DESC)
+  WHERE status = 'complete';
+```
+
+Cross-links back to what you already built:
+
+```sql
+ALTER TABLE guardrail_decision ADD COLUMN finding_id uuid;
+ALTER TABLE change_event       ADD COLUMN finding_id uuid;
+```
+
+---
+
+## 2. Write path
+
+Two distinct hashes. `idempotency_key` answers *is this the same finding*. `content_hash` answers *has the substance changed*. Keeping them separate is what lets a dismissed finding stay quiet while its numbers drift, and resurface when they don't just drift.
+
+`content_hash` is computed over the fields that would change a human's decision, bucketed to stop noise:
+
+| Agent | Content hash covers |
+|---|---|
+| alert-quality | `recommendation.type`, normalised `params`, `verdict_class` |
+| finops | `remediation.action`, `risk_tier`, `est_monthly_savings.amount` bucketed to ±25% log bands |
+| escalation | `targets[].team_ref`, `escalation_level`, `suppressed.rule_type` |
+
+The disposition table — this is the contract:
+
+| Incoming | Current state | Disposition | Notify |
+|---|---|---|---|
+| new key | — | `created` | yes, if not suppressed by scope rule |
+| same key, same content | `open` / `acknowledged` | `no_change` (touch only) | no |
+| same key, material change | `open` / `acknowledged` | `updated` | if severity or priority crossed a band |
+| same key, same content | `suppressed`, TTL live | `suppressed` | no |
+| same key, same content | `suppressed`, TTL expired | `reopened` | yes |
+| same key, material change | `suppressed`, TTL live, `survives_material_change = false` | `reopened` | yes |
+| same key, material change | `suppressed`, TTL live, `survives_material_change = true` | `suppressed` | no |
+| same key, any content | `resolved` | `reopened`, `episode_count++` | yes, as regression |
+| same key, any content | `stale` | `reopened` | yes |
+| same `verdict_id` seen before | any | `duplicate_verdict` | no |
+
+Single-statement upsert, because two agent replicas will race:
+
+```sql
+INSERT INTO finding (
+  tenant_id, idempotency_key, idempotency_key_version, content_hash,
+  agent_name, agent_version, category, subject_kind, subject_id,
+  service_ref, environment, severity, risk_tier, confidence,
+  confidence_band, priority_score, first_seen_at, last_seen_at,
+  last_material_change_at, state_changed_at, updated_at, payload, last_run_id
+) VALUES (...)
+ON CONFLICT (tenant_id, idempotency_key, idempotency_key_version) DO UPDATE SET
+  last_seen_at     = EXCLUDED.last_seen_at,
+  occurrence_count = finding.occurrence_count + 1,
+  agent_version    = EXCLUDED.agent_version,
+  last_run_id      = EXCLUDED.last_run_id,
+
+  content_hash = CASE WHEN finding.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                      THEN EXCLUDED.content_hash ELSE finding.content_hash END,
+  payload      = CASE WHEN finding.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                      THEN EXCLUDED.payload ELSE finding.payload END,
+  last_material_change_at = CASE WHEN finding.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                      THEN EXCLUDED.last_seen_at ELSE finding.last_material_change_at END,
+  material_change_count = finding.material_change_count +
+                      CASE WHEN finding.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                      THEN 1 ELSE 0 END,
+
+  episode_count = finding.episode_count +
+                      CASE WHEN finding.state IN ('resolved','stale') THEN 1 ELSE 0 END,
+  updated_at    = EXCLUDED.updated_at
+RETURNING finding_id, state, content_hash, episode_count,
+          (xmax = 0) AS was_insert;
+```
+
+State resolution and the transition row run in the same transaction, driven by the returned `was_insert` and whether `content_hash` moved.
+
+**Don't write an observation on `no_change`.** Alert Quality sweeps every rule nightly and 95% of those are `no_change`; writing an observation each time buys you nothing and costs you a table you have to prune weekly. Write observations only on `created`, `updated` with `is_material = true`, and `reopened`. The head `payload` plus `last_seen_at` covers the rest. If you want a sampled trail, write one non-material observation per finding per week and accept the gap.
+
+---
+
+## 3. Dismissal and TTL
+
+Default TTLs, overridable per dismissal:
+
+| Category | Default TTL | Rationale |
+|---|---|---|
+| `alert_quality` | 90d | rule behaviour changes slowly |
+| `rightsizing` | 30d | utilisation shifts |
+| `waste` | 14d | orphans should be re-checked |
+| `spend_anomaly` | 7d | short-lived by nature |
+| `commitment_coverage` | until expiry date | anchored to a real event |
+| `allocation_gap` | 30d | |
+
+Permanent dismissal (`expires_at IS NULL`) requires an elevated role and a `reason_code` from a closed set — `by_design`, `compensating_control`, `accepted_risk`, `false_positive`. Free-text-only permanent dismissals are how a backlog quietly becomes fiction.
+
+Expiry is handled by a sweeper rather than computed at read, so that `GET` stays a single index scan and the reopen produces a real transition row someone can see:
+
+```sql
+UPDATE finding f SET
+  state = 'open', state_changed_at = now(), updated_at = now(),
+  state_reason = 'suppression_expired'
+FROM finding_suppression s
+WHERE s.finding_id = f.finding_id
+  AND s.revoked_at IS NULL
+  AND s.expires_at <= now()
+  AND f.state = 'suppressed'
+  AND NOT EXISTS (   -- no other live suppression covers it
+    SELECT 1 FROM finding_suppression s2
+    WHERE s2.revoked_at IS NULL
+      AND (s2.expires_at IS NULL OR s2.expires_at > now())
+      AND covers(s2, f)
+  )
+RETURNING f.finding_id;
+```
+
+Scope precedence on ingest: `finding` → `subject_category` → `service_category` → `category_global`. First live match wins, and the winning `suppression_id` goes on the transition row. Without that, nobody can answer why a finding never appeared.
+
+---
+
+## 4. Staleness, and the trap in it
+
+A finding that stops being emitted should close. But absence of a verdict has two causes — the problem went away, or the agent crashed. Reaping on `last_seen_at` alone means an agent outage silently marks your whole backlog resolved, and it looks like a great week.
+
+Reap only against a **completed run whose `subject_scope` covers the finding's subject**:
+
+```sql
+WITH covering_runs AS (
+  SELECT DISTINCT ON (agent_name) agent_name, completed_at, subject_scope
+  FROM agent_run
+  WHERE tenant_id = $1 AND status = 'complete'
+  ORDER BY agent_name, completed_at DESC
+)
+UPDATE finding f SET
+  state = 'stale', state_changed_at = now(), updated_at = now(),
+  state_reason = 'not_reobserved'
+FROM covering_runs r
+WHERE f.tenant_id = $1
+  AND f.agent_name = r.agent_name
+  AND f.state IN ('open', 'acknowledged')
+  AND f.last_seen_at < r.completed_at - interval '1 minute'
+  AND scope_covers(r.subject_scope, f.subject_kind, f.subject_id)
+  AND f.last_seen_at < now() - (
+        SELECT reap_after FROM category_policy WHERE category = f.category)
+RETURNING f.finding_id;
+```
+
+`status = 'partial'` never reaps. A run that covered 40% of subjects tells you nothing about the other 60%.
+
+`stale` and `resolved` are deliberately different states. `resolved` means someone or something acted. `stale` means it stopped being observed and nobody knows why. Collapsing them destroys the only signal that distinguishes "we fixed it" from "it stopped alerting".
+
+---
+
+## 5. API
+
+### `POST /findings`
+
+Accepts one verdict or a batch. `Idempotency-Key` header is HTTP-level retry safety and is a different thing from the body's `idempotency_key` — people conflate these and then wonder why a network retry incremented `occurrence_count`.
+
+```http
+POST /v1/findings
+Idempotency-Key: 3f2a...           # this HTTP call, 24h replay window
+Content-Type: application/json
+
+{ "verdicts": [ <AgentVerdict>, ... ] }   # max 500
+```
+
+```json
+{
+  "accepted": 487,
+  "rejected": 13,
+  "results": [
+    {
+      "verdict_id": "...",
+      "finding_id": "...",
+      "disposition": "reopened",
+      "state": "open",
+      "prior_state": "suppressed",
+      "reason_code": "suppression_expired",
+      "occurrence_count": 14,
+      "episode_count": 2,
+      "is_material": true,
+      "notify": true,
+      "suppressed_by": null
+    },
+    {
+      "verdict_id": "...",
+      "disposition": "rejected",
+      "error": { "code": "schema_violation", "pointer": "/recommendation/params/proposed" }
+    }
+  ]
+}
+```
+
+Partial success returns `207`. Rejecting the whole batch because one verdict is malformed means one bad rule stalls the entire nightly sweep.
+
+`disposition` values: `created`, `updated`, `no_change`, `reopened`, `suppressed`, `duplicate_verdict`, `superseded`, `rejected`.
+
+### `GET /findings`
+
+```
+GET /v1/findings
+  ?state=open,acknowledged           # default: open,acknowledged
+  &agent=finops
+  &category=rightsizing,waste
+  &service_ref=svc-checkout
+  &environment=prod
+  &subject_id=arn:...
+  &severity_at_least=medium
+  &priority_at_least=100
+  &confidence_band=high,very_high
+  &first_seen_after=2026-08-01T00:00:00Z
+  &updated_since=2026-09-19T04:00:00Z   # poller watermark
+  &include_suppressed=false
+  &episode_count_at_least=2             # recurring only
+  &sort=priority_score:desc
+  &limit=100
+  &cursor=eyJ1cGRhdGVkX2F0Ijoi...
+```
+
+```json
+{
+  "items": [ { "finding_id": "...", "...": "..." } ],
+  "next_cursor": "eyJ1cGRhdGVkX2F0Ijoi...",
+  "counts_by_state": { "open": 412, "acknowledged": 38, "suppressed": 156 },
+  "suppressed_excluded": 156
+}
+```
+
+Cursor on `(updated_at, finding_id)`, never offset — the set mutates under you mid-page otherwise. `suppressed_excluded` in every response is deliberate: it's the cheapest way to stop the backlog looking clean because someone dismissed at service scope four months ago.
+
+### Lifecycle
+
+```
+POST   /v1/findings/{id}/acknowledge     { assignee, note }
+POST   /v1/findings/{id}/resolve         { resolution_code, change_event_id?, note }
+POST   /v1/findings/{id}/dismiss         { scope, ttl_days | expires_at, reason_code,
+                                           reason, survives_material_change }
+DELETE /v1/findings/{id}/dismiss         → revokes, reopens if nothing else covers it
+GET    /v1/findings/{id}
+GET    /v1/findings/{id}/observations    ?limit&cursor
+GET    /v1/findings/{id}/transitions
+GET    /v1/findings/{id}/decisions       → guardrail decisions referencing this finding
+POST   /v1/findings/bulk/dismiss         { finding_ids[], ... }   max 200
+```
+
+### Suppression inventory
+
+The endpoint people forget, and then the store starts lying:
+
+```
+GET  /v1/suppressions?scope=&active=true&expiring_within_days=7
+GET  /v1/suppressions/{id}/covered-findings
+POST /v1/suppressions/{id}/revoke
+```
+
+### Runs
+
+```
+POST /v1/runs         { agent_name, agent_version, window, subject_scope }  → run_id
+POST /v1/runs/{id}/complete  { status, subjects_evaluated, verdicts_emitted }
+GET  /v1/runs?agent=&status=&since=
+```
+
+Agents open a run, emit verdicts carrying `run_id`, close it. A run left open past a timeout is marked `failed` and never reaps.
+
+---
+
+## 6. What will break
+
+**Key composition changes.** You froze `idempotency_key` composition at the major version, which is right, but an agent author will eventually change what goes into the hash and every existing finding will silently fork into a duplicate. That's why `idempotency_key_version` is in the unique constraint rather than buried in the payload. Bumping it is a declared migration: run both versions in shadow for one cycle, write `superseded` transitions from old to new via a `finding_link` table, then retire the old version. Detect an undeclared bump by alerting when a single `(subject_id, category)` pair suddenly holds two open findings from the same agent.
+
+**Dismissal scope leakage.** `service_category` dismissals are convenient and quietly enormous. Cap their TTL lower than finding-scope ones (14d, say), require a role, and surface them in the weekly digest by count of findings they're currently hiding.
+
+**Observation growth.** Even with `no_change` suppressed, FinOps at resource granularity will produce millions of rows a year. Monthly partitions, drop after 13 months, and keep the head payload on `finding` so detaching an old partition never breaks the current view.
+
+**Materiality tuning.** Too tight and dismissed findings resurface on every ±2% cost wobble, which trains people to dismiss permanently. Too loose and a finding that grew 10× stays buried. Start with the ±25% log bands above, then measure: if the reopen-then-immediately-redismiss rate exceeds ~15%, the bands are too tight.
+
+**Tenant isolation.** Every index is `tenant_id`-prefixed above; pair that with RLS rather than relying on the query layer, since one missing `WHERE` clause in a reporting endpoint is all it takes.
+
+The shape that matters most: `disposition` in the POST response. Once agents get told what happened to what they emitted, everything downstream — dedupe rates, dismissal churn, materiality tuning, agent drift — becomes measurable instead of anecdotal.
+
+@@@@@SPLIT@@@@@
+
+Good catch on `stable_key: false` — rejecting at the door is more correct than what I described. A verdict that can't produce a stable identity has no business in a table keyed on identity, and quarantining it as a rejection with a reason code keeps the signal (agent is misconfigured) instead of burying it as backlog noise.
+
+The three deviations are all correct calls. The partitioning one especially: at your row count the FK is worth more than the partition, and you can revisit when a retention job starts timing out rather than pre-emptively.
+
+## The DDL gap is the real finding here
+
+`@DataJpaTest` validating Hibernate DDL rather than Flyway isn't a MySQL quirk, it's a permanent hole — every future migration has the same blind spot. Two things worth doing now while it's fresh:
+
+**Testcontainers for the migration path.** One test class, real MySQL image, Flyway runs to head, then assert the schema: index existence, key lengths, charset, nullability. It's slow, so keep it separate from the 71 fast tests and run it on push rather than per-save. The assertion that would have caught 1071 is cheap:
+
+```sql
+SELECT index_name, SUM(sub_part IS NULL AND
+       CASE WHEN data_type IN ('varchar','char')
+            THEN character_maximum_length * 4 ELSE 8 END) AS bytes
+FROM information_schema.statistics s
+JOIN information_schema.columns c USING (table_schema, table_name, column_name)
+WHERE table_schema = DATABASE()
+GROUP BY index_name
+HAVING bytes > 3072;
+```
+
+Run it as a schema invariant after every migration, not just this one.
+
+**Migration rollback rehearsal.** You hand-cleaned a half-applied V6 — dropped tables, deleted the `success=0` row. That worked because V6 was additive and nothing depended on it yet. It won't work once findings hold real data and a migration is half-applied in prod. Worth writing down now: does every migration in this project have to be forward-only with expand/contract, or do you maintain undo scripts? MySQL's lack of transactional DDL makes this decision load-bearing, and deciding it under pressure goes badly.
+
+## On prefix indexes specifically
+
+`subject_id(191)` is fine for the unique constraint on `idempotency_key` — that's a hash, fixed width, high entropy in the first 191 chars. It's less fine for `finding_by_subject` if your subject IDs are ARNs, because ARNs share long prefixes:
+
+```
+arn:aws:ec2:us-east-1:123456789012:volume/vol-0a1b2c3d
+arn:aws:ec2:us-east-1:123456789012:volume/vol-0e4f5g6h
+```
+
+191 chars covers those, but an EKS pod ref or a long resource path could collide past the prefix and turn index lookups into scans over a bucket. Cheap check: `SELECT COUNT(DISTINCT LEFT(subject_id,191)) / COUNT(DISTINCT subject_id)` once you have volume. If it drops below ~0.99, store a `subject_id_hash BINARY(32)` and index that instead, keeping the full `subject_id` as a non-indexed column. Same fix applies to `service_ref` if you ever index it alone.
+
+## Ordering the three unbuilt pieces
+
+Your reasoning on the reaper is right, and it generalises — here's how I'd sequence:
+
+**1. `subject_scope` population.** Blocks the reaper, and it's the piece with the most design left in it. The question you have to answer per agent: what does a run *claim* to have covered? Alert Quality is easy — an explicit rule ID list, or a predicate like `{"kind":"alert_rule","all":true}`. FinOps is harder, because a run over one billing account doesn't cover resources in another, and a run that timed out halfway covered an undefined subset. Two rules that keep this honest:
+
+- `subject_scope` is written at run *start*, as an intention, and narrowed at completion to what was actually evaluated. Never widened.
+- `status: partial` writes the scope it actually covered, and the reaper skips partial runs entirely regardless.
+
+**2. REST layer.** Unblocks everything human-facing: dismissal can't exist without `POST /findings/{id}/dismiss`, and until dismissal exists the TTL machinery you built is untested in anger. Start with `GET /findings`, `POST /findings`, and the dismiss pair. `/observations` and `/transitions` can wait.
+
+**3. Expiry sweeper.** Smallest of the three and independently testable — it only needs suppressions to exist, not runs. Could go before the REST layer if you want a quick win, though without dismissal endpoints you'd be seeding suppressions by hand to test it.
+
+**4. Reaper.** Last, gated on (1) being populated by every agent that writes findings — not most of them. A single agent emitting findings without `subject_scope` means those findings either never reap (backlog grows forever) or reap on a scope that doesn't cover them (silent resolution). Worth an explicit guard in the reaper: skip any `agent_name` whose latest complete run has null or empty `subject_scope`, and emit a metric for it so the gap is visible rather than inferred.
+
+## One thing to add before the REST layer
+
+The dismissal endpoint needs the scope cap decision made before it ships, not after. `service_category` dismissals are the ones that quietly hide hundreds of findings, and retrofitting a role check or a TTL cap after people have created fifty of them means either breaking them or grandfathering a hole. Cheapest version: `service_category` and `category_global` require an elevated role and reject `expires_at = null` outright. Finding-scope and subject-scope dismissals stay open to anyone.
+
+Happy to go deeper on `subject_scope` representation — the predicate language for it is the one part that's hard to change later, since the reaper's `scope_covers()` has to evaluate it cheaply for every candidate finding.
+
+@@@@@SPLIT@@@@@
+
+You're right about the query, and the correction is sharper than the original. MySQL refuses at CREATE, so the post-hoc check can only ever describe a schema that already passed. Reframing at 2400 as headroom makes it a trend alarm rather than a violation detector, which is the only version with a failure mode it can actually catch. 1796 as the current widest is a useful number to have written down.
+
+The migration policy reasoning is the part I'd steal. "An undo script is only correct in the case where you don't need it" is exactly right, and it's the argument people usually can't articulate when they're told forward-only feels reckless.
+
+Now the predicate language. The design constraint you named — `scope_covers()` runs per candidate finding — is the one that decides everything, so I'll start there and work backward.
+
+---
+
+## The constraint, made concrete
+
+The reaper's candidate set is every `open`/`acknowledged` finding for an agent. At steady state that's thousands to tens of thousands. If `scope_covers()` is a row-by-row JSON evaluation in application code, the reaper becomes a nightly full scan plus N deserializations, and it degrades exactly as your backlog grows — worst when you most need it working.
+
+So the real requirement isn't "a predicate language." It's: **the scope must be expressible as a SQL predicate over indexed columns on `findings`.** Everything else follows. Any construct you can't push into a `WHERE` clause is a construct that makes the reaper O(N) in application memory.
+
+That rules out, immediately:
+
+- Regex or glob matching on `subject_id`
+- Arbitrary boolean nesting (`OR` of `AND` of `NOT`)
+- Predicates over fields not denormalized onto `findings`
+- Anything requiring a join to an external system at reap time
+
+## The shape that survives
+
+Three scope kinds, and deliberately no more:
+
+```json
+{ "kind": "all" }
+```
+The run claims to have evaluated every subject this agent owns. Alert Quality's nightly sweep. Coverage predicate is trivially true.
+
+```json
+{
+  "kind": "dimensional",
+  "subject_kind": "cloud_resource",
+  "dimensions": {
+    "environment": ["prod", "staging"],
+    "service_ref": ["svc-checkout", "svc-cart"],
+    "account_id":  ["123456789012"]
+  }
+}
+```
+Conjunction of disjunctions. Each key is a column on `findings`; each value list becomes an `IN`. Absent key means unconstrained on that dimension. This covers ~all real cases: FinOps runs per billing account, per region, per environment.
+
+```json
+{
+  "kind": "enumerated",
+  "subject_kind": "alert_rule",
+  "subject_ids": ["rule-1", "rule-2", ...],
+  "subject_id_count": 847,
+  "subject_ids_digest": "sha256:..."
+}
+```
+An explicit list. Necessary for runs over a hand-picked set, and for narrowing a `dimensional` scope at completion when the run only got partway through.
+
+That's it. No nesting, no negation, no wildcards.
+
+## Why no negation
+
+`{"exclude": {"environment": ["prod"]}}` looks harmless and is the one that will eventually silently resolve your prod backlog. Exclusions are correct only if the exclusion set at reap time matches the exclusion set at run time, and environment tags change. An agent that skipped prod on Monday and a finding retagged to prod on Tuesday produces a scope that claims coverage it never had. Inclusion-only means the claim is always narrower than reality when data drifts, which is the safe direction.
+
+Same reasoning kills wildcards. `svc-*` expands differently as services are created.
+
+## Storage
+
+`subject_scope` stays JSON for the record, but the reaper never reads it row-by-row. Materialize the enumerated case:
+
+```sql
+CREATE TABLE agent_run_subject (
+  run_id        BINARY(16)   NOT NULL,
+  subject_kind  VARCHAR(64)  NOT NULL,
+  subject_id_hash BINARY(32) NOT NULL,   -- sha256 of subject_id, sidesteps prefix-index issue
+  PRIMARY KEY (run_id, subject_kind, subject_id_hash),
+  CONSTRAINT fk_run_subject_run FOREIGN KEY (run_id) REFERENCES agent_runs (run_id)
+) ENGINE=InnoDB;
+```
+
+Add `subject_id_hash BINARY(32)` to `findings` now as a generated-on-write column — you already have the fix documented for the prefix-collision problem, and this makes it load-bearing earlier, which is cheaper than retrofitting it later against volume. Both tables hash the same way and the reaper joins on it.
+
+Then reaping is one statement per kind:
+
+```sql
+-- dimensional
+UPDATE findings f
+JOIN agent_runs r
+  ON  r.agent_name = f.agent_name
+  AND r.tenant_id  = f.tenant_id
+SET f.state = 'STALE',
+    f.state_reason = 'not_reobserved',
+    f.state_changed_at = NOW(6),
+    f.updated_at = NOW(6)
+WHERE r.run_id = ?                       -- the run driving this reap
+  AND r.status = 'COMPLETE'
+  AND f.state IN ('OPEN','ACKNOWLEDGED')
+  AND f.last_seen_at < r.completed_at - INTERVAL 1 MINUTE
+  AND f.last_seen_at < NOW(6) - INTERVAL ? SECOND    -- category reap_after
+  AND f.subject_kind = ?
+  AND f.environment IN (?, ?)            -- expanded from dimensions
+  AND f.service_ref IN (?, ?);
+```
+
+```sql
+-- enumerated
+UPDATE findings f
+JOIN agent_run_subject s
+  ON  s.subject_kind    = f.subject_kind
+  AND s.subject_id_hash = f.subject_id_hash
+JOIN agent_runs r ON r.run_id = s.run_id
+SET ...
+WHERE r.run_id = ? AND r.status = 'COMPLETE' AND ...;
+```
+
+Both are index-driven. No application-side evaluation, no per-finding deserialization. `scope_covers()` stops being a function and becomes a query builder — and that's the actual answer to the constraint you named.
+
+## Narrowing at completion
+
+Your rule was: written at start as intention, narrowed at completion, never widened. Enforcing that in code rather than convention:
+
+**Start** writes the intended scope and `status = RUNNING`. Nothing reaps from a running run, so intention is never load-bearing.
+
+**Completion** writes the actual scope plus `status`. The narrowing check runs as a validation, not a trust:
+
+- `all` → `all`: valid
+- `all` → `dimensional` or `enumerated`: valid (narrowing)
+- `dimensional` → `dimensional` where every dimension's value set is a subset: valid
+- `dimensional` → `enumerated`: valid
+- `enumerated` → `enumerated` where the ID set is a subset: valid
+- anything → `all` when start wasn't `all`: **reject, mark run FAILED**
+- `enumerated` → `dimensional`: reject — can't prove narrowing
+
+The subset check on `enumerated` is why `subject_ids_digest` and `subject_id_count` are in the record. Full set comparison at scale is expensive; count-decreased-or-equal plus digest-changed is a cheap sufficient signal that something narrowed, and you can do the exact subset check only when counts are equal but digests differ (which should mean a bug).
+
+A run that never calls completion gets swept to `status = FAILED` by a timeout job. Failed and partial both never reap, so the default on abandonment is "reap nothing," which is the direction that can't silently clear a backlog.
+
+## The gap metric, made explicit
+
+Your guard — skip any agent whose latest complete run has null or empty scope — needs the complement, or it's invisible:
+
+```sql
+SELECT f.agent_name,
+       COUNT(*) AS unreapable_findings,
+       MIN(f.last_seen_at) AS oldest_unseen
+FROM findings f
+WHERE f.state IN ('OPEN','ACKNOWLEDGED')
+  AND f.last_seen_at < NOW(6) - INTERVAL 7 DAY
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_runs r
+    WHERE r.agent_name = f.agent_name
+      AND r.tenant_id  = f.tenant_id
+      AND r.status     = 'COMPLETE'
+      AND r.subject_scope IS NOT NULL
+      AND r.completed_at > f.last_seen_at
+  )
+GROUP BY f.agent_name;
+```
+
+Emit as a gauge per agent. Nonzero and growing means an agent is producing findings it can never retire, which reads as a healthy backlog right up until someone notices half of it is fiction. This is the metric that tells you whether the reaper is actually covering what it appears to cover — worth having before the reaper ships, not after.
+
+## Migration ordering
+
+Given forward-only and expand/contract, this lands as:
+
+1. **V7** — `agent_run_subject` table; `findings.subject_id_hash BINARY(32) NULL`; backfill is a no-op on an empty table but write the backfill statement anyway so the pattern exists for the next one.
+2. **Agent change** — every agent populates `subject_scope` at start and narrows at completion. Ship to all agents. Watch the gap metric go to zero and stay there through a full cycle of each agent's cadence — Alert Quality nightly is one day, FinOps might be a month for commitment findings.
+3. **V8** — `subject_id_hash NOT NULL` once every writer populates it.
+4. **Reaper** — with the per-agent skip guard and the gap gauge already reporting.
+
+Step 2's soak is the one worth not rushing. The gap metric reading zero for a day proves nightly agents are fine and proves nothing about the monthly ones.
+
+---
+
+One thing I'd flag as genuinely undecided rather than settled: whether `dimensional` scopes need a `subject_kind` at all, or whether an agent can emit findings across multiple subject kinds in one run. Alert Quality is single-kind. FinOps arguably emits against `cloud_resource` and `service` in the same sweep, and if so, a run needs a list of scopes rather than one. That's cheap to support now (`subject_scope` as a JSON array of scope objects, reaper runs one statement per element) and awkward to retrofit once runs exist. Worth deciding before V7 rather than after.
+
+@@@@@SPLIT@@@@@
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Summary:
+## 1. Primary Request and Intent
+
+A long, escalating session building out the agent platform in `D:\AutoOps` (Intertec Systems' managed-services automation platform). The user's requests, in order:
+
+1. **"Lets build some real agents that works in prod too so where shall we build in admin console so that I can roll out to any one..?? What do u say. One word lets build"** — where to author agents in the provider console.
+2. **"Lets build some real agents currently they are 0, build some using langchain, langgraph and lets monitor through langsmith. This is an open-challenge to urself and bring out the best agents."** — explicitly framed as a challenge; user left auto-mode on with full permissions and went away.
+3. **"why only AWS, Microsoft, Azure like that only why cant we think out of the box"** → later sharpened to **"Any real business usecases"**.
+4. **"I cant see in my UI"** (screenshot: empty provider Agents page).
+5. **"Why we are building AWS, Microsoft, Azure like that only why cant we think out of the box like event correlation in AutoOps which makes it as an Agentic Platform"** — strategic pivot request.
+6. **"Do u want the schemass..??"** after supplying three agent specs (Alert Quality, Cost/FinOps, Escalation & Routing).
+7. Supplied six JSON Schema files (AgentVerdict envelope + per-agent + change-event) and a guardrail policy layer.
+8. Supplied a complete findings-store design (Postgres DDL, disposition table, TTLs, staleness reaping, REST API).
+9. Validated the build, identified **the DDL test gap as "the real finding"**, asked for Testcontainers + a migration rollback policy decision, flagged a prefix-index caveat, and sequenced the four unbuilt pieces.
+10. **(Most recent)** Supplied the complete `subject_scope` predicate-language design, ending with one explicitly undecided question to settle before V7.
+
+## 2. Key Technical Concepts
+
+- **agent-runtime** (Python 3.12/FastAPI/LangGraph): stateless `(state, event) → state'` reducer; phase graph TRIAGE→GATHER→HYPOTHESIZE→PLAN→GATE→ACT→VERIFY→REPORT; per-phase tool narrowing; evidence ledger where `agent_run_steps.id` IS the citation `[e:<id>]`
+- **Two agent authoring paths**: JSON agents (persona copied into customer DB) vs Python modules (`kind:PYTHON`, only a ref ships)
+- **Two workflow shapes**: job-step workflows (`pyscript`/`ssh`, run by core-service ExecutionEngine on execution hosts) vs native graph workflows (`start→llm→platform→job→http→end` + edges, run inside agent-runtime)
+- **Credential transport as the real constraint**: `StepCredentials.SCRIPT_PLATFORMS` = AWS/AZURE/GCP only; AZURE connection supplies `AZURE_TENANT_ID`/`CLIENT_ID`/`CLIENT_SECRET` = Microsoft Graph's client-credentials triple
+- **LangSmith tracing**: callbacks attach ONLY at `graph.invoke`; per-call `callbacks=[]` silences tracing entirely
+- **AGENT_COMPONENT delivery**: workflows delivered because an agent needs them are hidden/un-runnable
+- **Verdict/Observation/Finding split**; frozen idempotency-key composition; `content_hash` vs `idempotency_key`
+- **MySQL 8.4 vs Postgres**: no partial indexes, no `RETURNING`/`xmax`, no RLS, no transactional DDL, 3072-byte index key limit, utf8mb4 = 4 bytes/char
+- Flyway migrations; Testcontainers + maven-failsafe (`*IT` in `verify`, not `test`)
+
+## 3. Files and Code Sections
+
+**Frontend**
+- `frontend/src/pages/provider/ProviderAgentBuilder.jsx` (created) — provider agent authoring; writes byte-for-byte the row `publish.py` writes; tools picked from catalog workflows by stable `ref`; `mutating` defaults true
+- `frontend/src/pages/app/AgentsHub.jsx` (restored from git HEAD) — tenant agents page; was deleted when "agents collapsed into workflows"; restored because components are now hidden so this is the ONLY surface a delivered agent has
+- `frontend/src/components/app/AgentRunPanel.jsx` — converted from full-height right-hand drawer to centred `ModalPortal` dialog (`max-w-3xl`, `max-h-[85vh]`, `min-h-0 flex-1`)
+- `frontend/src/components/app/AppLayout.jsx` — added `{ to: \`${b}/agents\`, label: "AI Agents", icon: "robot" }`
+- `frontend/src/components/app/nav.test.js` — pins the AI Agents entry
+
+**agent-runtime (Python)**
+- `agent_runtime/app/tracing.py` (created) — LangSmith; `handlers()`, `graph_config()`, `thread_id()`; credentials never read
+- `agent_runtime/app/verdicts.py` (created) — maps findings to AgentVerdict envelope; key composition frozen as `agent|subject_kind|subject_id|finding_type|window`; `stable_key` flag
+- `agent_runtime/app/state.py` — `Finding` gained `subject_kind`, `subject_id`, `finding_type`; `ReduceResponse.findings`
+- `agent_runtime/graph/phases.py` — added `_render_tool()` giving PLAN the argument contract
+- `agent_runtime/graph/prompts.py` — PROMPT_VERSION `2026-09-19.2`; HYPOTHESIZE asks for subject/type
+- `agent_runtime/app/evidence.py` — `_EXEMPT` gained `r"|,\s*not\b"` for comma-negated hedges
+- `agent_runtime/workflows/spec.py` + `nodes.py` — `NodeType.PLATFORM`, `run_platform`, `window_hours: int | str`, `NodeContext.project_id`
+- 8 agents registered in `agent_runtime/agents/__init__.py`; 8 golden cases in `evals/golden/`
+
+**agent-service (Java) — the findings store**
+- `src/main/resources/db/migration/V6__findings.sql` — `findings`, `finding_observations`, `finding_suppressions`, `finding_transitions`; `ALTER TABLE agent_runs ADD subject_scope JSON, subjects_evaluated INT, verdicts_emitted INT`; prefix indexes `subject_id(191)`
+- `domain/Finding.java`, `FindingObservation.java`, `FindingSuppression.java` (with `Scope`, `ReasonCode`, `covers()`), `FindingTransition.java`
+- `service/FindingIngestService.java` — the disposition engine (CREATED/UPDATED/NO_CHANGE/REOPENED/SUPPRESSED/DUPLICATE_VERDICT/REJECTED); rejects `stable_key:false`; no observation on NO_CHANGE; narrowest-suppression-wins
+- `service/SuppressionPolicy.java` (created) — wide scopes (SERVICE_CATEGORY/CATEGORY_GLOBAL) need ADMIN/OWNER/PROVIDER, can never be permanent, 14d ceiling vs 365d for FINDING scope; DEFERRED always needs an expiry
+- `src/test/java/.../SchemaInvariantsIT.java` — Testcontainers `mysql:8.4`, Flyway to head; `KEY_LIMIT_BYTES=3072`, `HEADROOM_WARN_BYTES=2400`
+- `backend/MIGRATIONS.md` (created) — forward-only, no undo scripts, expand/contract, recovery procedure
+
+**core-service**
+- `service/PlatformTimelineService.java` (created) — runs + approvals for (tenant, project, window) with server-side counts and repeat-failure detection
+- `RolloutService.deliverComponents()` — auto-delivers an agent's missing tools as AGENT_COMPONENT
+- `RunService.tenantVisible()` — throws `workflow_not_found` for components
+
+**workflow-service**
+- `V4__agent_component_delivery.sql` — `delivery ENUM('PRODUCT','AGENT_COMPONENT')`; both unique indexes gained `delivery`
+
+## 4. Errors and Fixes
+
+1. **Heredocs mangle backslashes** — `<<'EOF'` still collapsed `\\n` → newline, and large quoted content failed with "unexpected EOF". Fixed by using raw strings (`r'''...'''`) or the Write tool.
+2. **Windows/Git Bash path mismatch** — `/tmp/...` resolves differently for Git Bash vs Windows Python. Fixed with repo-relative paths; `MSYS_NO_PATHCONV=1` for docker volume mounts.
+3. **Piped exit-code trap** — `echo "EXIT=$?"` after `| grep` captured grep's status. Fixed by redirecting to a log then grepping separately.
+4. **`plan()` never showed input_schema** — every gated action would have failed `NativeInputValidator`. Fixed with `_render_tool()`.
+5. **`callbacks=[]` silenced tracing** — proved empirically with a 3-way probe. Fixed by attaching only at `graph.invoke`.
+6. **Fixed-grid alarm clustering split adjacent alarms** — 12:39 and 12:41 landed in different buckets. Rewrote as gap-based clustering (`CLUSTER_GAP_MINUTES = 10`). Caught by my own test.
+7. **Evidence auditor flagged its own hedge twice, then a third time** — "that is a sequence, not a cause" is the exact sentence the RCA persona demands. First two times I reworded; the third time I extended `_EXEMPT`.
+8. **`--dry-run` mistaken for publishing** — nothing was ever written; the user's empty UI was the symptom. Published for real via `--print-sql`.
+9. **`localhost:5173` is the Docker container, not a dev server** — all my frontend changes were in `dist/` and never in the image. I'd wrongly told the user to "just refresh". Rebuilt `autoops-frontend`.
+10. **`notify` is an illegal Java record component** (clashes with `Object.notify()`) → renamed `shouldNotify`.
+11. **Unused `ObjectMapper`** broke `@DataJpaTest` → removed rather than stubbed.
+12. **MySQL error 1071 on the live DB after 18 green H2 tests** — `subject_id VARCHAR(512)` = 2048 bytes; two composites exceeded 3072. Fixed with prefix indexes; cleaned the half-applied migration (dropped tables, `DELETE FROM flyway_schema_history WHERE success=0`).
+13. **Testcontainers cannot run locally** — Docker Desktop's socket proxy answers `/info` with 400. Validated every invariant by hand against the live schema instead.
+
+**Key user feedback incorporated:**
+- Audits are hygiene; correlation/RCA is what an MSP sells → built `aws.incident_rca_analyst`
+- Vendor-specific agents make it a script catalog, not an agentic platform → built `autoops.activity_correlator`
+- Workflows and agents are sold separately → built AGENT_COMPONENT hiding
+- UI "not looking good, bring it centre" → centred the run panel
+- The user validated my `stable_key:false` rejection as "more correct than what I described"
+
+## 5. Problem Solving
+
+Established: the domain limit is credential transport, not cloud choice. Closed the commercial hole where agent dependencies arrived as free, runnable products. Made findings deduplicable end-to-end (runtime emits verdicts → store assigns dispositions). Closed the permanent DDL blind spot where `@DataJpaTest` validates Hibernate DDL rather than Flyway.
+
+**Correction I made to the user's own design:** their byte-sum invariant query is **tautological on MySQL**. I proved it — `CREATE INDEX idx_too_big ON t (a, b)` with two `VARCHAR(512)` columns returns `ERROR 1071` and creates nothing. A violating schema can never exist to be queried; the migration failing IS the detection. Reframed as a headroom warning at 2400 bytes (widest index today: `idx_findings_fork_watch` at 1796 = 58% of budget).
+
+## 6. All User Messages
+
+1. "Lets build some real agents that works in prod too so where shall we build in admin console so that I can roll out to any one..?? What do u say. One word lets build"
+2. "Lets build some real agents currently they are 0 , build some using langchain , langgraph and lets monitor through langsmith . Understand and at last I will. This is an open-challenge challenge to urself and bring out the best agents . I will be waiting. I will comeback soon and I kept automode and in agent-branch as well . I gave u full permissions. Understand"
+3. "why only AWS , Microsoft , Azure like that only why cant we think out of the box like event correlation in AutoOps which makes it as an Agentic Platform" *(first framing)* / "Any real business usecases to execute why cloud specific and also rebuild docker"
+4. "I cant see in my UI" *(screenshot of empty provider Agents page)*
+5. "built docker image..??"
+6. "see ui is not looking good bring it centre so it looks professional" *(screenshot of the right-hand drawer)*
+7. "Why we are building AWS , Microsoft , Azure like that only why cant we think out of the box like event correlation in AutoOps which makes it as an Agentic Platform"
+8. "Intertec Systems — Roll out RD-210-cloudwatch-alarm-state-audit, RD-211-cloudtrail-change-timeline to this project first — this agent cannot work without it"
+9. "see whenever i rollout agents workflows should be hidden right we are providing workflows , agents separaretly right if customers ask i dont asked for this workflow how it came to my environment what should i answer"
+10. Three agent specs (Alert Quality / FinOps / Escalation) ending "Do u want the schemass..??"
+11. Six JSON schemas + guardrail policy layer
+12. The findings store design (Postgres DDL, disposition table, TTLs, staleness reaping, REST API, "What will break")
+13. Validation + "The DDL gap is the real finding here" + Testcontainers + migration rollback policy + prefix-index caveat + sequencing of the 4 unbuilt pieces + scope-cap-before-REST
+14. **(Most recent)** The `subject_scope` predicate language design, ending: *"One thing I'd flag as genuinely undecided rather than settled: whether `dimensional` scopes need a `subject_kind` at all, or whether an agent can emit findings across multiple subject kinds in one run. Alert Quality is single-kind. FinOps arguably emits against `cloud_resource` and `service` in the same sweep, and if so, a run needs a list of scopes rather than one. That's cheap to support now (`subject_scope` as a JSON array of scope objects, reaper runs one statement per element) and awkward to retrofit once runs exist. Worth deciding before V7 rather than after."*
+
+**Security-relevant constraints (preserve verbatim):**
+- "No mock data" — honest empty states over anything fabricated
+- The provider password is deliberately not recorded; "Do not write credentials into memory files"
+- A string input's declared `pattern` IS the injection control — `NativeInputValidator` enforces it and substitution does no escaping
+- Tenant model credentials must never reach LangSmith
+- Agent personas must never be serialised to a customer
+- userEmail `aitools@intertecsys.com` — identify the user only; never send to unrelated services
+
+## 7. Pending Tasks
+
+Per the user's own sequencing:
+1. **`subject_scope` population** — decide the array question, then V7 (`agent_run_subject` table, `findings.subject_id_hash BINARY(32) NULL`), then agents populate at start / narrow at completion
+2. **REST layer** — `GET /findings` (cursor on `(updated_at, id)`), `POST /findings` (batch ≤500, 207 partial), dismiss/revoke pair
+3. **Expiry sweeper**
+4. **Reaper** — gated on (1) being populated by *every* agent, with per-agent skip guard + gap gauge
+5. V8 — `subject_id_hash NOT NULL` once every writer populates it
+
+## 8. Current Work
+
+Answering the user's one explicitly undecided question before V7: whether `subject_scope` should be a single object or a JSON **array** of scope objects.
+
+I ran one investigation whose results I have:
+- The HYPOTHESIZE prompt vocabulary is **five** subject kinds: `cloud_resource, service, alert_rule, principal, account`
+- `public_exposure_auditor` correlates `RD-149-s3-public-access-audit` + `RD-137-security-group-ingress-audit` + `RD-145-iam-credential-hygiene-audit` — buckets and security groups are `cloud_resource`, IAM users are `principal`
+- `offboarding_auditor` correlates `RD-201-m365-licence-assignment-audit` + `RD-203-m365-mailbox-rule-audit` — principals plus mailbox rules
+- `idle_resource_reclaimer` uses `RD-136` + `RD-142` — volumes only, genuinely single-kind
+
+**The empirical answer is decided: YES — shipped agents already emit across multiple subject kinds in one run, so `subject_scope` must be a JSON array of scope objects.** The public exposure auditor's entire value proposition is the correlation *across* kinds (a public bucket reachable through an open port with a stale key), so single-kind scope would be wrong for the flagship read-only agent. I had not yet delivered this answer or started V7 when the summary was requested.
+
+## 9. Optional Next Step
+
+Deliver the array decision with the evidence above, then build **V7** as the user sequenced it: *"**V7** — `agent_run_subject` table; `findings.subject_id_hash BINARY(32) NULL`; backfill is a no-op on an empty table but write the backfill statement anyway so the pattern exists for the next one."*
+
+Concretely: `V7__subject_scope.sql` per `backend/MIGRATIONS.md` (forward-only, expand/contract), plus a `SubjectScope` value type implementing the user's narrowing-validation rules — *"`all` → `all`: valid; `all` → `dimensional` or `enumerated`: valid (narrowing); … anything → `all` when start wasn't `all`: **reject, mark run FAILED**; `enumerated` → `dimensional`: reject — can't prove narrowing"* — with tests, and the gap-metric query validated against the live schema. Per the user: *"A run that never calls completion gets swept to `status = FAILED` by a timeout job. Failed and partial both never reap."*
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: C:\Users\Ashish Appalabathula\.claude\projects\D--AutoOps\281f0c74-f08b-42c6-94b8-b137759e1bf7.jsonl
+Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.
+
+@@@@@SPLIT@@@@@
+
+The cross-language digest assertion is the right thing to defend hardest, and your framing of the failure mode is exactly why: a hash mismatch doesn't throw, it just makes a join empty. Every downstream symptom — findings never reaping, backlog growth, coverage gauge reading fine because the run *is* complete and *does* have a scope — points away from hashing. You'd be looking at reaper predicates for a day before checking whether two `sha256` implementations agree on encoding.
+
+One thing worth pinning alongside it, if it isn't already: the digest input, not just the algorithm. `SHA2('abc', 256)` agreeing proves the primitive matches. It doesn't prove that Python, Java and SQL agree on what gets fed in — whether `subject_id` is trimmed, case-normalized, UTF-8 encoded without BOM, or whether a null subject_kind concatenates as empty string or the literal `"null"`. The ARN `arn:aws:s3:::my-bucket` and `ARN:AWS:S3:::my-bucket` are the same resource to a careless producer and different rows to you. A test vector table — half a dozen adversarial inputs with their expected hex, asserted identically in all three languages — costs an hour and covers the part the primitive test doesn't.
+
+The `severity` rejection is the sharpest call in this batch. "A scope says what was looked at" is the whole invariant in one line, and severity-as-dimension is seductive precisely because it produces a scope that looks tighter and more precise while describing the output set rather than the input set. Anything derived from evaluation results is disqualified by the same argument — `risk_tier`, `confidence_band`, `priority_score` above a threshold. Worth stating the rule that way in the rejection message so the next person doesn't have to rediscover it per-field.
+
+`TransactionTemplate` over `@Transactional` for `complete()` is the kind of thing that gets "simplified" back into an annotation during a cleanup pass six months out, by someone who sees an annotated method and a manual template doing apparently the same job. A comment on the method saying why — persists FAILED then throws, annotation would roll back the record explaining the failure — is cheap insurance.
+
+## On agent-runtime declaring scopes
+
+This is where the design meets three codebases that don't share your invariants, so the part I'd get right is making violations impossible rather than documented.
+
+**The narrowing validation has to live server-side.** If `RunScopeService.complete()` is the only enforcement and agents call it through a client library, a Python agent that constructs its own HTTP request bypasses every rule you just built. The rejections — unknown dimension, empty array, severity, widening — all belong at the persistence boundary, and the client library is a convenience over that boundary, never the boundary itself.
+
+**The multi-kind case is where agents will get it wrong.** `aws.public_exposure_auditor` has to declare `cloud_resource` and `principal` separately and narrow each independently at completion. The failure mode I'd expect: the run enumerates buckets and security groups fine, the IAM call throws, and the agent completes with a scope covering only `cloud_resource` — but `status: COMPLETE`, because from the agent's perspective it produced findings and finished. Now `principal` findings from previous runs reap against a run that never looked at them.
+
+Two ways to close it, and I'd want both:
+
+- Per-element scope status, not just per-run. If `principal` collection failed, that element is marked partial and the reaper skips that kind for that run, while `cloud_resource` still reaps normally. A run being all-or-nothing throws away good coverage every time one dimension flakes.
+- The completion call names which kinds it covered, and the service rejects a `COMPLETE` status whose kind set is narrower than the declared intention unless the missing kinds are explicitly marked partial or skipped. Silent omission becomes a rejection instead of a coverage claim.
+
+**Declaring scope at start needs to be structurally hard to skip.** If it's a separate call an agent makes before emitting, some agent will emit without it — and then `POST /findings` has to decide whether to accept verdicts with a `run_id` that has no scope. I'd make `run_id` mandatory on verdict ingest and have run creation return it, so an agent physically cannot emit findings without having opened a run. The scope declaration rides on the create call. That also gives you the enforcement point for `stable_key: false` rejection you already have, in the same place.
+
+## Suggested ordering for the runtime work
+
+1. **Server-side validation complete** — narrowing, dimension whitelist, empty-array, derived-field rejection, all enforced at the boundary with tests that bypass the client library.
+2. **`run_id` mandatory on verdict ingest**, run creation returns it. This is the forcing function; everything after it is agents complying rather than agents remembering.
+3. **One agent end-to-end.** `idle_resource_reclaimer`, since it's genuinely single-kind — proves the loop with the least surface area.
+4. **The two multi-kind agents**, with per-element partial handling exercised deliberately: make the IAM call fail in a test and assert `principal` findings don't reap.
+5. **Coverage gauge reading zero through a full cycle per agent.** Nightly agents prove out in a day. If FinOps has monthly-cadence findings, that's the one that gates V8, and it's worth knowing now whether you'll actually wait for it or accept a shorter soak with the gauge as the backstop.
+
+The gauge going to zero is necessary but not sufficient, and it's worth being explicit about the gap: it proves every agent *declares* a scope, not that any scope is *correct*. An agent declaring `{"kind":"all"}` when it actually enumerated 40% of subjects produces a silent zero and reaps two-thirds of its backlog on the first run. If there's a cheap cross-check — emitted verdict count against `subject_id_count`, or `subjects_evaluated` against the enumerated digest cardinality — that's the assertion that catches an over-broad claim before the reaper acts on it. Worth adding to the completion validation rather than leaving it to the gauge.
+
+@@@@@SPLIT@@@@@
+
+Where are the agents I gave u everything , Finops and all 3 agents that is most important right

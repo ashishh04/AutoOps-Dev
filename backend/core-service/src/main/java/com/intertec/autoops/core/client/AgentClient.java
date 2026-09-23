@@ -76,7 +76,7 @@ public class AgentClient {
     public RolledOutAgent rollOut(String tenantId, String actor, String accessToken,
                                   Long projectId, Long sourceId, String name, String description,
                                   String model, String instructions, String graphRef,
-                                  String graphVersion, String tools) {
+                                  String graphVersion, String tools, String phases) {
         // HashMap, not Map.of: every field below is legitimately null for one
         // agent shape or the other, and Map.of rejects nulls.
         Map<String, Object> body = new HashMap<>();
@@ -87,6 +87,10 @@ public class AgentClient {
         body.put("graphRef", graphRef);
         body.put("graphVersion", graphVersion);
         body.put("tools", tools);
+        // Only ever set for a JSON agent. A Python agent's phases are in its
+        // module, and sending them would let a catalog row reshape a graph that
+        // was reviewed and released.
+        body.put("phases", phases);
         try {
             return agentRestClient.post()
                     .uri("/internal/projects/{projectId}/agents/rollout"

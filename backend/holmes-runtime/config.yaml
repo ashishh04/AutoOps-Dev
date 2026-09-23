@@ -1,0 +1,90 @@
+# ============================================================
+# AutoOps — investigation engine toolsets.
+#
+# A toolset is a kind of thing the investigation may LOOK AT. Each one is
+# read-only access to a customer's infrastructure, so each is enabled
+# deliberately rather than by default.
+#
+# The set below mirrors what AutoOps can connect as a Monitoring Source: if a
+# customer wired Prometheus up to raise alerts, the investigation should be able
+# to query the same Prometheus the alert fired on. An investigation restricted
+# to the alert text alone can only reason — it cannot check.
+#
+# CREDENTIALS ARE NOT SHARED FROM THE ALERT PLANE, and cannot be. When a
+# customer connects a source, the credential goes INTO the alert engine and is
+# never readable back out — that is deliberate, and it is why there is no
+# endpoint that returns one. So a source that the investigation should also be
+# able to query has to be given its connection details here, once, by an
+# operator. Two credentials for one system is the honest cost of not being able
+# to read the first one back.
+#
+# VERIFY THE NAMES AGAINST THE RUNNING CONTAINER, not against this file:
+#   docker exec autoops-holmes-1 \
+#     python -c "import urllib.request,json; \
+#     print(json.load(urllib.request.urlopen('http://localhost:5050/api/info?detail=toolsets')))"
+# A misspelt toolset key is silently ignored — it does not fail the boot — so
+# the only proof a toolset is live is the engine saying so.
+# ============================================================
+toolsets:
+  # Always on. Lets the investigation read public documentation for an error
+  # string it does not recognise. Reaches nothing of the customer's.
+  internet:
+    enabled: true
+
+  # The metrics the alert fired on. This is the highest-value toolset for this
+  # platform: alerts arrive from Prometheus today, so this is what turns
+  # "the error rate is above 5%" into "and here is what it has been doing".
+  prometheus/metrics:
+    enabled: false
+    config:
+      prometheus_url: ${PROMETHEUS_URL}
+
+  grafana/loki:
+    enabled: false
+    config:
+      url: ${GRAFANA_URL}
+      api_key: ${GRAFANA_API_KEY}
+
+  datadog/logs:
+    enabled: false
+    config:
+      dd_api_key: ${DATADOG_API_KEY}
+      dd_app_key: ${DATADOG_APP_KEY}
+      site_api_url: ${DATADOG_SITE_URL}
+
+  datadog/metrics:
+    enabled: false
+    config:
+      dd_api_key: ${DATADOG_API_KEY}
+      dd_app_key: ${DATADOG_APP_KEY}
+      site_api_url: ${DATADOG_SITE_URL}
+
+  newrelic:
+    enabled: false
+    config:
+      nr_api_key: ${NEWRELIC_API_KEY}
+      nr_account_id: ${NEWRELIC_ACCOUNT_ID}
+
+  # Kubernetes. Off because the estates this platform runs are AWS-shaped; with
+  # it on and no cluster reachable, every investigation spends its tool budget
+  # on kubectl calls that fail and then reports insufficient evidence.
+  kubernetes/core:
+    enabled: false
+  kubernetes/logs:
+    enabled: false
+
+  # ---- deliberately NOT enabled ----------------------------------------
+  #
+  # bash runs arbitrary commands inside the engine container. It is the only
+  # route to an AWS estate, because HolmesGPT has no AWS toolset at all — I
+  # checked all 45 — so reaching AWS means shelling out to the CLI with
+  # credentials mounted here.
+  #
+  # That is a real capability and a real blast radius: an investigation that
+  # can run any command is one bad model turn away from running the wrong one,
+  # against production, with whatever rights those credentials carry. If it is
+  # switched on, mount a role scoped to READ — Describe/List/Get and nothing
+  # else — and never the credentials the execution engine uses to change
+  # things.
+  bash:
+    enabled: false

@@ -153,6 +153,18 @@ class Node(BaseModel):
     #: the workflow was authored.
     window_hours: int | str = Field(default=24, alias="windowHours")
 
+    #: WHICH platform record to read. Defaults to the activity timeline, so
+    #: every workflow authored before this existed keeps its meaning.
+    #:
+    #: ``timeline``   what ran in this project and what it returned (core)
+    #: ``incidents``  what is open right now (alert-service)
+    #:
+    #: A source rather than a new node type because the two are the same shape
+    #: of thing — the platform's own record, no vendor credential, scoped to
+    #: (tenant, project) by the service that answers. A second node type would
+    #: duplicate the window handling, the scoping and the failure messages.
+    source: str = "timeline"
+
     #: HTTP
     method: str = "GET"
     url: str | None = None
@@ -193,8 +205,14 @@ class Node(BaseModel):
             raise ValueError(f"template node {self.id!r} has no template")
         if self.type is NodeType.CONDITION and not self.when:
             raise ValueError(f"condition node {self.id!r} has no `when`")
+        if self.type is NodeType.PLATFORM and self.source not in ("timeline", "incidents"):
+            raise ValueError(
+                f"platform node {self.id!r} asks for source {self.source!r}; "
+                f"supported: timeline, incidents"
+            )
         if (
             self.type is NodeType.PLATFORM
+            and self.source == "timeline"
             and isinstance(self.window_hours, int)
             and not 1 <= self.window_hours <= 168
         ):

@@ -239,11 +239,13 @@ public class RuntimeClient {
     public record Request(Long runId, String tenantId, String ref, String version,
                           String model, ModelVendor vendor, ModelCredentials credentials,
                           String instructions, String state, Event event,
-                          List<OfferedTool> tools, List<String> unavailable) {
+                          List<OfferedTool> tools, List<String> unavailable,
+                          List<String> phases, String allowList, String name) {
 
         public Request {
             tools = tools == null ? List.of() : List.copyOf(tools);
             unavailable = unavailable == null ? List.of() : List.copyOf(unavailable);
+            phases = phases == null ? List.of() : List.copyOf(phases);
         }
     }
 
@@ -253,6 +255,11 @@ public class RuntimeClient {
         Map<String, Object> agent = new LinkedHashMap<>();
         agent.put("ref", request.ref());
         agent.put("version", request.version());
+        // For the trace list. An agent authored in the console has no ref —
+        // every one resolves to the same runtime module — so without a name
+        // they would all appear in LangSmith as "unspecified" and could not be
+        // told apart.
+        agent.put("name", request.name());
         agent.put("model", request.model());
         agent.put("vendor", request.vendor().name());
         agent.put("credentials", request.credentials() == null
@@ -261,7 +268,56 @@ public class RuntimeClient {
         // tenant's own row. A Python-authored agent's prompts are in the
         // runtime's image and this is null for them — which is the point.
         agent.put("instructions", request.instructions());
+        // Which phases this agent runs, for one authored in the console and
+        // therefore having no module to declare them. Empty for every agent
+        // that exists today, which is what keeps them on the loop they were
+        // written for.
+        agent.put("phases", request.phases());
+        agent.put("subjects", subjectsOf(request.allowList()));
         return agent;
+    }
+
+    /**
+     * Where each tool's output names the subjects a run examined, keyed by ref.
+     *
+     * <p>Read from the agent's STORED allow-list rather than from the tools
+     * actually offered this turn, and the difference is load-bearing. A run
+     * declares the subject kinds it intends to cover at its start and reports
+     * what it covered at its finish; the second may narrow the first but may
+     * never drop a kind, because silence is not narrowing. The offered list is
+     * not stable across a run — a tool whose delivered copy is deleted mid-run
+     * moves to {@code unavailable} and disappears from it — so deriving the
+     * declaration from it would make the closing claim name fewer kinds than
+     * the opening one, and agent-service would correctly refuse the claim.
+     * The run would lose its coverage for a reason nobody could diagnose.
+     *
+     * <p>An unreadable allow-list yields an EMPTY map, never an exception. The
+     * consequence is an agent that enumerates nothing and reaps nothing, which
+     * is the safe direction; raising here would cost the run its report as well.
+     */
+    private Map<String, Object> subjectsOf(String allowList) {
+        if (allowList == null || allowList.isBlank()) {
+            return Map.of();
+        }
+        Map<String, Object> declared = new LinkedHashMap<>();
+        try {
+            JsonNode root = objectMapper.readTree(allowList);
+            if (!root.isArray()) {
+                return Map.of();
+            }
+            for (JsonNode entry : root) {
+                String ref = entry.path("ref").asText(null);
+                JsonNode subjects = entry.path("subjects");
+                if (ref != null && !ref.isBlank() && subjects.isArray() && !subjects.isEmpty()) {
+                    declared.put(ref, objectMapper.convertValue(subjects, List.class));
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("Unreadable allow-list while reading subject declarations; this run "
+                    + "will enumerate nothing: {}", ex.getMessage());
+            return Map.of();
+        }
+        return declared;
     }
 
     private List<Map<String, Object>> toolsOf(List<OfferedTool> tools) {

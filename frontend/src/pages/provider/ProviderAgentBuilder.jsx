@@ -77,6 +77,7 @@ function parseAgent(definition) {
       model: spec.model || "",
       instructions: spec.instructions || "",
       tools: Array.isArray(spec.tools) ? spec.tools : [],
+      phases: Array.isArray(spec.phases) ? spec.phases : [],
       guardrails: Array.isArray(spec.guardrails) ? spec.guardrails : [],
       scope: SCOPES.includes(spec.scope) ? spec.scope : "NOC",
       riskLevel: RISK_LEVELS.includes(spec.riskLevel) ? spec.riskLevel : "Low",
@@ -134,11 +135,28 @@ export default function ProviderAgentBuilder() {
   const [riskLevel, setRiskLevel] = useState("Low");
   const [automationType, setAutomationType] = useState(AUTOMATION_TYPES[0]);
   const [approvalRequired, setApprovalRequired] = useState(false);
-  const [tools, setTools] = useState([]); // [{ ref, mutating }]
+  const [tools, setTools] = useState([]); // [{ ref, mutating, subjects[] }]
+  const [phases, setPhases] = useState([]);
+  // The authoring contract, read from the runtime rather than remembered here.
+  // Null while loading and null when the runtime could not be reached — and the
+  // second case is SAID rather than papered over with a built-in list, because
+  // an author building against a stale palette finds out at run time.
+  const [schema, setSchema] = useState(null);
+  const [schemaError, setSchemaError] = useState(null);
 
   const [workflows, setWorkflows] = useState([]);
   const [categories, setCategories] = useState([]);
   const [models, setModels] = useState([]);
+  // Model ids already in use by catalog agents. The provider workspace often
+  // has no verified vendor connection of its own — the agents run in the
+  // CUSTOMER's workspace — so without this the dropdown would be empty on the
+  // one screen whose whole job is choosing a model.
+  const [catalogModels, setCatalogModels] = useState([]);
+  // True when the author is typing an id the dropdown does not offer.
+  const [customModel, setCustomModel] = useState(false);
+  // Clamped against the page count on read rather than reset on write, so a
+  // filtered-down list cannot leave the picker showing an empty page.
+  const [toolPageRaw, setToolPage] = useState(1);
   const [saved, setSaved] = useState(null); // the catalog row, once it exists
   const [rolloutOpen, setRolloutOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -156,8 +174,22 @@ export default function ProviderAgentBuilder() {
       // model that matters is the one the RECEIVING workspace can reach, which
       // this console cannot see anyway.
       api.listWorkspaceModels().catch(() => []),
+      // Separated from the others' failure handling on purpose. A missing
+      // model list costs a suggestion; a missing schema costs the two fields
+      // that decide whether this agent's findings can ever be checked, so it
+      // has to be reported rather than absorbed.
+      api.providerAuthoringSchema().catch((err) => ({ __error: err })),
     ])
-      .then(([rows, providers]) => {
+      .then(([rows, providers, contract]) => {
+        if (cancelled) return;
+        if (contract && contract.__error) {
+          setSchemaError(
+            contract.__error.message ||
+              "The agent runtime did not answer, so phases and subject declarations cannot be offered.",
+          );
+        } else {
+          setSchema(contract?.agent || null);
+        }
         if (cancelled) return;
         const list = rows || [];
         setWorkflows(
@@ -177,6 +209,20 @@ export default function ProviderAgentBuilder() {
             ),
           ].sort((a, b) => a.localeCompare(b)),
         );
+        setCatalogModels([
+          ...new Set(
+            list
+              .filter((r) => r.type === "agent")
+              .map((r) => {
+                try {
+                  return JSON.parse(r.definition || "{}").model;
+                } catch {
+                  return null;
+                }
+              })
+              .filter(Boolean),
+          ),
+        ]);
 
         if (!editing) return;
         const item = list.find((r) => String(r.id) === String(id));
@@ -212,8 +258,10 @@ export default function ProviderAgentBuilder() {
             ref: t.ref,
             // Absent means mutating, on both sides of the wire.
             mutating: typeof t.mutating === "boolean" ? t.mutating : true,
+            subjects: Array.isArray(t.subjects) ? t.subjects : [],
           })),
         );
+        setPhases(spec.phases);
         setGuardrails(spec.guardrails.join("\n"));
         setScope(spec.scope);
         setRiskLevel(spec.riskLevel);
@@ -229,6 +277,29 @@ export default function ProviderAgentBuilder() {
 
   const chosen = useMemo(() => new Map(tools.map((t) => [t.ref, t])), [tools]);
 
+  /**
+   * Everything offerable in the model dropdown.
+   *
+   * `model` itself is always included. Editing an agent whose model this
+   * console cannot see would otherwise open a select with nothing chosen, and
+   * saving would silently blank a working agent's model.
+   */
+  // The same split `save` uses, so the count shown and the list published
+  // cannot disagree — a blank line is not a promise.
+  const guardrailLines = useMemo(
+    // Split on a regex rather than a newline literal, so a guardrail list
+    // pasted from a Windows editor does not arrive with a trailing \r on every
+    // line and get published that way.
+    () => guardrails.split(/\r?\n/).map((g) => g.trim()).filter(Boolean),
+    [guardrails],
+  );
+
+  const modelOptions = useMemo(() => {
+    const all = new Set([...models, ...catalogModels]);
+    if (model.trim()) all.add(model.trim());
+    return [...all].sort((a, b) => a.localeCompare(b));
+  }, [models, catalogModels, model]);
+
   const toggleTool = (ref) => {
     setTools((current) =>
       current.some((t) => t.ref === ref)
@@ -236,13 +307,49 @@ export default function ProviderAgentBuilder() {
         // Mutating by default, matching the schema and RolloutService. An
         // unmarked read-only tool goes unused and is noticed; an unmarked
         // destructive one would reach the phase that must not see it.
-        : [...current, { ref, mutating: true }],
+        : [...current, { ref, mutating: true, subjects: [] }],
     );
   };
 
   const setMutating = (ref, mutating) =>
     setTools((current) =>
       current.map((t) => (t.ref === ref ? { ...t, mutating } : t)),
+    );
+
+  const editSubjects = (ref, fn) =>
+    setTools((current) =>
+      current.map((t) =>
+        t.ref === ref ? { ...t, subjects: fn(t.subjects || []) } : t,
+      ),
+    );
+
+  const addSubject = (ref) =>
+    editSubjects(ref, (rows) => [
+      ...rows,
+      // Every field starts empty, including subject_kind. A pre-filled kind
+      // would be a guess about what somebody else's workflow returns, and a
+      // wrong one produces a coverage claim over the wrong sort of thing —
+      // which is worse than no claim, because a claim grounds a reap.
+      { subject_kind: "", items: "", id_template: "" },
+    ]);
+
+  const removeSubject = (ref, index) =>
+    editSubjects(ref, (rows) => rows.filter((_, i) => i !== index));
+
+  const setSubjectField = (ref, index, field, value) =>
+    editSubjects(ref, (rows) =>
+      rows.map((row, i) => (i === index ? { ...row, [field]: value } : row)),
+    );
+
+  const togglePhase = (value) =>
+    setPhases((current) =>
+      current.includes(value)
+        ? current.filter((p) => p !== value)
+        // Appended, not inserted in palette order. The graph is built from this
+        // list, so the order the author picks IS the order the agent runs — and
+        // sorting it back into the canonical order would silently rewrite their
+        // agent into a different one.
+        : [...current, value],
     );
 
   // Named so the person is told WHICH field, not just that something is wrong.
@@ -281,11 +388,39 @@ export default function ProviderAgentBuilder() {
       description: description.trim(),
       model: model.trim(),
       instructions: instructions.trim(),
-      tools: tools.map((t) => ({ type: "WORKFLOW", ref: t.ref, mutating: t.mutating })),
-      guardrails: guardrails
-        .split("\n")
-        .map((g) => g.trim())
-        .filter(Boolean),
+      tools: tools.map((t) => {
+        const entry = { type: "WORKFLOW", ref: t.ref, mutating: t.mutating };
+        const declared = (t.subjects || []).filter(
+          (sub) => sub.subject_kind?.trim() && sub.id_template?.trim(),
+        );
+        if (declared.length) {
+          // Omitted rather than written as [] when there is nothing to say.
+          // Both mean "enumerate nothing", but an empty array in a stored row
+          // reads as though somebody considered the question and decided no.
+          entry.subjects = declared.map((sub) => {
+            const source = {
+              subject_kind: sub.subject_kind.trim(),
+              items: (sub.items || "").trim(),
+              id_template: sub.id_template.trim(),
+            };
+            // total_field is left out unless it was filled. The guidance is to
+            // omit it rather than point it at anything derived from the list:
+            // a total that equals the list by construction agrees with it in
+            // every case including the broken ones.
+            if (sub.total_field?.trim()) source.total_field = sub.total_field.trim();
+            if (sub.truncated_field?.trim())
+              source.truncated_field = sub.truncated_field.trim();
+            return source;
+          });
+        }
+        return entry;
+      }),
+      // Absent means no declaration, which runs the un-phased compatibility
+      // loop — what every agent authored before this existed does.
+      ...(phases.length ? { phases } : {}),
+      // The same value the count beside the field shows. Splitting twice is
+      // how the two quietly come to disagree.
+      guardrails: guardrailLines,
       domain: category.trim() || "General",
       scope,
       riskLevel,
@@ -321,6 +456,21 @@ export default function ProviderAgentBuilder() {
   const usable = workflows.filter((w) => w.ref);
   const unusable = workflows.filter((w) => !w.ref);
 
+  // The catalog holds fourteen workflows and grows; rendering all of them made
+  // the tool picker several screens tall and pushed everything below it out of
+  // reach. Four to a page keeps the card the same height as the ones beside it.
+  // Four. With Guardrails moved out from under it the left column is three
+  // cards, and four tool rows puts the two columns within a card's height of
+  // each other — which is what removes the gap, rather than stretching
+  // anything to cover one.
+  const TOOLS_PER_PAGE = 4;
+  const toolPages = Math.max(1, Math.ceil(usable.length / TOOLS_PER_PAGE));
+  const toolPage = Math.min(toolPageRaw, toolPages);
+  const visibleTools = usable.slice(
+    (toolPage - 1) * TOOLS_PER_PAGE,
+    toolPage * TOOLS_PER_PAGE,
+  );
+
   return (
     <div className="animate-fade-up">
       <PageHeader
@@ -351,8 +501,14 @@ export default function ProviderAgentBuilder() {
       />
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,340px)_minmax(0,1fr)]">
-        {/* ── Left: what it is, and how it is classified ── */}
-        <div className="space-y-6">
+        {/* ── Left: what it is, how it is classified, and how it behaves ──
+            "How it works" and "Guardrails" live here rather than on the right,
+            and the reason is layout, not taxonomy: the right column holds the
+            two cards that genuinely NEED width — the persona editor and the
+            tool list with its descriptions — and those alone ran far taller
+            than this column, leaving most of a screen blank beside them. These
+            two are form-shaped and read fine narrow, so they balance it. ── */}
+        <div className="flex flex-col gap-6">
           <Card className="h-fit p-6">
             <h3 className="mb-4 text-sm font-semibold text-slate-900">Agent details</h3>
             <div className="space-y-4">
@@ -410,24 +566,50 @@ export default function ProviderAgentBuilder() {
                 <label className={labelCls} htmlFor="agent-model">
                   Model
                 </label>
-                {/* A datalist rather than a select: the models listed are the
-                    ones THIS workspace can reach, and the agent runs in the
-                    CUSTOMER's. resolveForModel refuses a model no enabled
-                    connection there offers rather than silently picking
-                    another vendor, so the id must stay typeable. */}
-                <input
+                {/* A select, with a way out. The dropdown was a datalist
+                    before, which renders as a plain text box with no affordance
+                    — and on a provider workspace with no verified vendor of its
+                    own the list was empty, so it looked like a free-text field
+                    that happened to validate.
+
+                    The escape hatch is not decoration. The models offered here
+                    are the ones THIS workspace can see, and the agent runs in
+                    the CUSTOMER's; resolveForModel refuses an id no enabled
+                    connection there offers rather than quietly picking another
+                    vendor. So an id this console has never heard of is a
+                    legitimate answer and has to stay typeable. */}
+                <select
                   id="agent-model"
-                  list="agent-model-options"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder="anthropic.claude-sonnet-5"
+                  value={customModel ? "__custom__" : model}
+                  onChange={(e) => {
+                    if (e.target.value === "__custom__") {
+                      setCustomModel(true);
+                      setModel("");
+                    } else {
+                      setCustomModel(false);
+                      setModel(e.target.value);
+                    }
+                  }}
                   className={`${inputCls} font-mono text-xs`}
-                />
-                <datalist id="agent-model-options">
-                  {models.map((m) => (
-                    <option key={m} value={m} />
+                >
+                  <option value="">Choose a model…</option>
+                  {modelOptions.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
                   ))}
-                </datalist>
+                  <option value="__custom__">Another id…</option>
+                </select>
+                {customModel && (
+                  <input
+                    aria-label="Model id"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="anthropic.claude-sonnet-5"
+                    className={`${inputCls} mt-2 font-mono text-xs`}
+                    autoFocus
+                  />
+                )}
                 <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
                   The receiving workspace must have an enabled provider offering
                   this exact id — there is no fallback, and a run refuses rather
@@ -526,10 +708,108 @@ export default function ProviderAgentBuilder() {
               </label>
             </div>
           </Card>
+
+          <Card className="p-6">
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-900">
+                How it works
+              </h3>
+              <div className="flex items-center gap-2">
+                {phases.length > 0 && (
+                  // Unpicking eight phases one at a time to get back to the
+                  // legacy loop is a lot of clicking to reach the DEFAULT.
+                  <button
+                    type="button"
+                    onClick={() => setPhases([])}
+                    className="text-[11px] font-medium text-slate-500 hover:text-rose-600"
+                  >
+                    Clear
+                  </button>
+                )}
+                <Chip>{phases.length ? `${phases.length} phases` : "single loop"}</Chip>
+              </div>
+            </div>
+            <p className="mb-4 text-[11px] leading-relaxed text-slate-500">
+              Pick phases and the agent runs the phased runtime: each step sees only
+              the tools it should, and the report must cite the evidence it used.
+              Pick none and it runs one un-narrowed loop with every tool visible at
+              once — which is what agents built before this existed do, and the right
+              choice for a persona written for that.
+            </p>
+
+            {schemaError ? (
+              // No fallback list. An author building against a remembered
+              // palette would find out at run time, having been shown nothing.
+              <p role="alert" className="rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2.5 text-sm text-amber-700">
+                {schemaError}
+              </p>
+            ) : !schema ? (
+              <p className="text-sm text-slate-500">Loading phases…</p>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {schema.phases.map((phase) => {
+                    const at = phases.indexOf(phase.value);
+                    return (
+                      <button
+                        key={phase.value}
+                        type="button"
+                        aria-pressed={at >= 0}
+                        onClick={() => togglePhase(phase.value)}
+                        className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                          at >= 0
+                            ? "border-violet-400/40 bg-violet-400/10 text-violet-700"
+                            : "border-slate-200 text-slate-600 hover:border-slate-300"
+                        }`}
+                      >
+                        {/* The position is shown because it is the meaning. A
+                            phase picker that looked like a set of checkboxes
+                            would hide that [GATHER, TRIAGE] is a different
+                            agent from [TRIAGE, GATHER]. */}
+                        {at >= 0 && (
+                          <span className="mr-1 font-mono text-[10px] opacity-60">
+                            {at + 1}
+                          </span>
+                        )}
+                        {phase.value}
+                      </button>
+                    );
+                  })}
+                </div>
+                {phases.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                      Runs in this order
+                    </p>
+                    <p className="mt-1 font-mono text-[11px] leading-relaxed text-slate-700">
+                      {phases.join(" → ")}
+                      {!phases.includes("REPORT") && (
+                        // Appended by the runtime, so it is shown here rather
+                        // than left as a surprise on the saved agent.
+                        <span className="text-amber-700"> → REPORT</span>
+                      )}
+                    </p>
+                    {!phases.includes("REPORT") && (
+                      <p className="mt-1 text-[10px] leading-relaxed text-amber-700">
+                        REPORT is added automatically — without it a run reaches the end
+                        of its graph with nothing to hand the operator.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </Card>
         </div>
 
-        {/* ── Right: the product — the persona, the tools, the limits ── */}
-        <div className="space-y-6">
+        {/* ── Right: the two things that need the room — the persona and the
+            allow-list.
+
+            Neither column stretches a card to reach the other any more. With
+            Guardrails moved out to full width below, the left is three cards
+            and the right is two tall ones, which land close enough that there
+            is nothing left to cover. ── */}
+        <div className="flex flex-col gap-6">
           <Card className="overflow-hidden p-0">
             <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950 px-4 py-2.5">
               <span className="flex items-center gap-2 font-mono text-xs text-slate-300">
@@ -558,6 +838,11 @@ export default function ProviderAgentBuilder() {
             </div>
           </Card>
 
+          {/* Deliberately NOT flex-1. Stretching a list card to close a gap
+              only moves the emptiness inside it, where a large blank panel
+              reads as something that failed to load — worse than the gap it
+              was hiding. A card grows only where the growth is usable, which
+              here means the Guardrails textarea and nothing else. */}
           <Card className="p-6">
             <div className="mb-1 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-900">
@@ -581,7 +866,7 @@ export default function ProviderAgentBuilder() {
               </p>
             ) : (
               <div className="space-y-2">
-                {usable.map((w) => {
+                {visibleTools.map((w) => {
                   const picked = chosen.get(w.ref);
                   return (
                     <div
@@ -643,10 +928,141 @@ export default function ProviderAgentBuilder() {
                           </select>
                         </div>
                       )}
+
+                      {picked && schema?.subject_source && (
+                        <div className="mt-2.5 pl-7">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-medium text-slate-600">
+                              What this tool enumerates
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => addSubject(w.ref)}
+                              className="text-[11px] font-medium text-violet-600 hover:underline"
+                            >
+                              + Declare
+                            </button>
+                          </div>
+
+                          {(picked.subjects || []).length === 0 ? (
+                            // Said plainly rather than left blank. "No
+                            // declaration" is a real and sometimes correct
+                            // answer — a log query enumerates nothing that
+                            // persists — but it has a consequence the author
+                            // should be choosing knowingly.
+                            <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                              Nothing declared, so this tool contributes no coverage
+                              and findings from it can never be closed automatically.
+                              Correct for a tool that reads events; wrong for one that
+                              lists resources.
+                            </p>
+                          ) : (
+                            <div className="mt-1.5 space-y-2">
+                              {picked.subjects.map((sub, index) => (
+                                <div
+                                  key={index}
+                                  className="rounded-lg border border-slate-200 bg-slate-50 p-2.5"
+                                >
+                                  <div className="flex gap-1.5">
+                                    <select
+                                      aria-label={`Subject kind ${index + 1} for ${w.title}`}
+                                      value={sub.subject_kind}
+                                      onChange={(e) =>
+                                        setSubjectField(w.ref, index, "subject_kind", e.target.value)
+                                      }
+                                      className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-violet-400"
+                                    >
+                                      <option value="">Kind…</option>
+                                      {(
+                                        schema.subject_source.fields.find(
+                                          (f) => f.name === "subject_kind",
+                                        )?.options || []
+                                      ).map((kind) => (
+                                        <option key={kind} value={kind}>
+                                          {kind}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <button
+                                      type="button"
+                                      aria-label={`Remove declaration ${index + 1} for ${w.title}`}
+                                      onClick={() => removeSubject(w.ref, index)}
+                                      className="shrink-0 rounded-md px-1.5 text-[11px] text-slate-400 hover:text-rose-600"
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                  <input
+                                    aria-label={`List path ${index + 1} for ${w.title}`}
+                                    value={sub.items}
+                                    onChange={(e) =>
+                                      setSubjectField(w.ref, index, "items", e.target.value)
+                                    }
+                                    placeholder="unattached_volumes — path to the list"
+                                    className="mt-1.5 w-full rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-[11px] outline-none focus:border-violet-400"
+                                  />
+                                  <input
+                                    aria-label={`Id template ${index + 1} for ${w.title}`}
+                                    value={sub.id_template}
+                                    onChange={(e) =>
+                                      setSubjectField(w.ref, index, "id_template", e.target.value)
+                                    }
+                                    placeholder="{region}/{volume_id}"
+                                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-[11px] outline-none focus:border-violet-400"
+                                  />
+                                  {/* The one field worth explaining inline: it
+                                      is the field authors most often get wrong,
+                                      and getting it wrong is silent. */}
+                                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                                    A template, not a field name — a volume id is
+                                    region-scoped and an IAM user is account-scoped, so a
+                                    bare id merges two different resources into one
+                                    subject.
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
 
+                {toolPages > 1 && (
+                  <div className="flex items-center justify-between border-t border-slate-200 pt-2.5">
+                    {/* The RANGE, not just the page number. A picker showing
+                        "page 2 of 4" over four rows leaves you counting; the
+                        count is also how you notice a tick you made on another
+                        page is still held — the selected chip above never
+                        moves. */}
+                    <span className="text-[11px] text-slate-500">
+                      {(toolPage - 1) * TOOLS_PER_PAGE + 1}–
+                      {Math.min(toolPage * TOOLS_PER_PAGE, usable.length)} of {usable.length}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setToolPage(toolPage - 1)}
+                        disabled={toolPage === 1}
+                        className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-600 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Previous
+                      </button>
+                      <span className="px-1 text-[11px] text-slate-500">
+                        {toolPage} / {toolPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setToolPage(toolPage + 1)}
+                        disabled={toolPage === toolPages}
+                        className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-600 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -675,26 +1091,50 @@ export default function ProviderAgentBuilder() {
               </div>
             )}
           </Card>
-
-          <Card className="p-6">
-            <h3 className="mb-1 text-sm font-semibold text-slate-900">Guardrails</h3>
-            <p className="mb-3 text-[11px] leading-relaxed text-slate-500">
-              One per line. These are shown to the customer — they are what the
-              agent promises not to do, and unlike the instructions they are not
-              withheld.
-            </p>
-            <textarea
-              rows={5}
-              value={guardrails}
-              onChange={(e) => setGuardrails(e.target.value)}
-              placeholder={
-                "Report-only by default: nothing is changed without an approval.\nScope is one region per run."
-              }
-              className={`${inputCls} resize-y leading-relaxed`}
-            />
-          </Card>
         </div>
       </div>
+
+      {/* Full width, below both columns, and that is the point.
+          
+          Guardrails are the only thing on this page a CUSTOMER ever reads —
+          the persona is sealed and the allow-list is machinery — so the one
+          field they see should not be the narrowest box on the screen. Given
+          the whole width it also stops wrapping every promise onto three
+          lines, which is what made two guardrails look like six. */}
+      <Card className="mt-6 p-6">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-slate-900">Guardrails</h3>
+          {/* Counted, like the tools and the phases beside it. These are
+              the only field on this page a CUSTOMER reads, so "how many
+              have I written" is worth showing rather than making somebody
+              count lines in a textarea. */}
+          <Chip>
+            {guardrailLines.length === 1
+              ? "1 promise"
+              : `${guardrailLines.length} promises`}
+          </Chip>
+        </div>
+        <p className="mb-3 text-[11px] leading-relaxed text-slate-500">
+          One per line. These are shown to the customer — they are what the
+          agent promises not to do, and unlike the instructions they are not
+          withheld.
+        </p>
+        <textarea
+          // Labelled, because the heading above it is an <h3> and a heading
+          // is not a label — a screen reader reached this field and
+          // announced "edit text, blank".
+          aria-label="Guardrails"
+          value={guardrails}
+          onChange={(e) => setGuardrails(e.target.value)}
+          placeholder={
+            "Report-only by default: nothing is changed without an approval.\nScope is one region per run."
+          }
+          // Sized to invite a real list rather than the two lines a five-row
+          // box suggests. Still resizable, because how many promises an agent
+          // needs is not something this form can know.
+          className={`${inputCls} min-h-[13rem] resize-y leading-relaxed`}
+        />
+      </Card>
 
       {problems.length > 0 && !error && (
         <Card className="mt-6 border-amber-400/30 bg-amber-400/[0.04] p-4">

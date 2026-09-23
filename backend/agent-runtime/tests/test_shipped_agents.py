@@ -323,3 +323,101 @@ def test_a_read_only_agent_binds_its_whole_toolbox(monkeypatch):
         "workflow_31", "workflow_32", "workflow_33"
     ]
     assert model.bound[-1].names == ["workflow_31", "workflow_32", "workflow_33"]
+
+
+# ------------------------------------------- the three supplied specs ---
+
+
+def test_the_finops_analyst_holds_no_tool_that_can_act():
+    """The spec calls this "the agent most likely to cause an outage".
+
+    The guardrail that actually delivers on that is not a sentence in a prompt —
+    it is holding no destructive tool. Acting on what it finds belongs to
+    aws.idle_resource_reclaimer, which has a human approval gate.
+    """
+    from agent_runtime import agents
+
+    spec = agents.REGISTRY["aws.finops_analyst"]
+    assert all(not t.mutating for t in spec.manifest.tools)
+
+
+def test_the_finops_analyst_enumerates_waste_but_not_services_or_events():
+    """A service is not a subject; a CloudTrail event is not a subject.
+
+    The resources under a service are subjects and come from the inventory. An
+    event happened and does not persist to be re-examined, so a coverage claim
+    over one would mean nothing.
+    """
+    from agent_runtime import agents
+
+    by_ref = {t.ref: t for t in agents.REGISTRY["aws.finops_analyst"].manifest.tools}
+
+    assert len(by_ref["RD-136-idle-resource-inventory"].subjects) == 3
+    assert by_ref["RD-141-cost-explorer-service-delta"].subjects == ()
+    assert by_ref["RD-211-cloudtrail-change-timeline"].subjects == ()
+
+
+def test_the_alert_quality_analyst_may_not_recommend_reducing_coverage():
+    """Recall is not observable from alarm state.
+
+    The spec's own warning: without detection_source on every incident, such an
+    agent "will confidently recommend deleting the only rule that would have
+    caught the next outage". This platform has no incidents at all, so the
+    recommendation vocabulary is truncated to changes that cannot reduce what
+    gets noticed.
+    """
+    from agent_runtime import agents
+
+    persona = agents.REGISTRY["aws.alert_quality_analyst"].persona
+    guardrails = " ".join(agents.REGISTRY["aws.alert_quality_analyst"].manifest.guardrails)
+
+    for forbidden in ("retire", "demote_to_ticket", "merge_with_sibling"):
+        assert forbidden in persona, f"{forbidden} must be named as forbidden"
+    assert "may never recommend retire" in guardrails.lower()
+
+
+def test_the_alert_quality_analyst_emits_no_quality_score():
+    """A score is trivially improved by silencing everything.
+
+    The spec requires it always be paired with the detection-gap count for the
+    same service. That count does not exist here, so the score does not either —
+    a single number with no counterweight is the target the spec says never to
+    give a team.
+    """
+    from agent_runtime import agents
+
+    spec = agents.REGISTRY["aws.alert_quality_analyst"]
+    assert "NO QUALITY SCORE" in spec.persona
+    assert any("no quality score" in g.lower() for g in spec.manifest.guardrails)
+
+
+def test_the_escalation_router_never_names_a_person_or_leaves_an_incident_unrouted():
+    """The spec's non-negotiable, and the guess that would break it.
+
+    Never silently drop a page: unresolvable ownership must produce a loud
+    DEFAULT_FALLBACK decision, not silence. And the tempting shortcut —
+    inferring a team from a service name — is a guess dressed as a lookup that
+    pages people who have never heard of the service.
+    """
+    from agent_runtime import agents
+
+    spec = agents.REGISTRY["autoops.escalation_router"]
+    guardrails = " ".join(spec.manifest.guardrails).lower()
+
+    assert "never leaves an incident unrouted" in guardrails
+    assert "never names an on-call person" in guardrails
+    assert "DEFAULT_FALLBACK" in spec.persona
+    # It must hold nothing that can page, assign or acknowledge.
+    assert all(not t.mutating for t in spec.manifest.tools)
+
+
+def test_the_escalation_router_claims_no_coverage_over_incidents():
+    """An incident closes; it is not a durable subject a later run re-examines.
+
+    The alarm rules behind it are subjects, and those belong to the alert
+    quality analyst.
+    """
+    from agent_runtime import agents
+
+    spec = agents.REGISTRY["autoops.escalation_router"]
+    assert spec.declared_subject_kinds() == ()

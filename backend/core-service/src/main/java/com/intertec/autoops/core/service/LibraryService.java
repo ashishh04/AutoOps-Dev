@@ -226,7 +226,9 @@ public class LibraryService {
             item.setCategory(category.trim());
         }
         if (definition != null && !definition.isBlank()) {
-            validateDefinition(definition);
+            // The STORED type, not one the caller supplies: an edit may change
+            // a catalog item's body but never what kind of thing it is.
+            validateDefinition(definition, item.getType());
             item.setDefinition(definition);
         }
         return libraryRepository.save(item);
@@ -251,7 +253,7 @@ public class LibraryService {
     private LibraryItem save(String tenantId, String actor, String title, String description,
                              String typeCode, String category, String definition,
                              boolean premium) {
-        validateDefinition(definition);
+        validateDefinition(definition, parseType(typeCode));
         if (tenantId != null
                 && libraryRepository.existsByTenantIdAndTitleIgnoreCase(tenantId, title)) {
             throw CoreException.conflict("template_owned",
@@ -269,16 +271,63 @@ public class LibraryService {
         return libraryRepository.save(item);
     }
 
-    /** The definition must be a runnable {steps:[...]} or {nodes:[...]} object. */
-    private void validateDefinition(String definition) {
+    /**
+     * The definition has to be runnable AS THE TYPE IT CLAIMS TO BE.
+     *
+     * <p><b>This used to demand {@code steps[]} or {@code nodes[]} of every
+     * catalog item, which made an AGENT impossible to publish.</b> An agent's
+     * definition is a persona, a model and an allow-list — it has neither array
+     * — so every attempt from the provider console was refused with "Template
+     * definition must be JSON with a steps[] or nodes[] array", a message about
+     * a shape an agent is not supposed to have.
+     *
+     * <p>Nobody noticed because the agents in the catalog did not come through
+     * here. Every one was written by {@code agents/_schema/publish.py}, which
+     * inserts the row directly and never sees this check — so the console
+     * builder was complete, its tests passed against a mocked API, and the one
+     * thing it could not do was save.
+     *
+     * <p>The rule is now per type, which is what it should always have been. A
+     * single rule covering three unrelated shapes could only ever be satisfied
+     * by the two that happened to look alike.
+     */
+    private void validateDefinition(String definition, LibraryItem.Type type) {
+        JsonNode node;
         try {
-            JsonNode node = objectMapper.readTree(definition);
-            if (!node.isObject() || (!node.path("steps").isArray() && !node.path("nodes").isArray())) {
-                throw new IllegalArgumentException();
-            }
+            node = objectMapper.readTree(definition);
         } catch (Exception ex) {
             throw CoreException.badRequest("invalid_definition",
-                    "Template definition must be JSON with a steps[] or nodes[] array");
+                    "Template definition must be valid JSON");
+        }
+        if (!node.isObject()) {
+            throw CoreException.badRequest("invalid_definition",
+                    "Template definition must be a JSON object");
+        }
+        switch (type) {
+            case WORKFLOW -> require(node.path("nodes").isArray(),
+                    "A workflow definition needs a nodes[] array — the graph the runtime "
+                            + "executes.");
+            case AGENT -> require(
+                    // A JSON agent carries its allow-list; a PYTHON agent
+                    // carries only a reference to a module in the runtime's
+                    // image, and deliberately no persona and no tools of its
+                    // own. Both are legitimate catalog rows and neither has an
+                    // array this check can key on, which is how they both ended
+                    // up refused.
+                    node.path("tools").isArray()
+                            || (node.path("ref").isTextual() && !node.path("ref").asText().isBlank()),
+                    "An agent definition needs either a tools[] allow-list or, for a "
+                            + "code-authored agent, a ref naming its module.");
+            // A script's body is its steps. Unchanged, so nothing that
+            // publishes one today changes behaviour.
+            default -> require(node.path("steps").isArray(),
+                    "A script definition needs a steps[] array.");
+        }
+    }
+
+    private static void require(boolean ok, String message) {
+        if (!ok) {
+            throw CoreException.badRequest("invalid_definition", message);
         }
     }
 

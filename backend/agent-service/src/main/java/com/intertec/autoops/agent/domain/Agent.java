@@ -93,6 +93,25 @@ public class Agent {
     @Column(columnDefinition = "MEDIUMTEXT")
     private String tools;
 
+    /**
+     * Ordered, comma-separated phase names for an agent with no {@link #graphRef}.
+     *
+     * <p>NULL means this agent made no phase declaration, and it resolves to the
+     * un-phased compatibility loop — which is every agent that exists today.
+     * That default is the contract, not a migration convenience: a persona
+     * written for the old loop has no citation rule, and switching evidence
+     * enforcement on underneath one would fill its report with markers its
+     * author never accounted for. An author opts in; a deploy never does it for
+     * them.
+     *
+     * <p>Ignored entirely when {@code graphRef} is set. A shipped agent's graph
+     * is part of what was reviewed and released, and a row that could append ACT
+     * to a read-only auditor would turn a hand-edited database record into a
+     * different agent running against production.
+     */
+    @Column(length = 255)
+    private String phases;
+
     @Column(name = "tool_count", nullable = false)
     private int toolCount;
 
@@ -206,6 +225,14 @@ public class Agent {
 
     public void setTools(String tools) {
         this.tools = tools;
+    }
+
+    public String getPhases() {
+        return phases;
+    }
+
+    public void setPhases(String phases) {
+        this.phases = phases;
     }
 
     public int getToolCount() {

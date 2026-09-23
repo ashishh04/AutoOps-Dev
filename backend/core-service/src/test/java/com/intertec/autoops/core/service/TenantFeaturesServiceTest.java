@@ -230,6 +230,70 @@ class TenantFeaturesServiceTest {
     }
 
     /**
+     * An agent can be published from the console at all.
+     *
+     * <p>The bug this pins was total and silent. {@code validateDefinition}
+     * demanded {@code steps[]} or {@code nodes[]} of EVERY catalog item, and an
+     * agent's definition — a persona, a model and an allow-list — has neither.
+     * So every publish from the provider's agent builder was refused with
+     * "Template definition must be JSON with a steps[] or nodes[] array", a
+     * message about a shape an agent is not supposed to have.
+     *
+     * <p>It went unnoticed for a reason worth recording: none of the agents in
+     * the catalog arrived this way. Every one was inserted by
+     * {@code agents/_schema/publish.py}, which writes the row directly and
+     * never reaches this check. The builder's own tests passed against a mocked
+     * API. The whole path was complete except for the save.
+     */
+    @Test
+    void anAgentDefinitionCanBePublishedToTheCatalog() {
+        var item = libraryService.createPlatform("autoops", "Cost Analyst", "Finds waste",
+                "agent", "AutoOps",
+                "{\"description\":\"d\",\"model\":\"m\",\"instructions\":\"i\","
+                        + "\"tools\":[{\"type\":\"WORKFLOW\",\"ref\":\"RD-136\"}],"
+                        + "\"phases\":[\"GATHER\",\"REPORT\"]}", false);
+
+        assertEquals(com.intertec.autoops.core.domain.LibraryItem.Type.AGENT, item.getType());
+        assertTrue(item.getDefinition().contains("GATHER"));
+    }
+
+    @Test
+    void aCodeAuthoredAgentIsPublishableWithNoToolsOfItsOwn() {
+        // A PYTHON agent carries a reference to a module in the runtime's image
+        // and deliberately no persona and no allow-list. Requiring tools[] of
+        // every agent would make exactly the agents with the strongest sealing
+        // the ones that cannot be published.
+        var item = libraryService.createPlatform("autoops", "RCA", "Investigates",
+                "agent", "AWS",
+                "{\"kind\":\"PYTHON\",\"ref\":\"aws.incident_rca_analyst\","
+                        + "\"version\":\"1.0.0\"}", false);
+
+        assertEquals(com.intertec.autoops.core.domain.LibraryItem.Type.AGENT, item.getType());
+    }
+
+    @Test
+    void anAgentDefinitionThatNamesNothingRunnableIsStillRefused() {
+        // The check is now per type, not absent. An agent with neither an
+        // allow-list nor a module reference can do nothing at all, and a
+        // catalog row that cannot do anything is rollable — the customer is the
+        // one who finds out.
+        CoreException ex = assertThrows(CoreException.class,
+                () -> libraryService.createPlatform("autoops", "Hollow", null, "agent",
+                        "Ops", "{\"description\":\"nothing here\"}", false));
+
+        assertEquals("invalid_definition", ex.getError());
+    }
+
+    @Test
+    void aWorkflowStillHasToCarryItsGraph() {
+        CoreException ex = assertThrows(CoreException.class,
+                () -> libraryService.createPlatform("autoops", "Empty", null, "workflow",
+                        "Ops", "{\"tools\":[]}", false));
+
+        assertEquals("invalid_definition", ex.getError());
+    }
+
+    /**
      * Importing a workflow or agent template would hand the tenant an editable
      * copy of the provider's design — the whole thing the provider-authored
      * model prevents. Refused ahead of the plan check, because no plan tier
@@ -239,9 +303,14 @@ class TenantFeaturesServiceTest {
     void workflowAndAgentTemplatesCannotBeImportedAtAll() {
         when(entitlementClient.checkFeature(eq(TOKEN), eq("PREMIUM_TEMPLATES"))).thenReturn(OK);
 
+        // Each type gets a definition of its OWN shape. They used to share
+        // {"nodes":[]} because the definition check was one rule for every
+        // type — the same leniency that made a real agent, which has no
+        // nodes[], impossible to publish from the console.
         for (String type : new String[] {"workflow", "agent"}) {
+            String definition = "agent".equals(type) ? "{\"tools\":[]}" : "{\"nodes\":[]}";
             var item = libraryService.createPlatform("autoops", "Managed " + type, null,
-                    type, "Ops", "{\"nodes\":[]}", false);
+                    type, "Ops", definition, false);
 
             CoreException ex = assertThrows(CoreException.class,
                     () -> libraryService.clone(TENANT, ACTOR, TOKEN, item.getId()));

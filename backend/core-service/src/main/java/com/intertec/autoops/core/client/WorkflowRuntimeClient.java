@@ -200,6 +200,36 @@ public class WorkflowRuntimeClient {
     }
 
     /**
+     * What the runtime says a designer may build.
+     *
+     * <p>Node types, their fields, which are mandatory and what the legal
+     * values are — read from the models that will execute the definition, so
+     * the console's form and the runtime's validator cannot disagree. The
+     * alternative, a constant in the frontend, is a second copy of a contract
+     * that changes in Python, and this codebase has already paid twice for a
+     * hand-kept copy of the runtime's node types.
+     *
+     * <p>Null when the runtime is unreachable, and the caller must say so
+     * rather than fall back to a built-in palette. A designer quietly offering
+     * a stale palette is exactly the failure this endpoint exists to end: the
+     * author would build something the runtime refuses and find out at run
+     * time, having been shown no warning.
+     */
+    public JsonNode authoringSchema() {
+        try {
+            return restClient.get()
+                    .uri("/v1/authoring/schema")
+                    .header("X-Internal-Token", properties.getRuntime().getInternalToken())
+                    .retrieve()
+                    .body(JsonNode.class);
+        } catch (Exception ex) {
+            log.warn("Could not read the authoring schema from the runtime: {}",
+                    ex.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Reads the NDJSON stream and returns the final outcome, or null when the
      * stream ends without one.
      *

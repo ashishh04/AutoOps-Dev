@@ -133,6 +133,9 @@ def check_consistency(workflows, agents, manifests):
                     f"manifest must carry nothing the customer should not read."
                 )
 
+    # Agents only, and that is the point: an agent and a workflow MAY share a
+    # title — they are different rows of different types — and it is only two
+    # items of the SAME type that this script could not tell apart.
     titles = [m["name"] for m in manifests] + [load(p)["name"] for p in agents]
     for title in {t for t in titles if titles.count(t) > 1}:
         # The catalog has no unique key on title, but this script matches on it
@@ -239,7 +242,33 @@ class Api:
             sys.exit(f"{method} {path} failed: HTTP {exc.code} — {exc.read().decode()[:300]}")
 
     def catalog(self):
-        return {i["title"]: i for i in self._call("GET", "/provider/library")}
+        """Every catalog item already published, by title.
+
+        Read from ``GET /library`` and not ``GET /provider/library``, which does
+        not exist — ``ProviderController`` has only POST and PUT there, so this
+        script's API mode has been failing with a 500 ("Request method 'GET' is
+        not supported") at the very first call. The rows in the catalog today
+        were put there by ``--print-sql``, which never touches this path.
+
+        ``/library`` is the right source anyway: it is the same read the
+        provider's own Library screen uses, and for a PROVIDER it carries the
+        definitions and the rollout counts. Matching on title is what makes
+        re-running safe, so this list has to be complete or every item would be
+        created a second time.
+        """
+        rows = self._call("GET", "/library")
+        # Keyed by (TYPE, title), not title alone.
+        #
+        # The catalog has 213 imported PowerShell scripts and some share a title
+        # with a workflow built from the same runbook — "AWS Unused EBS Volume
+        # Cleanup" is both script #36 and workflow RD-142. Matching on title
+        # alone found the script and sent it the workflow's node graph, which
+        # left a catalog SCRIPT holding a definition with no steps[] in it: a
+        # row that looks fine in the library and cannot run.
+        #
+        # Platform items only, for the same reason — a provider's own workspace
+        # copy of a template would shadow the catalog row and take the update.
+        return {(i["type"], i["title"]): i for i in rows if i.get("managed")}
 
     def create(self, payload):
         return self._call("POST", "/provider/library", payload)
@@ -367,7 +396,7 @@ def main():
     existing = api.catalog()
     created = updated = 0
     for kind, _, payload in planned:
-        found = existing.get(payload["title"])
+        found = existing.get((payload["type"], payload["title"]))
         if found:
             api.update(found["id"], payload)
             updated += 1

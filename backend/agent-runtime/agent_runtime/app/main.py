@@ -21,6 +21,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agent_runtime import agents
+from agent_runtime.app.authoring import schema as authoring_schema
 from agent_runtime.app.config import settings
 from agent_runtime.app.models import is_runnable
 from agent_runtime.app.reduce import reduce
@@ -126,6 +127,29 @@ def reduce_endpoint(request: ReduceRequest) -> ReduceResponse:
         response.usage.completion_tokens,
     )
     return response
+
+
+@app.get("/v1/authoring/schema", dependencies=[Depends(require_internal_token)])
+def authoring_schema_endpoint() -> dict:
+    """What a designer is allowed to build, straight out of the models.
+
+    The console needs a palette: which node types exist, which fields each one
+    takes, which are mandatory, what the legal values are. The cheap way to
+    supply that is a constant in the frontend — and a constant is a second copy
+    of a contract that changes here. It goes stale silently: the runtime gains a
+    node type, the console never offers it, and the first person to notice is
+    whoever asks why a workflow authored in the console cannot do what one
+    authored in the repo can.
+
+    So it is served from the same models that execute the definition. The
+    required flags in particular are not asserted but PROBED — built by asking
+    ``Node``'s own validator whether it minds a field being absent — which means
+    the designer's red asterisk and the runtime's refusal can never disagree.
+
+    Cacheable and boring: it depends on nothing but this build, so a console can
+    fetch it once per page load without thinking about it.
+    """
+    return authoring_schema()
 
 
 @app.post("/v1/workflows/run", dependencies=[Depends(require_internal_token)])

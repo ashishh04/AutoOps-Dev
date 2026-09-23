@@ -1,5 +1,6 @@
 package com.intertec.autoops.alerts.config;
 
+import com.intertec.autoops.alerts.security.InternalTokenFilter;
 import com.intertec.autoops.alerts.security.RestAuthEntryPoint;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -35,8 +36,12 @@ import java.util.List;
  * monitoring source means handing a third party's credentials to the platform —
  * not something a read-only role does.
  *
- * <p>There is no {@code /internal/**} surface. Nothing in the platform calls
- * this service; the console does, through the gateway, with a user token.
+ * <p>There IS now one {@code /internal/**} surface, guarded by
+ * {@link com.intertec.autoops.alerts.security.InternalTokenFilter} and routed
+ * to by nothing in the gateway. It exists because the escalation agent has to
+ * read incidents, and an agent cannot hold a user token — this service sits in
+ * front of the incident engine, so there is no way round it. Everything else
+ * here is still console-only, through the gateway, with a user token.
  */
 @Configuration
 @EnableWebSecurity
@@ -47,13 +52,19 @@ public class SecurityConfig {
     private static final String[] WRITER_ROLES = {"ADMIN", "CLIENT", "PROVIDER"};
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http, RestAuthEntryPoint entryPoint)
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, RestAuthEntryPoint entryPoint,
+                                                   InternalTokenFilter internalTokenFilter)
             throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(Customizer.withDefaults())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(internalTokenFilter,
+                        org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter.class)
                 .authorizeHttpRequests(auth -> auth
+                        // permitAll here means "no USER token"; InternalTokenFilter
+                        // has already refused anything without the platform token.
+                        .requestMatchers("/internal/**").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                         .requestMatchers("/swagger-ui.html", "/swagger-ui/**", "/v3/api-docs/**").permitAll()
                         // PUBLIC by design: a customer's monitoring tool has no

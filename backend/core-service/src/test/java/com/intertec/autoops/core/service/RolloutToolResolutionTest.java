@@ -60,7 +60,7 @@ class RolloutToolResolutionTest {
         when(entitlements.checkTenant("acme"))
                 .thenReturn(new EntitlementClient.Decision(true, null, null, null));
         when(agentClient.rollOut(anyString(), anyString(), any(), anyLong(), anyLong(),
-                anyString(), any(), any(), any(), any(), any(), any()))
+                anyString(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new AgentClient.RolledOutAgent(77L, "Linux Server Health Check Agent", 1));
 
         service = new RolloutService(libraryRepository, projects, workflowClient, agentClient,
@@ -107,7 +107,7 @@ class RolloutToolResolutionTest {
     private String deliveredTools() {
         ArgumentCaptor<String> tools = ArgumentCaptor.forClass(String.class);
         verify(agentClient).rollOut(anyString(), anyString(), any(), anyLong(), anyLong(),
-                anyString(), any(), any(), any(), any(), any(), tools.capture());
+                anyString(), any(), any(), any(), any(), any(), tools.capture(), any());
         return tools.getValue();
     }
 
@@ -183,7 +183,7 @@ class RolloutToolResolutionTest {
         assertThat(result.failed()).isEqualTo(1);
         assertThat(result.deliveries().get(0).error()).contains("RD-079-missing");
         verify(agentClient, never()).rollOut(anyString(), anyString(), any(), anyLong(),
-                anyLong(), anyString(), any(), any(), any(), any(), any(), any());
+                anyLong(), anyString(), any(), any(), any(), any(), any(), any(), any());
     }
 
     // ------------------------------------- components: delivered, not sold ---
@@ -296,7 +296,7 @@ class RolloutToolResolutionTest {
         ArgumentCaptor<String> graphVersion = ArgumentCaptor.forClass(String.class);
         verify(agentClient).rollOut(anyString(), anyString(), any(), anyLong(), anyLong(),
                 anyString(), any(), any(), instructions.capture(), graphRef.capture(),
-                graphVersion.capture(), any());
+                graphVersion.capture(), any(), any());
 
         assertThat(instructions.getValue()).isNull();
         assertThat(graphRef.getValue()).isEqualTo("linux.server_health_check");
@@ -315,7 +315,7 @@ class RolloutToolResolutionTest {
         ArgumentCaptor<String> graphRef = ArgumentCaptor.forClass(String.class);
         verify(agentClient).rollOut(anyString(), anyString(), any(), anyLong(), anyLong(),
                 anyString(), any(), any(), instructions.capture(), graphRef.capture(),
-                any(), any());
+                any(), any(), any());
 
         assertThat(instructions.getValue()).isEqualTo("i");
         assertThat(graphRef.getValue()).isNull();

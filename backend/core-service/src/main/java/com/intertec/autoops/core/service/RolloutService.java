@@ -320,8 +320,44 @@ public class RolloutService {
                 python ? null : text(spec, "instructions", null),
                 python ? text(spec, "ref", null) : null,
                 python ? text(spec, "version", null) : null,
-                tools);
+                tools,
+                // A console-authored agent's phase list, which is what gets it
+                // the real runtime rather than the un-phased compatibility
+                // loop. Null for a Python agent, whose phases are in its module
+                // — a row that could reshape a released graph would turn a
+                // hand-edited catalog entry into a different agent running
+                // against production.
+                python ? null : declaredPhases(spec));
         return created != null ? created.id() : null;
+    }
+
+    /**
+     * The phase list a console-authored agent declared, as stored text.
+     *
+     * <p>Comma-separated and order-preserving, because the graph is built from
+     * the list: {@code [GATHER, TRIAGE]} is a different agent from
+     * {@code [TRIAGE, GATHER]}, not the same set written differently.
+     *
+     * <p>Null when the catalog entry declares nothing, which is what keeps every
+     * agent authored before this existed on the loop its persona was written
+     * for. Validating the NAMES is deliberately not done here — the runtime is
+     * the authority on which phases a build has, and a catalog entry naming one
+     * this deployment lacks is an ordering problem it reports clearly, not
+     * something to fail a delivery over.
+     */
+    private String declaredPhases(JsonNode spec) {
+        JsonNode phases = spec.path("phases");
+        if (!phases.isArray() || phases.isEmpty()) {
+            return null;
+        }
+        List<String> names = new ArrayList<>();
+        for (JsonNode phase : phases) {
+            String name = phase.asText("").trim();
+            if (!name.isEmpty() && !names.contains(name)) {
+                names.add(name);
+            }
+        }
+        return names.isEmpty() ? null : String.join(",", names);
     }
 
     /**
@@ -398,6 +434,16 @@ public class RolloutService {
             // be offered to exactly the phase that must not see it.
             entry.put("mutating", !tool.path("mutating").isBoolean()
                     || tool.path("mutating").asBoolean());
+            // Where this tool's output names the subjects the run examined.
+            // A Python agent declares this in its module; an agent authored in
+            // the console has no module, so this is the only path its
+            // declaration has — and without one its findings can never be
+            // reaped, because nothing it claims to have covered is checkable.
+            // agent-service validates the shape; this only has to carry it.
+            JsonNode subjects = tool.path("subjects");
+            if (subjects.isArray() && !subjects.isEmpty()) {
+                entry.set("subjects", subjects);
+            }
         }
 
         if (!missing.isEmpty()) {

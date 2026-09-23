@@ -2,11 +2,30 @@ server:
   port: ${SERVER_PORT:8091}
 
 spring:
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:autoops_alerts}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${DB_USER:autoops}
+    password: ${DB_PASSWORD:autoops}
+  jpa:
+    hibernate:
+      # Flyway owns the schema. Hibernate validating it would be a second
+      # opinion nobody asked for; Hibernate CREATING it would build a schema no
+      # environment runs, which is the blind spot that cost this project a
+      # production migration failure once already.
+      ddl-auto: none
+    open-in-view: false
+  flyway:
+    enabled: true
+    baseline-on-migrate: false
   application:
     name: alert-service
 
 autoops:
   alerts:
+    # The shared platform token, same one core-service uses. One secret, not a
+    # second to rotate — see InternalTokenFilter. Unset refuses every internal
+    # call rather than opening the surface.
+    internal-token: ${CORE_INTERNAL_TOKEN:}
     jwks-uri: ${AUTH_JWKS_URI:http://localhost:8081/oauth2/jwks}
     issuer: ${JWT_ISSUER:autoops-auth-service}
     # THE ENGINE. One Keep behind the whole product.
@@ -38,6 +57,23 @@ autoops:
       # the size of the window we scan, not the size of the answer. Raising it
       # costs latency on every list call; it is not free.
       max-fetch: ${KEEP_MAX_FETCH:1000}
+
+  # Correlation and root-cause analysis. Optional: blank HOLMES_URL turns
+  # investigation off and the console hides it rather than erroring.
+  ops:
+    holmes:
+      url: ${HOLMES_URL:}
+      api-key: ${HOLMES_API_KEY:}
+      connect-timeout: ${HOLMES_CONNECT_TIMEOUT:5s}
+      # An investigation runs a dozen tools and several model round trips.
+      # Never on a page load - only on an explicit request.
+      read-timeout: ${HOLMES_READ_TIMEOUT:5m}
+    # AutoOps's own agents. An AWS incident is investigated by the agent
+    # that can join CloudWatch alarms to the CloudTrail change timeline,
+    # on the tenant's own credentials - the engine above has no AWS tools.
+    agent:
+      base-url: ${AGENT_SERVICE_URL:http://agent-service:8087}
+      rca-agent-name: ${AWS_RCA_AGENT_NAME:AWS Incident RCA Analyst}
 
 management:
   endpoints:

@@ -378,6 +378,35 @@ public class AgentRunService {
      * row per step — is still here, because all of it depends on the database
      * and the approvals inbox, and neither of those crosses to Python.
      */
+    /**
+     * The phases a console-authored agent declared, in order.
+     *
+     * <p>Stored as a comma-separated string because it is an ordered list of a
+     * handful of short enum names that nothing joins against — a child table
+     * would buy referential integrity over a vocabulary that lives in Python
+     * and cannot be a foreign key anyway.
+     *
+     * <p>Empty for every agent that exists today, which is what keeps them on
+     * the un-phased loop their personas were written for. Unknown names are
+     * passed through rather than filtered: the runtime is the authority on
+     * which phases this build has, and dropping one here would hide a
+     * catalog-ahead-of-deployment problem that it reports clearly.
+     */
+    private static List<String> declaredPhases(Agent agent) {
+        String declared = agent.getPhases();
+        if (declared == null || declared.isBlank()) {
+            return List.of();
+        }
+        List<String> phases = new ArrayList<>();
+        for (String name : declared.split(",")) {
+            String trimmed = name.trim();
+            if (!trimmed.isEmpty() && !phases.contains(trimmed)) {
+                phases.add(trimmed);
+            }
+        }
+        return phases;
+    }
+
     private void driveWithRuntime(AgentRun run, Agent agent, AgentToolbox.Toolbox tools,
                                   ModelCredentialsClient.Resolved resolved) {
         // Finishes any turn left half-answered by an approval. Null means the
@@ -406,7 +435,19 @@ public class AgentRunService {
                     // row. A Python-authored one carries its own, in the
                     // runtime's image, and this is null.
                     agent.getGraphRef() == null ? agent.getInstructions() : null,
-                    run.getTranscript(), event, tools.offered(), tools.skipped()));
+                    run.getTranscript(), event, tools.offered(), tools.skipped(),
+                    // Only an agent with no module declares its own phases. A
+                    // shipped agent's graph is part of what was reviewed and
+                    // released, and a row that could append ACT to a read-only
+                    // auditor would make a hand-edited record into a different
+                    // agent running against production. The runtime enforces
+                    // the same rule; sending nothing here means it never has to.
+                    agent.getGraphRef() == null ? declaredPhases(agent) : List.of(),
+                    // The stored allow-list, for the per-tool subject
+                    // declarations inside it. The STORED one rather than the
+                    // offered one on purpose — see RuntimeClient.subjectsOf.
+                    agent.getTools(),
+                    agent.getName()));
 
             run.setTranscript(reduction.state());
             run.setStateVersion(reduction.stateVersion());

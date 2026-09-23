@@ -127,6 +127,30 @@ class ToolSpecWire(BaseModel):
     ref: str | None = None
 
 
+class SubjectSourceWire(BaseModel):
+    """Where a tool's output names the subjects a run examined, as authored.
+
+    The same five fields as :class:`~agent_runtime.app.extraction.SubjectSource`,
+    which is what this is converted into. It exists separately because that one
+    is a frozen dataclass internal to extraction, and pinning a wire contract to
+    an internal type is how a refactor becomes a breaking API change.
+
+    **Why this is on the wire at all.** A Python-authored agent declares its
+    sources in its module, and that declaration ships in this image. An agent
+    authored in the provider console has no module — its whole definition is a
+    row in a database — so without a wire path it can declare nothing, claim no
+    coverage, and produce findings that can never be reaped. That is not a small
+    gap: it is the difference between a console-authored agent being a real
+    agent and being a chat prompt with tools.
+    """
+
+    subject_kind: str
+    items: str = ""
+    id_template: str
+    total_field: str | None = None
+    truncated_field: str | None = None
+
+
 class ToolCallWire(BaseModel):
     """A tool the model asked for.
 
@@ -394,12 +418,54 @@ class AgentDescriptor(BaseModel):
     #: nothing about which agent or why.
     ref: str | None = None
     version: str | None = None
+
+    #: What this agent is called, for the trace list.
+    #:
+    #: A Python agent is identified by its ``ref``; an agent authored in the
+    #: console has none — its identity is a catalog row, and the runtime resolves
+    #: every one of them to the same module. Without this, every console-authored
+    #: agent on the platform traces as ``agent:unspecified`` and they cannot be
+    #: told apart, which makes the trace list useless for exactly the agents a
+    #: provider is most likely to be iterating on.
+    #:
+    #: Provider-authored text, never a customer's, and never anything observed
+    #: inside an estate — the same standard as every other tag.
+    name: str | None = None
     model: str
     vendor: Vendor
     credentials: dict[str, str] = Field(default_factory=dict, repr=False)
     params: dict[str, Any] = Field(default_factory=dict)
     instructions: str | None = Field(default=None, repr=False)
     max_tokens: int = 4096
+
+    #: The phases a console-authored agent runs, in order.
+    #:
+    #: Empty means "this agent has no phase declaration", which resolves to the
+    #: un-phased compatibility loop exactly as it did before this field existed.
+    #: Every agent that runs today sends nothing here and is unaffected — the
+    #: phased runtime is something an author OPTS INTO, never something a
+    #: redeploy switches on underneath a persona written for the old loop.
+    #:
+    #: Order is meaning: the graph is built from this list, so ``[GATHER,
+    #: TRIAGE]`` is a different agent from ``[TRIAGE, GATHER]``.
+    phases: list[str] = Field(default_factory=list)
+
+    #: Subject sources per tool ref, for an agent with no module to declare them.
+    #:
+    #: **On the descriptor rather than on each** :class:`ToolSpecWire`, and the
+    #: reason is subtle enough to be worth stating. A run declares the subject
+    #: kinds it intends to cover at its START and reports what it covered at its
+    #: FINISH, and the second may narrow the first but may never drop a kind —
+    #: silence is not narrowing. The per-run tool list is not stable across a
+    #: run: a tool whose delivered copy is deleted mid-run moves to
+    #: ``unavailable`` and disappears from ``tools``. Hanging the declaration off
+    #: that list would make the closing claim name fewer kinds than the opening
+    #: one, which agent-service correctly refuses — costing the run its reap for
+    #: a reason no operator could ever diagnose.
+    #:
+    #: Keyed by ref because that is the stable name the author declared against;
+    #: ``ToolSpecWire.name`` is ``workflow_<id>``, a tenant-local number.
+    subjects: dict[str, list[SubjectSourceWire]] = Field(default_factory=dict)
 
     def __str__(self) -> str:  # pragma: no cover - diagnostics only
         return f"AgentDescriptor(ref={self.ref!r}, version={self.version!r}, model={self.model!r})"

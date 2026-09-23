@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     #: resolution, the approvals gate and the audit trail it always has. This
     #: service still cannot reach a customer's infrastructure.
     core_base_url: str = "http://core-service:8083"
+
+    #: alert-service, reached by the platform node's `incidents` source.
+    #:
+    #: The same internal token authorises both — one shared platform secret, not
+    #: a second one to rotate. See InternalTokenFilter in each service.
+    alert_base_url: str = "http://alert-service:8091"
     core_internal_token: str = "dev-internal-token"
 
     #: How often a `job` node asks whether the run it started has finished.

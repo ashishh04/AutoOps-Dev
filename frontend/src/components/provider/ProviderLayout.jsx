@@ -12,6 +12,9 @@ const NAV = [
     items: [
       { to: "/provider", label: "Dashboard", icon: "dashboard", end: true },
       { to: "/provider/tenants", label: "Tenants", icon: "users" },
+      // Every tenant at once. Sits beside Tenants rather than under
+      // Library because it is an operational view, not a catalog one.
+      { to: "/provider/fleet", label: "Fleet", icon: "pulse" },
       { to: "/provider/notifications", label: "Notifications", icon: "bell" },
     ],
   },

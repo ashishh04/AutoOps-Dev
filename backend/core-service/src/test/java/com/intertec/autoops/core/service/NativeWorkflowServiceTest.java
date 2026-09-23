@@ -55,6 +55,54 @@ class NativeWorkflowServiceTest {
     }
 
     @Test
+    void recognisesAGraphThatREADSThePlatformsOwnRecord() {
+        // The SECOND time this list went stale, and the reason it is no longer
+        // only a comment. `platform` was added to the runtime's NodeType and
+        // not here, so RD-220 and RD-221 — the two workflows that read
+        // AutoOps's own activity and open incidents, and the evidence source
+        // behind the escalation agent — stopped being recognised as native.
+        //
+        // Both are real shipped artefacts, which is why this went unnoticed:
+        // nothing in this module's tests reads them, and only the service
+        // directory is mounted for the build, so nothing here can. The guard
+        // that operates on the real list is `unsupportedNodeTypes`.
+        assertThat(service.isNative("""
+                {"nodes":[{"id":"start","type":"start"},
+                          {"id":"ctx","type":"platform","source":"incidents"},
+                          {"id":"end","type":"end"}]}
+                """)).isTrue();
+    }
+
+    @Test
+    void namesTheNodeTypesTheRuntimeCanRunAndThisServiceWouldNotDispatch() {
+        // The whole failure above, reduced to one question that can be asked of
+        // a live runtime: is there anything it executes that we would send to
+        // the step walker? Reported to the designer so nobody can author one.
+        assertThat(service.unsupportedNodeTypes(
+                java.util.List.of("start", "llm", "platform", "end", "webhook", "sleep")))
+                .containsExactly("sleep", "webhook");
+    }
+
+    @Test
+    void saysNothingIsUnsupportedWhenEverythingTheRuntimeRunsIsKnown() {
+        assertThat(service.unsupportedNodeTypes(
+                java.util.List.of("start", "llm", "platform", "job", "http",
+                        "template", "condition", "end")))
+                .isEmpty();
+    }
+
+    @Test
+    void doesNotReportDriftWhenTheRuntimeSimplyDidNotAnswer() {
+        // "The runtime supports nothing" and "the runtime is unreachable" must
+        // not produce the same output. An empty list read as total divergence
+        // would put a red warning on the designer every time the runtime
+        // restarted, and a warning that cries wolf is how the real one gets
+        // ignored — which is the failure this whole check exists to catch.
+        assertThat(service.unsupportedNodeTypes(java.util.List.of())).isEmpty();
+        assertThat(service.unsupportedNodeTypes(null)).isEmpty();
+    }
+
+    @Test
     void doesNotClaimAJobsSteps() {
         // A job carries steps[], not nodes[].
         assertThat(service.isNative("""

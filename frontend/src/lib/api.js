@@ -1601,6 +1601,42 @@ export const api = {
   providerHealth: () => realFetch("/provider/health", { auth: true }),
   providerInvoices: () => realFetch("/provider/payments", { auth: true }),
   providerAudit: () => realFetch("/provider/audit", { auth: true }),
+
+  // ---- fleet: every tenant at once, which is a different question ----
+  // Not the tenant endpoints with a wider filter. A customer asks what is wrong
+  // with their system; a provider asks which customer is on fire and which one
+  // has quietly stopped sending anything. The second is answered by absence, so
+  // these return per-tenant rollups the console joins against the directory —
+  // a tenant missing from a rollup is the finding.
+  providerFleetAlerts: () => realFetch("/provider/fleet/alerts", { auth: true }),
+  providerFleetIncidents: () =>
+    realFetch("/provider/fleet/incidents", { auth: true }),
+  providerFleetAgents: (days = 7) =>
+    realFetch(`/provider/fleet/agents?days=${days}`, { auth: true }),
+
+  // What a designer may build, read from the runtime's own models rather than
+  // remembered here. A palette hardcoded in this file is a second copy of a
+  // contract that changes in Python, and it goes stale silently: the runtime
+  // gains a node type, the console never offers it, and a missing palette entry
+  // looks like a design decision rather than a bug. That exact coupling has
+  // already cost this platform twice on the Java side.
+  //
+  // Deliberately NOT cached across a session. It is one small request per page
+  // load, and a cache would mean a console kept offering yesterday's palette
+  // after the runtime was upgraded underneath it.
+  providerAuthoringSchema: () =>
+    realFetch("/provider/authoring/schema", { auth: true }),
+
+  // The same `inspect` the execution path uses, so the designer's verdict and
+  // the one that decides whether a run works are the same verdict. A validator
+  // written in this file would be a second opinion, and the two would disagree
+  // on exactly the definitions worth checking — the odd ones.
+  providerValidateWorkflow: (definition) =>
+    realFetch("/provider/authoring/validate", {
+      method: "POST",
+      auth: true,
+      body: definition,
+    }),
   createBroadcast: (body) =>
     realFetch("/provider/broadcasts", { method: "POST", auth: true, body }),
   providerUpdatePlan: (code, body) =>

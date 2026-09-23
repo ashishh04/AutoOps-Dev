@@ -1,0 +1,31 @@
+{
+  "taskId": "RD-221",
+  "domain": "AutoOps",
+  "title": "Open Incident Routing Context",
+  "description": "Every incident currently open in this project, with its severity, status, affected services, current assignee and how long it has been running. Read-only. Vendor-agnostic - it reads the platform's own incident record, so it is the same evidence whether the alerts came from Datadog, CloudWatch or an Airflow DAG. Deliberately unwindowed: \"what is open\" is a question about now, and a lookback would hide the incident burning since Tuesday - the one routing most needs.",
+  "category": "Operations",
+  "runtime": "native",
+  "inputs": [],
+  "nodes": [
+    { "id": "start", "type": "start", "title": "Start" },
+    {
+      "id": "open",
+      "type": "platform",
+      "source": "incidents",
+      "title": "Read the open incidents"
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "title": "End",
+      "outputs": [
+        { "variable": "incidents", "value": "{{#open.incidents#}}" }
+      ]
+    }
+  ],
+  "edges": [
+    { "source": "start", "target": "open" },
+    { "source": "open", "target": "end" }
+  ],
+  "requires": []
+}

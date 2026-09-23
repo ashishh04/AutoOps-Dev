@@ -13,6 +13,16 @@ public class AlertProperties {
     /** The value shipped in docker-compose.keep.yml. */
     public static final String DEV_INGEST_SECRET = "dev-alert-ingest-secret-change-me";
 
+    /**
+     * Shared platform token for the {@code /internal/**} surface.
+     *
+     * <p>Empty by default, and an empty token REFUSES every internal call
+     * rather than accepting them. A service that silently opens its internal
+     * surface because a variable was not set is the failure the check exists to
+     * prevent.
+     */
+    private String internalToken = "";
+
     private String jwksUri = "http://localhost:8081/oauth2/jwks";
     private String issuer = "autoops-auth-service";
     private Engine engine = new Engine();
@@ -130,6 +140,14 @@ public class AlertProperties {
         public void setMaxFetch(int maxFetch) {
             this.maxFetch = maxFetch;
         }
+    }
+
+    public String getInternalToken() {
+        return internalToken;
+    }
+
+    public void setInternalToken(String internalToken) {
+        this.internalToken = internalToken;
     }
 
     public String getJwksUri() {

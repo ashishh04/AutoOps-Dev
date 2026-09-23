@@ -25,14 +25,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agent_runtime.agents.autoops import activity_correlator
+from agent_runtime.agents.autoops import activity_correlator, escalation_router
 from agent_runtime.agents.aws import (
+    alert_quality_analyst,
     cost_anomaly_investigator,
+    finops_analyst,
     idle_resource_reclaimer,
     incident_rca_analyst,
     public_exposure_auditor,
 )
-from agent_runtime.agents.generic import single_phase
+from agent_runtime.agents.generic import phased, single_phase
 from agent_runtime.agents.m365 import offboarding_auditor, privileged_access_auditor
 from agent_runtime.agents.spec import AgentSpec
 
@@ -45,9 +47,12 @@ REGISTRY: dict[str, AgentSpec] = {
         # The platform's own plane first: it is the only one that needs no
         # vendor credential and works for every estate.
         activity_correlator.AGENT,
+        escalation_router.AGENT,
         incident_rca_analyst.AGENT,
         public_exposure_auditor.AGENT,
         cost_anomaly_investigator.AGENT,
+        finops_analyst.AGENT,
+        alert_quality_analyst.AGENT,
         idle_resource_reclaimer.AGENT,
         offboarding_auditor.AGENT,
         privileged_access_auditor.AGENT,
@@ -81,8 +86,23 @@ class Resolution:
         )
 
 
-def resolve(ref: str | None, version: str | None = None) -> Resolution:
-    """Looks up an agent, or refuses by name."""
+def resolve(ref: str | None, version: str | None = None,
+            declared_phases: list[str] | tuple[str, ...] = ()) -> Resolution:
+    """Looks up an agent, or refuses by name.
+
+    ``declared_phases`` is how an agent with no module of its own gets the real
+    runtime. It is read ONLY when there is no ref — an agent that names a module
+    is that module, and a descriptor that somehow carried both must not be able
+    to reshape a shipped agent's graph from a database row.
+
+    An agent with no ref and no phases resolves exactly where it always did, to
+    the un-phased compatibility loop. That is what makes this change invisible
+    to everything already running: the phased runtime is reached by declaring
+    phases, never by being redeployed.
+    """
+    if not (ref or "").strip() and declared_phases:
+        return Resolution(spec=phased.spec_for(phased.phases_from(declared_phases)))
+
     key = (ref or DEFAULT_REF).strip()
     spec = REGISTRY.get(key)
     if spec is None:

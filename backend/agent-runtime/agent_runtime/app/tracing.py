@@ -111,7 +111,11 @@ def _tags(agent: AgentDescriptor, tenant_id: str | None) -> list[str]:
     without a query.
     """
     return [
-        f"agent:{agent.ref or 'unspecified'}",
+        # The ref when there is one, the catalog name when there is not. A
+        # console-authored agent has no ref — every one of them resolves to the
+        # same module — so falling straight through to 'unspecified' put all of
+        # them in one undifferentiated bucket.
+        f"agent:{agent.ref or agent.name or 'unspecified'}",
         f"agent_version:{agent.version or 'unversioned'}",
         f"prompts:{PROMPT_VERSION}",
         f"vendor:{agent.vendor.value}",

@@ -217,7 +217,10 @@ export default function ProviderLibrary() {
   });
 
   const [page, setPage] = useState(1);
-  const pageSize = 5;
+  // Six, not five: the grid is three columns, so five leaves a gap in the
+  // second row on every page. A page size that is not a multiple of the column
+  // count always looks like something failed to load.
+  const pageSize = 6;
   const totalPages = Math.ceil(filtered.length / pageSize) || 1;
   const currentPage = Math.min(page, totalPages);
   const visibleFiltered = filtered.slice(
@@ -279,15 +282,17 @@ export default function ProviderLibrary() {
             >
               New agent
             </SmallButton>
-            {/* Designing and OFFERING are two acts. "New workflow" opens the
-                workflow designer; this puts an already-published one in the
-                catalog, which is what makes it rollable. */}
-            <SmallButton
-              icon="cloud"
-              onClick={() => navigate("/provider/library/workflow/publish")}
-            >
-              Publish
-            </SmallButton>
+            {/* There is no "Import" button beside this one any more, and there
+                should not be: it navigated to the same designer with the
+                import panel pre-opened, so two buttons that read as two
+                different acts did the same thing. Importing a definition is
+                something you do INSIDE the designer — it already has its own
+                Import control — not a separate way to start.
+
+                (It replaced a "Publish" button pointing at
+                /library/workflow/publish, a route that has never existed. That
+                act — putting an already-authored workflow in the catalog — is
+                what the designer's Import does now.) */}
             <SmallButton
               icon="blocks"
               variant="primary"
@@ -461,17 +466,19 @@ export default function ProviderLibrary() {
                     </div>
                   ) : (
                     <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
-                      {/* Only agents: a workflow's definition is a node graph
-                          with no editor behind it yet, so an Edit button there
-                          would open nothing. */}
-                      {r.type === "agent" && (
-                        <SmallButton
-                          icon="pencil"
-                          onClick={() => navigate(`/provider/library/agent/${r.id}`)}
-                        >
-                          Edit
-                        </SmallButton>
-                      )}
+                      {/* Workflows are editable now. This used to be agents
+                          only, on the reasoning that a workflow's definition is
+                          a node graph with no editor behind it — true until the
+                          designer existed, and it left every published workflow
+                          in the catalog permanently unopenable. */}
+                      <SmallButton
+                        icon="pencil"
+                        onClick={() =>
+                          navigate(`/provider/library/${r.type}/${r.id}`)
+                        }
+                      >
+                        Edit
+                      </SmallButton>
                       <SmallButton
                         icon="bolt"
                         variant="primary"

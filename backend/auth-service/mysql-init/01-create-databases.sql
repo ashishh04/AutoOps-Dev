@@ -47,3 +47,12 @@ CREATE DATABASE IF NOT EXISTS autoops_rundeck
     CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 GRANT ALL PRIVILEGES ON autoops_rundeck.* TO 'autoops'@'%';
 FLUSH PRIVILEGES;
+
+-- alert-service's first database. It stays a facade over Keep and the incident
+-- engine for alerts and incidents themselves; this holds only what the platform
+-- itself decided — where a page went, whether it was acked, and whether the
+-- routing turned out to be right.
+CREATE DATABASE IF NOT EXISTS autoops_alerts
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+GRANT ALL PRIVILEGES ON autoops_alerts.* TO 'autoops'@'%';
+FLUSH PRIVILEGES;

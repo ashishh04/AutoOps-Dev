@@ -67,7 +67,7 @@ public class InternalAgentController {
         Agent agent = agentService.rollOut(tenantId, actor, accessToken, projectId, sourceId,
                 request.name(), request.description(), request.model(),
                 request.instructions(), request.graphRef(), request.graphVersion(),
-                request.tools());
+                request.tools(), request.phases());
         return new RolledOutAgent(agent.getId(), agent.getName(), agent.getToolCount());
     }
 

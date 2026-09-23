@@ -41,16 +41,62 @@ public class NativeWorkflowService {
      * Node types that only a native graph uses.
      *
      * <p><b>This list must match {@code NodeType} in the runtime's
-     * {@code workflows/spec.py}.</b> The coupling is real and it bit once: a
-     * {@code job} node was added there and not here, so a workflow containing
-     * one stopped being recognised as native, fell through to the step walker,
-     * and failed with "No executor for step type 'start'". The failure was at
-     * least loud — {@link #isNative} refuses a graph it does not fully
-     * understand rather than running the parts it recognises — but the two
-     * lists still have to be kept in step by hand.
+     * {@code workflows/spec.py}.</b> The coupling is real and it has now bitten
+     * TWICE. First a {@code job} node was added there and not here. Then a
+     * {@code platform} node was, and both {@code RD-220} and {@code RD-221}
+     * — the two workflows that read AutoOps's own record, and the evidence
+     * source behind the escalation agent — stopped being recognised as native,
+     * fell through to the step walker and failed with "No executor for step
+     * type 'start'".
+     *
+     * <p>Twice is a pattern, and the pattern is that a hand-kept copy of
+     * somebody else's enum goes stale silently. {@link #isNative} refuses a
+     * graph it does not fully understand rather than running the parts it
+     * recognises, so the failure is at least loud at run time — but by then a
+     * customer has watched a workflow fail. The runtime now publishes its own
+     * node types at {@code /v1/authoring/schema}, and
+     * {@link #unsupportedNodeTypes} compares this list against them so the
+     * divergence surfaces on the designer screen rather than in a run.
+     *
+     * <p>This stays a constant rather than becoming a fetch because
+     * {@link #isNative} runs on the dispatch path: a workflow must still be
+     * dispatchable correctly when the runtime is briefly unreachable, and a
+     * graph that got classified as a step list because of a network blip would
+     * do nothing and report success.
      */
     private static final java.util.Set<String> GRAPH_NODE_TYPES =
-            java.util.Set.of("start", "llm", "job", "http", "template", "condition", "end");
+            java.util.Set.of("start", "llm", "platform", "job", "http", "template",
+                    "condition", "end");
+
+    /**
+     * Node types the runtime can execute and this service would not dispatch.
+     *
+     * <p>Empty is the healthy answer. A non-empty one means a workflow built
+     * from those types will be mis-classified here, so the designer must not
+     * offer them — which is why this is reported to the authoring screen rather
+     * than only logged.
+     *
+     * @param runtimeTypes what the runtime published; an empty or absent list
+     *                     yields no complaint, because "the runtime did not
+     *                     answer" and "the runtime supports nothing" must not
+     *                     look the same
+     */
+    public java.util.List<String> unsupportedNodeTypes(java.util.List<String> runtimeTypes) {
+        if (runtimeTypes == null || runtimeTypes.isEmpty()) {
+            return java.util.List.of();
+        }
+        java.util.List<String> unsupported = runtimeTypes.stream()
+                .filter(type -> !GRAPH_NODE_TYPES.contains(type))
+                .sorted()
+                .toList();
+        if (!unsupported.isEmpty()) {
+            log.error("The agent runtime can execute node type(s) {} that this service does not "
+                            + "recognise as native. A workflow containing one would be dispatched "
+                            + "to the step walker and fail. Add them to GRAPH_NODE_TYPES.",
+                    unsupported);
+        }
+        return unsupported;
+    }
 
     private final WorkflowRuntimeClient runtime;
     private final ModelProviderService modelProviders;

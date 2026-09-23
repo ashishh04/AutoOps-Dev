@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import json
+
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -253,6 +255,77 @@ def run_http(node: Node, context: NodeContext) -> dict[str, Any]:
 
 
 
+def _run_incidents(node: Node, context: NodeContext, config: Any) -> dict[str, Any]:
+    """The ``incidents`` source: what is open right now. Contributes ``incidents``.
+
+    Same plane as the timeline — the platform's own record, no vendor
+    credential, scoped by the service that answers rather than by the caller —
+    but a different service, because alert-service sits in front of the incident
+    engine and the console is otherwise its only consumer.
+
+    No window. "What is open" is a question about now; a 24-hour filter on it
+    would silently hide the incident that has been burning since Tuesday, which
+    is exactly the one a routing decision is most needed for.
+    """
+    if not context.project_id:
+        raise NodeFailed(
+            node.id,
+            "no project on this run. Incident visibility is resolved from the monitoring "
+            "sources a project owns, so without one the answer would be empty rather than "
+            "wrong — which reads like a quiet estate.",
+        )
+
+    base = config.alert_base_url.rstrip("/")
+    try:
+        response = httpx.get(
+            f"{base}/internal/incidents",
+            params={"tenantId": context.tenant_id, "projectId": context.project_id},
+            headers={"X-Internal-Token": config.core_internal_token},
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        raise NodeFailed(node.id, f"could not reach alert-service: {exc}") from exc
+
+    if response.status_code != 200:
+        raise NodeFailed(
+            node.id,
+            f"alert-service answered {response.status_code} for the incident list",
+        )
+
+    body = response.json()
+    rows = body.get("incidents") or []
+
+    # Rendered as text for the same reason the timeline is: the consumer is a
+    # model reading a narrative, and nested JSON costs tokens and reads worse.
+    # The machine-readable trailer is kept so a scope can be enumerated from it.
+    lines = [
+        f"OPEN INCIDENTS ({body.get('incident_count', len(rows))})",
+        f"tenant={body.get('tenant_id')} project={body.get('project_id')}",
+    ]
+    if body.get("truncated"):
+        # Said out loud. A list silently cut is a coverage claim over things
+        # nobody was shown — see TRUNCATION.md.
+        lines.append("TRUNCATED=true the engine returned at least as many as were asked for")
+    lines.append("")
+    for row in rows:
+        lines.append(
+            "INCIDENT id={id} severity={severity} status={status} assignee={assignee} "
+            "services={services} alerts={alerts} started={started}".format(
+                id=row.get("id"),
+                severity=row.get("severity"),
+                status=row.get("status"),
+                assignee=row.get("assignee") or "unassigned",
+                services=",".join(row.get("services") or []) or "-",
+                alerts=row.get("alertCount"),
+                started=row.get("startedAt"),
+            )
+        )
+    lines.append("")
+    lines.append("JSON " + json.dumps(body, default=str))
+
+    return {"incidents": "\n".join(lines)}
+
+
 def run_platform(node: Node, context: NodeContext) -> dict[str, Any]:
     """Reads the WORKSPACE's own history. Contributes ``timeline``, ``summary``.
 
@@ -281,6 +354,8 @@ def run_platform(node: Node, context: NodeContext) -> dict[str, Any]:
     config = settings()
     if not context.tenant_id:
         raise NodeFailed(node.id, "no tenant on this run, so there is no workspace to read")
+    if node.source == "incidents":
+        return _run_incidents(node, context, config)
     if not context.project_id:
         raise NodeFailed(
             node.id,

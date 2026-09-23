@@ -46,7 +46,7 @@ spring:
           - id: agent-service
             uri: ${AGENT_SERVICE_URL:http://localhost:8087}
             predicates:
-              - Path=/api/agents/**,/api/agent-runs/**,/api/projects/*/agents/**,/api/projects/*/agents
+              - Path=/api/agents/**,/api/agent-runs/**,/api/projects/*/agents/**,/api/projects/*/agents,/api/provider/fleet/agents
           # Notification channels and the rules that fire them.
           # /api/notification-rules/** does NOT collide with core-service's
           # /api/notifications/** below — different literal segment — but the
@@ -79,7 +79,7 @@ spring:
           - id: alert-service
             uri: ${ALERT_SERVICE_URL:http://localhost:8091}
             predicates:
-              - Path=/api/alerts/**,/api/incidents/**,/api/alert-providers,/api/alert-providers/**
+              - Path=/api/alerts/**,/api/incidents/**,/api/alert-providers,/api/alert-providers/**,/api/provider/fleet/alerts,/api/provider/fleet/incidents
           # Projects, jobs, cloud integrations, runs (subscription-gated mutations).
           - id: core-service
             uri: ${CORE_SERVICE_URL:http://localhost:8083}
@@ -88,7 +88,7 @@ spring:
               # view; the .../projects sub-path below is core-service's — the
               # patterns do not overlap, so ordering between the two is not
               # load-bearing.
-              - Path=/api/projects/**,/api/jobs/**,/api/cloud/**,/api/runs/**,/api/approvals/**,/api/compliance/**,/api/governance/**,/api/audit/**,/api/notifications/**,/api/nodes/**,/api/secrets/**,/api/webhooks/**,/api/hooks/**,/api/library/**,/api/commands/**,/api/connectors/**,/api/model-providers/**,/api/provider/usage,/api/provider/health,/api/provider/broadcasts,/api/provider/library,/api/provider/tenants/*/projects,/api/provider/rollout
+              - Path=/api/projects/**,/api/jobs/**,/api/cloud/**,/api/runs/**,/api/approvals/**,/api/compliance/**,/api/governance/**,/api/audit/**,/api/notifications/**,/api/nodes/**,/api/secrets/**,/api/webhooks/**,/api/hooks/**,/api/library/**,/api/commands/**,/api/connectors/**,/api/model-providers/**,/api/provider/usage,/api/provider/health,/api/provider/broadcasts,/api/provider/library,/api/provider/library/*,/api/provider/tenants/*/projects,/api/provider/rollout,/api/provider/authoring/**
           # Aegis-01, the landing-page voice agent. Anonymous by design —
           # visitors have no account yet — so voice-agent caps it itself.
           - id: voice-agent

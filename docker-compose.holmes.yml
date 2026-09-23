@@ -1,0 +1,101 @@
+# ============================================================
+# AutoOps — investigation overlay. Root-cause analysis on an incident.
+#
+# HolmesGPT (CNCF Sandbox, robustadev/holmes) runs the investigation: it reads
+# the incident's evidence, runs read-only tools against the estate, and returns
+# an analysis plus every command it ran. AutoOps stores the result against the
+# incident, so a customer who opens it later reads the conclusion rather than
+# paying for it again.
+#
+# It is an ENGINE, on the same terms as the alert plane and the execution
+# engine:
+#   - no host port, so nothing reaches it except over the compose network;
+#   - its URL and key come from environment variables, never a database row;
+#   - nothing tenant-facing renders its name. The console says "investigation".
+#
+# SEPARATE from docker-compose.keep.yml on purpose. The alert plane is always
+# on; this is optional, costs money per call, and every alerts screen keeps
+# working with it switched off — alert-service treats a blank HOLMES_URL as
+# "investigation disabled" and the console hides the button.
+#
+# Append AFTER docker-compose.keep.yml in COMPOSE_FILE:
+#   COMPOSE_FILE=docker-compose.yml;...;docker-compose.keep.yml;docker-compose.holmes.yml
+#
+# Then set a model key in ./.env — see "The model" below. Nothing investigates
+# without one.
+# ============================================================
+services:
+  holmes:
+    image: robustadev/holmes:latest
+    restart: unless-stopped
+    command: ["server", "--host", "0.0.0.0", "--port", "5050"]
+    environment:
+      # ---- The model -------------------------------------------------
+      # A SEPARATE key from the ones tenants configure in AutoOps, and
+      # deliberately so. Holmes reads its key from this environment at boot and
+      # cannot accept one per request, so a tenant's key put here would pay for
+      # every other tenant's investigations. Investigation spend is the
+      # platform's, on the platform's own credential.
+      #
+      # Set HOLMES_MODEL_API_KEY in ./.env. Nothing investigates without it.
+      MODEL: ${HOLMES_MODEL:-gpt-4.1}
+      OPENAI_API_KEY: ${HOLMES_MODEL_API_KEY:-}
+      ANTHROPIC_API_KEY: ${HOLMES_ANTHROPIC_KEY:-}
+
+      # ---- What it may look at ---------------------------------------
+      # Driven by config.yaml, which mirrors the Monitoring Sources a customer
+      # can connect: the investigation should be able to query the same system
+      # the alert came from. See that file — every toolset is off until someone
+      # gives it connection details, because each one is read access to a
+      # customer's infrastructure.
+      #
+      # This variable is the floor, not the list. config.yaml is what decides.
+      ENABLED_BY_DEFAULT_TOOLSETS: ${HOLMES_TOOLSETS:-internet}
+      HOLMES_CONFIG_PATH: /etc/holmes/config.yaml
+
+      # Connection details for the toolsets config.yaml switches on. Blank is
+      # fine — a toolset with no endpoint stays off rather than failing boot.
+      PROMETHEUS_URL: ${HOLMES_PROMETHEUS_URL:-}
+      GRAFANA_URL: ${HOLMES_GRAFANA_URL:-}
+      GRAFANA_API_KEY: ${HOLMES_GRAFANA_API_KEY:-}
+      DATADOG_API_KEY: ${HOLMES_DATADOG_API_KEY:-}
+      DATADOG_APP_KEY: ${HOLMES_DATADOG_APP_KEY:-}
+      DATADOG_SITE_URL: ${HOLMES_DATADOG_SITE_URL:-https://api.datadoghq.com}
+      NEWRELIC_API_KEY: ${HOLMES_NEWRELIC_API_KEY:-}
+      NEWRELIC_ACCOUNT_ID: ${HOLMES_NEWRELIC_ACCOUNT_ID:-}
+
+      # Holmes phones home with usage telemetry by default. This is running
+      # over a customer's incident data.
+      ENABLE_TELEMETRY: "false"
+      LOG_LEVEL: ${HOLMES_LOG_LEVEL:-INFO}
+    volumes:
+      # Read-only: the engine reads this at boot and must never rewrite it.
+      - ./backend/holmes-runtime/config.yaml:/etc/holmes/config.yaml:ro
+    healthcheck:
+      # Holmes loads every toolset at boot and probes each one, which is slow
+      # and gets slower as toolsets are enabled - hence the long start_period.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:5050/healthz').status == 200 else 1)"
+      interval: 15s
+      retries: 20
+      start_period: 120s
+
+  # alert-service learns where the investigation engine is. Overriding one
+  # variable keeps the whole capability inside this overlay: drop the overlay
+  # and HOLMES_URL is blank again, which alert-service reads as "off".
+  alert-service:
+    environment:
+      HOLMES_URL: http://holmes:5050
+      HOLMES_API_KEY: ${HOLMES_API_KEY:-}
+      # Passed through so the defaults in application.yml can actually be
+      # overridden from ./.env. Without these two lines the variables are
+      # accepted there and silently ignored here, which is worse than not
+      # offering them.
+      HOLMES_CONNECT_TIMEOUT: ${HOLMES_CONNECT_TIMEOUT:-5s}
+      HOLMES_READ_TIMEOUT: ${HOLMES_READ_TIMEOUT:-5m}
+    depends_on:
+      holmes:
+        condition: service_healthy
