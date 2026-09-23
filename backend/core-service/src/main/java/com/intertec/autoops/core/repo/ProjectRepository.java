@@ -18,4 +18,14 @@ public interface ProjectRepository extends JpaRepository<Project, Long> {
     long countByTenantIdAndStatus(String tenantId, ProjectStatus status);
 
     boolean existsByTenantIdAndNameAndStatus(String tenantId, String name, ProjectStatus status);
+
+    /**
+     * The provider's catalog sandbox, looked up by name.
+     *
+     * <p>By name because the sandbox has no id anyone stores — it is created on
+     * first use and found again on every later test. Scoped to the tenant and
+     * to ACTIVE so a deleted sandbox is recreated rather than resurrected.
+     */
+    Optional<Project> findByTenantIdAndNameAndStatus(String tenantId, String name,
+                                                     ProjectStatus status);
 }

@@ -223,6 +223,48 @@ public class RolloutService {
                 found.name(), tenantId);
     }
 
+    /** Where a provider's own trial deliveries land. */
+    public static final String SANDBOX_PROJECT = "Catalog sandbox";
+
+    /**
+     * Deliver a catalog item into the PROVIDER'S OWN workspace, to try it.
+     *
+     * <p>The gap this closes: a provider could publish an agent and roll it out
+     * to a paying customer without ever having run it once. The first execution
+     * of anything in this catalog happened in somebody else's estate, and a
+     * persona that loops, a tool that returns nothing useful or a model the
+     * agent cannot reach all surfaced there first.
+     *
+     * <p>It is a REAL delivery into a real project, not a simulation — the same
+     * rollOut path, the same sealing, the same tool resolution. A dry run that
+     * took a different code path would prove the dry run works.
+     *
+     * <p>Repeatable by design: re-delivering over an existing copy updates it,
+     * so a provider can fix the persona and test again without cleaning up.
+     */
+    @Transactional
+    public RolloutResult test(String actor, String accessToken, String providerTenantId,
+                              Long catalogId) {
+        Project sandbox = projectRepository
+                .findByTenantIdAndNameAndStatus(providerTenantId, SANDBOX_PROJECT,
+                        com.intertec.autoops.core.domain.ProjectStatus.ACTIVE)
+                .orElseGet(() -> {
+                    Project created = new Project();
+                    created.setTenantId(providerTenantId);
+                    created.setName(SANDBOX_PROJECT);
+                    created.setDescription(
+                            "Where catalog items are tried before customers receive them. "
+                                    + "Created automatically; safe to delete.");
+                    created.setCreatedBy(actor);
+                    log.info("Created the catalog sandbox for provider tenant {}",
+                            providerTenantId);
+                    return projectRepository.save(created);
+                });
+
+        return rollOut(actor, accessToken,
+                catalogId, List.of(new Target(providerTenantId, sandbox.getId())));
+    }
+
     /**
      * The tenant-boundary proof. Reading by (id, tenantId) together is the
      * whole point: by id alone, a provider could deliver into a project that
@@ -391,7 +433,19 @@ public class RolloutService {
         AgentClient.RolledOutAgent created = agentClient.rollOut(target.tenantId(), actor,
                 accessToken, project.getId(), item.getId(), item.getTitle(),
                 text(spec, "description", item.getDescription()),
-                text(spec, "model", null),
+                // A PYTHON agent's manifest model is a PLACEHOLDER — its own
+                // module says so: "overridden per run by whatever the agent's
+                // own row says; this is only a placeholder so the manifest is
+                // complete". Delivering it made anthropic.claude-sonnet-5 the
+                // customer's production model choice, and an estate with no
+                // Anthropic connection got model_not_available on an agent
+                // nobody had picked a vendor for.
+                //
+                // Null means "this workspace's own default", which core now
+                // resolves the same way it already did for workflows. A JSON
+                // agent keeps whatever the provider actually chose in the
+                // builder — that one is a decision, not a placeholder.
+                python ? null : text(spec, "model", null),
                 // Exactly one of these is ever populated. A Python agent with
                 // instructions would mean the persona leaked into the catalog
                 // row; a JSON agent with a graph ref would mean the runtime was

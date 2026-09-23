@@ -119,6 +119,13 @@ public class AgentRunService {
             Check what you need to before acting, act once you know, and finish by
             reporting what you actually did and what it returned. Do not claim an
             outcome a tool did not report.
+
+            Write that report as prose a person reads: full sentences, and a short
+            bold label — **What changed** — where a section genuinely starts.
+            Nothing else. No heading hashes, no horizontal rules between
+            paragraphs, no tables for two values. The console renders the
+            formatting you use, so an answer built out of markup arrives looking
+            like a dump of your notation instead of an answer.
             """;
 
     private final AgentRepository agentRepository;

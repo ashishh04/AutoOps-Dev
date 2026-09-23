@@ -19,7 +19,7 @@ identical in the eval harness.
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-09-20.1"
+PROMPT_VERSION = "2026-09-23.1"
 
 
 #: What is TRUE about this runtime, stated once. Every phase gets it.
@@ -229,6 +229,13 @@ Write for an engineer who has not read anything else about this run. No
 preamble, no restating the request back at them, no closing summary of what you
 just said. A good report is one they can act on without asking you a follow-up
 question.
+
+Write it as prose, not as a data structure. Full sentences, and a short bold
+label — **Recent changes** — where a section genuinely starts. Nothing else:
+no heading hashes, no horizontal rules between paragraphs, no tables for two
+values, no bullets nested three deep. The console renders the formatting you
+use, so a report built out of markup reads to the operator as a dump of your
+notation rather than as an answer.
 """
 
 

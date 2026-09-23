@@ -427,6 +427,28 @@ public class ProviderController {
     }
 
     /**
+     * Try a catalog item in the provider's OWN workspace before any customer
+     * sees it.
+     *
+     * <p>Delivers into a sandbox project in the provider's tenant — created on
+     * first use — using the same rollout path a customer delivery takes. Not a
+     * simulation: a dry run down a different code path would only prove the dry
+     * run works, and the failures worth catching here (a persona that loops, a
+     * tool that resolves to nothing, a model the workspace cannot reach) are
+     * exactly the ones a simulation would skip.
+     *
+     * <p>Repeatable: re-delivering updates the copy, so fixing the agent and
+     * testing again needs no cleanup.
+     */
+    @PostMapping("/rollout/{catalogId}/test")
+    public RolloutService.RolloutResult test(@PathVariable Long catalogId,
+                                             @AuthenticationPrincipal Jwt jwt) {
+        requireProvider(jwt);
+        return rolloutService.test(jwt.getSubject(), jwt.getTokenValue(),
+                jwt.getClaimAsString("tenantId"), catalogId);
+    }
+
+    /**
      * Which customers hold this catalog item right now.
      *
      * <p>Read live from the services that hold the copies, so a revoked

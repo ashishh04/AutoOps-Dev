@@ -1626,6 +1626,11 @@ export const api = {
   // after the runtime was upgraded underneath it.
   // Who holds a catalog item right now. Read live from the services that hold
   // the copies, so a revoked delivery leaves the list rather than lingering.
+  // Deliver a catalog item into the provider's OWN sandbox project so it can
+  // be run before a customer ever sees it. A real delivery, not a simulation.
+  providerTestRollout: (catalogId) =>
+    realFetch(`/provider/rollout/${catalogId}/test`, { method: "POST", auth: true }),
+
   providerDeliveries: (catalogId) =>
     realFetch(`/provider/rollout/${catalogId}/deliveries`, { auth: true }),
 

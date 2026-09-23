@@ -73,6 +73,45 @@ class RolloutToolResolutionTest {
                 + toolsJson + "}");
     }
 
+    @Test
+    void aPythonAgentIsDeliveredWithNoModel() {
+        // Its manifest carries anthropic.claude-sonnet-5, and the module says
+        // in so many words that this is a placeholder "overridden per run by
+        // whatever the agent's own row says". Delivering it made a placeholder
+        // into the customer's production vendor choice, and an estate with no
+        // Anthropic connection got model_not_available on an agent nobody had
+        // picked a vendor for. Null means "this workspace's own default".
+        givenCatalogItem("{\"kind\":\"PYTHON\",\"ref\":\"linux.server_health_check\","
+                + "\"version\":\"1.0.0\",\"description\":\"d\","
+                + "\"model\":\"anthropic.claude-sonnet-5\",\"tools\":[]}");
+        givenDelivered();
+
+        rollOut();
+
+        ArgumentCaptor<String> model = ArgumentCaptor.forClass(String.class);
+        verify(agentClient).rollOut(anyString(), anyString(), any(), anyLong(), anyLong(),
+                anyString(), any(), model.capture(), any(), any(), any(), any(), any());
+
+        assertThat(model.getValue()).isNull();
+    }
+
+    @Test
+    void aJsonAgentKeepsTheModelTheProviderChose() {
+        // The other half: a model picked in the builder IS a decision, not a
+        // placeholder, and must survive delivery.
+        givenCatalogItem("{\"description\":\"d\",\"instructions\":\"i\","
+                + "\"model\":\"gpt-4o\",\"tools\":[]}");
+        givenDelivered();
+
+        rollOut();
+
+        ArgumentCaptor<String> model = ArgumentCaptor.forClass(String.class);
+        verify(agentClient).rollOut(anyString(), anyString(), any(), anyLong(), anyLong(),
+                anyString(), any(), model.capture(), any(), any(), any(), any(), any());
+
+        assertThat(model.getValue()).isEqualTo("gpt-4o");
+    }
+
     /** A Python-authored agent: a reference, and deliberately no persona. */
     private void givenPythonCatalogAgent(String toolsJson) {
         givenCatalogItem("{\"kind\":\"PYTHON\",\"ref\":\"linux.server_health_check\","

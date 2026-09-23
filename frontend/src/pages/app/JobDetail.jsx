@@ -6,12 +6,20 @@ import {
   StatusBadge,
   SmallButton,
   Skeleton,
+  PanelPager,
 } from "../../components/app/appui";
 import { api } from "../../lib/api";
 import { useStore } from "../../store/store";
 import { fmtDate, fmtDuration, badgeStatus } from "../../lib/format";
+import { textPages, clampPage } from "../../lib/textPages";
 
 const LOG_TABS = ["Output", "Grouped", "Raw"];
+
+/** Executions per page in the history column. */
+const RUNS_PER_PAGE = 8;
+
+/** Step groups per page in the Grouped view. */
+const GROUPS_PER_PAGE = 12;
 
 // Engine log format: step status lines ("[1/3] label — ok (812ms)") with the
 // step's captured output indented under them as "    | …" lines.
@@ -47,6 +55,8 @@ export default function JobDetail() {
   const [selected, setSelected] = useState(null);
   const [detail, setDetail] = useState(null);
   const [tab, setTab] = useState("Output");
+  const [runPage, setRunPage] = useState(1);
+  const [logPage, setLogPage] = useState(1);
   const canRun = can("runWorkflow");
   const b = `/app/projects/${pid}`;
 
@@ -64,6 +74,8 @@ export default function JobDetail() {
       const mine = (all || []).filter((e) => e.jobId === id);
       setRuns(mine);
       setSelected(mine[0] || null);
+      // The newest run is selected, and it lives on the first page.
+      setRunPage(1);
     } catch {
       setNotFound(true);
     } finally {
@@ -114,6 +126,11 @@ export default function JobDetail() {
       clearTimeout(timer);
     };
   }, [selectedId]);
+
+  // A different run, or a different view of it, starts at its own first page.
+  useEffect(() => {
+    setLogPage(1);
+  }, [selectedId, tab]);
 
   const run = async () => {
     try {
@@ -166,18 +183,52 @@ export default function JobDetail() {
     { k: "Last run", v: fmtDate(job.lastRunAt) },
   ];
 
-  const current = detail || selected;
+  // A detail belongs to the selected run only if its id says so. `detail ||
+  // selected` kept the PREVIOUS run's log on screen from the click until the
+  // new run's detail came back — and after pressing Run Job, the old run's
+  // output sat under the new execution's id. The log pane must never show a
+  // run other than the one highlighted in the history.
+  const settled = detail && selected && detail.id === selected.id ? detail : null;
+  const current = settled || selected;
+  const awaitingDetail = !!selected && !settled;
   const running =
     current && ["queued", "running"].includes(badgeStatus(current.status));
-  const rawLog = current
-    ? current.log ||
-      current.error ||
-      (running
-        ? "Run in progress — output appears as steps complete…"
-        : "No log output captured for this run.")
-    : "Select a run from the execution history to view its logs.";
-  const groups = parseLog(current?.log);
+  const rawLog = awaitingDetail
+    ? "Loading this run…"
+    : current
+      ? current.log ||
+        current.error ||
+        (running
+          ? "Run in progress — output appears as steps complete…"
+          : "No log output captured for this run.")
+      : "Select a run from the execution history to view its logs.";
+  const groups = parseLog(settled?.log);
   const outputOnly = groups.flatMap((g) => g.lines).join("\n");
+
+  const runPages = Math.max(1, Math.ceil(runs.length / RUNS_PER_PAGE));
+  const historyPage = clampPage(runPage, runPages);
+  const visibleRuns = runs.slice(
+    (historyPage - 1) * RUNS_PER_PAGE,
+    historyPage * RUNS_PER_PAGE,
+  );
+
+  // Whichever view is up, the pane shows one page of it. A job that loops over
+  // 400 nodes produces a log nobody can navigate by scroll bar alone.
+  const showRaw = tab === "Raw" || !settled?.log;
+  const logText = showRaw
+    ? rawLog
+    : outputOnly ||
+      "No command output captured — steps ran but printed nothing. See Grouped or Raw for step statuses.";
+  const logSlices = tab === "Grouped" && !showRaw ? [] : textPages(logText);
+  const groupPages =
+    tab === "Grouped" && !showRaw
+      ? Math.max(1, Math.ceil(groups.length / GROUPS_PER_PAGE))
+      : logSlices.length;
+  const shownPage = clampPage(logPage, groupPages);
+  const visibleGroups = groups.slice(
+    (shownPage - 1) * GROUPS_PER_PAGE,
+    shownPage * GROUPS_PER_PAGE,
+  );
 
   return (
     <div className="animate-fade-up">
@@ -232,29 +283,37 @@ export default function JobDetail() {
           {runs.length === 0 ? (
             <p className="px-5 py-6 text-sm text-slate-500">No runs yet.</p>
           ) : (
-            <div className="divide-y divide-slate-200">
-              {runs.map((r) => {
-                const active = selected && selected.id === r.id;
-                return (
-                  <button
-                    key={r.id}
-                    onClick={() => setSelected(r)}
-                    className={`flex w-full items-center justify-between px-5 py-3 text-left transition hover:bg-slate-100 ${active ? "bg-slate-50" : ""}`}
-                  >
-                    <div>
-                      <p className="font-mono text-xs text-slate-700">
-                        {String(r.id)}
-                      </p>
-                      <p className="text-[11px] text-slate-500">
-                        {fmtDate(r.startedAt || r.createdAt)} ·{" "}
-                        {r.trigger || "manual"}
-                      </p>
-                    </div>
-                    <StatusBadge status={badgeStatus(r.status)} />
-                  </button>
-                );
-              })}
-            </div>
+            <>
+              <div className="divide-y divide-slate-200">
+                {visibleRuns.map((r) => {
+                  const active = selected && selected.id === r.id;
+                  return (
+                    <button
+                      key={r.id}
+                      onClick={() => setSelected(r)}
+                      className={`flex w-full items-center justify-between px-5 py-3 text-left transition hover:bg-slate-100 ${active ? "bg-slate-50" : ""}`}
+                    >
+                      <div>
+                        <p className="font-mono text-xs text-slate-700">
+                          {String(r.id)}
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          {fmtDate(r.startedAt || r.createdAt)} ·{" "}
+                          {r.trigger || "manual"}
+                        </p>
+                      </div>
+                      <StatusBadge status={badgeStatus(r.status)} />
+                    </button>
+                  );
+                })}
+              </div>
+              <PanelPager
+                page={historyPage}
+                totalPages={runPages}
+                onPageChange={setRunPage}
+                label={`${runs.length} execution${runs.length === 1 ? "" : "s"} · page ${historyPage} of ${runPages}`}
+              />
+            </>
           )}
         </Card>
 
@@ -276,18 +335,13 @@ export default function JobDetail() {
             </div>
           </div>
           <div className="max-h-[420px] overflow-auto bg-slate-900/[0.03] p-4">
-            {tab === "Raw" || !current?.log ? (
+            {showRaw || tab === "Output" ? (
               <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-slate-700">
-                {rawLog}
-              </pre>
-            ) : tab === "Output" ? (
-              <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-slate-700">
-                {outputOnly ||
-                  "No command output captured — steps ran but printed nothing. See Grouped or Raw for step statuses."}
+                {logSlices[shownPage - 1] ?? logText}
               </pre>
             ) : (
               <div className="space-y-2">
-                {groups.map((g, i) => (
+                {visibleGroups.map((g, i) => (
                   <div
                     key={i}
                     className="rounded-lg border border-slate-200 bg-white/60"
@@ -306,13 +360,23 @@ export default function JobDetail() {
                 ))}
               </div>
             )}
-            {running && current?.log && (
+            {running && settled?.log && (
               <p className="mt-3 flex items-center gap-1.5 font-mono text-[11px] text-slate-500">
                 <span className="h-1.5 w-1.5 animate-pulse-dot rounded-full bg-cyan-500" />
                 running — refreshing every 3s
               </p>
             )}
           </div>
+          <PanelPager
+            page={shownPage}
+            totalPages={groupPages}
+            onPageChange={setLogPage}
+            label={
+              tab === "Grouped" && !showRaw
+                ? `${groups.length} step${groups.length === 1 ? "" : "s"} · page ${shownPage} of ${groupPages}`
+                : `Page ${shownPage} of ${groupPages}`
+            }
+          />
         </Card>
       </div>
     </div>

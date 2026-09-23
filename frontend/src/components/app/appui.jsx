@@ -440,3 +440,54 @@ export const Pagination = ({ page, pageSize, totalItems, onPageChange }) => {
     </Card>
   );
 };
+
+/**
+ * Pagination for a panel rather than for a page.
+ *
+ * <p>{@link Pagination} is a full-width Card with a "showing 1 to 10 of 200"
+ * sentence, which is right under a table and wrong inside a third-width run
+ * history column, where it wraps into three lines of its own. This is the same
+ * control at panel scale: a position, and two arrows, on one row.
+ *
+ * <p>Renders nothing at all for a single page. A pager under a list of three
+ * runs is furniture that tells the reader nothing.
+ */
+export const PanelPager = ({ page, totalPages, onPageChange, label, className = "" }) => {
+  if (!totalPages || totalPages <= 1) return null;
+  const button =
+    "inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 transition " +
+    "hover:border-blue-600 hover:text-blue-600 " +
+    "disabled:cursor-not-allowed disabled:border-slate-100 disabled:bg-slate-50 disabled:text-slate-300 " +
+    "disabled:hover:border-slate-100 disabled:hover:text-slate-300";
+  return (
+    <div
+      role="navigation"
+      aria-label="Pagination"
+      className={`flex items-center justify-between gap-3 border-t border-slate-100 px-5 py-2.5 ${className}`}
+    >
+      <span className="text-[11px] tabular-nums text-slate-500">
+        {label || `Page ${page} of ${totalPages}`}
+      </span>
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          className={button}
+          aria-label="Previous page"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+        >
+          <Icon name="chevron" size={14} className="rotate-180" />
+        </button>
+        <button
+          type="button"
+          className={button}
+          aria-label="Next page"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+        >
+          <Icon name="chevron" size={14} />
+        </button>
+      </div>
+    </div>
+  );
+};

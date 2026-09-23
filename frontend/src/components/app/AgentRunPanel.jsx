@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Icon from "../Icon";
 import ModalPortal from "./ModalPortal";
+import ReportText from "./ReportText";
 import { agentRuns } from "../../lib/api";
 import { fmtDate } from "../../lib/format";
 
@@ -401,9 +402,11 @@ export default function AgentRunPanel({ agent, onClose, canRun, pushToast }) {
                   <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                     Answer
                   </p>
-                  <p className="mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">
-                    {openRun.output}
-                  </p>
+                  {/* The model writes markdown. Printed verbatim, its answer
+                      arrived as `**No alarms fired**` over `---` rules — the
+                      report reading as a transcript of its own formatting
+                      rather than as the thing it was asked for. */}
+                  <ReportText source={openRun.output} className="mt-2" />
                 </div>
               )}
 

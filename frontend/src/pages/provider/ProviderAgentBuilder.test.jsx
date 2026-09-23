@@ -168,6 +168,41 @@ describe("ProviderAgentBuilder", () => {
     expect(spec.model).toBe("bedrock.some-private-deployment");
   });
 
+  it("can publish an agent that defers the model to each customer", async () => {
+    // The default that matters for a CATALOG agent. A Python agent's manifest
+    // carries anthropic.claude-sonnet-5 as a placeholder, and delivering that
+    // made it the customer's production vendor choice — an estate with no
+    // Anthropic connection got model_not_available on an agent nobody had
+    // picked a vendor for.
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /Unused Resource Cleanup/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Model"), {
+      target: { value: "@tenant-default" },
+    });
+    type("Name", "Portable Agent");
+    type("Description", "Runs on whatever the customer already pays for.");
+    type("Operating instructions", PERSONA);
+    fireEvent.click(screen.getByText("Publish to catalog"));
+
+    await waitFor(() => expect(apiMock.providerCreateLibrary).toHaveBeenCalled());
+    const spec = JSON.parse(apiMock.providerCreateLibrary.mock.calls[0][0].definition);
+    expect(spec.model).toBe("@tenant-default");
+  });
+
+  it("does not offer the sentinel twice", async () => {
+    // It has its own labelled entry; listing it among real ids as well would
+    // show "@tenant-default" as though it were a model somebody could buy.
+    renderPage();
+    await screen.findByRole("checkbox", { name: /Unused Resource Cleanup/ });
+
+    expect(
+      screen.getAllByRole("option", { name: /own default model/ }),
+    ).toHaveLength(1);
+    expect(screen.queryByRole("option", { name: "@tenant-default" })).toBeNull();
+  });
+
   it("keeps an edited agent's model selectable even when this workspace cannot see it", async () => {
     // Otherwise opening such an agent shows an empty select, and saving blanks
     // the model of a working agent without anyone touching the field.

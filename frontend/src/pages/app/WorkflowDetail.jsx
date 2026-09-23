@@ -6,12 +6,18 @@ import {
   StatusBadge,
   SmallButton,
   Skeleton,
+  PanelPager,
 } from "../../components/app/appui";
 import Icon from "../../components/Icon";
 import RunInputsDialog from "../../components/app/RunInputsDialog";
+import ReportText from "../../components/app/ReportText";
 import { api } from "../../lib/api";
 import { useStore } from "../../store/store";
 import { fmtDate, fmtDuration, badgeStatus } from "../../lib/format";
+import { textPages, clampPage } from "../../lib/textPages";
+
+/** Runs per page in the history column. Six fills the card without scrolling. */
+const RUNS_PER_PAGE = 6;
 
 /**
  * One workflow, and what it has actually done.
@@ -45,6 +51,8 @@ export default function WorkflowDetail() {
   // hooks: below the loading/notFound early returns it would be called
   // conditionally, which breaks the rules of hooks.
   const [pane, setPane] = useState("result");
+  const [runPage, setRunPage] = useState(1);
+  const [outputPage, setOutputPage] = useState(1);
   const canRun = can("runWorkflow");
   const b = `/app/projects/${pid}`;
 
@@ -64,6 +72,9 @@ export default function WorkflowDetail() {
       });
       setRuns(mine || []);
       setSelected((mine || [])[0] || null);
+      // A reload puts the newest run at the top and selects it, so the reader
+      // belongs on the first page with it.
+      setRunPage(1);
     } catch {
       setNotFound(true);
     } finally {
@@ -114,6 +125,11 @@ export default function WorkflowDetail() {
       clearTimeout(timer);
     };
   }, [selectedId]);
+
+  // A different run, or a different pane, starts at its own first page.
+  useEffect(() => {
+    setOutputPage(1);
+  }, [selectedId, pane]);
 
   const runWorkflow = async (inputs) => {
     setStarting(true);
@@ -186,7 +202,16 @@ export default function WorkflowDetail() {
       </div>
     );
 
-  const current = detail || selected;
+  // The detail is only this run's detail if its id says so. `detail || selected`
+  // was fine on paper — the effect nulls it on every change of selection — but
+  // that null lands AFTER the render that the click caused, so for a frame and
+  // then for the whole width of the fetch, the newly selected run was shown
+  // with the PREVIOUS run's report and the previous run's id under it. Picking
+  // a failed run and reading the successful one's output is not a flicker; it
+  // is the wrong answer to the question the reader just asked.
+  const settled = detail && selected && detail.id === selected.id ? detail : null;
+  const current = settled || selected;
+  const awaitingDetail = !!selected && !settled;
   const running = current && ["queued", "running"].includes(badgeStatus(current.status));
 
   // The DELIVERABLE first — the report the person asked for. The engine's
@@ -196,18 +221,42 @@ export default function WorkflowDetail() {
   // Falls back to the log for runs that predate the split, which have their
   // report inside it and nothing in `output`. Those render exactly as they
   // always did rather than looking empty.
-  const deliverable = current?.output;
-  const trace = current?.log;
+  const deliverable = settled?.output;
+  const trace = settled?.log;
   const hasDeliverable = !!(deliverable && deliverable.trim());
-  const shown = pane === "result"
-    ? (hasDeliverable
-        ? deliverable
-        : current?.error
-          || (running ? "Running…" : trace || "This run produced no document."))
-    : (trace || "No trace recorded.");
+  const shown = awaitingDetail
+    ? "Loading this run…"
+    : pane === "result"
+      ? (hasDeliverable
+          ? deliverable
+          : current?.error
+            || (running ? "Running…" : trace || "This run produced no document."))
+      : (trace || "No trace recorded.");
+
+  // The report is prose and pages as prose; the trace is machine output and
+  // pages the same way, so "2 of 4" means the same thing in either pane.
+  const pages = textPages(shown);
+  const shownPage = clampPage(outputPage, pages.length);
+  const pageText = pages[shownPage - 1] ?? shown;
+  // Only the finished, structured report is rendered as a document. An error,
+  // a trace or a "Running…" placeholder stays monospaced — it is output, not
+  // writing, and dressing it up would imply a report that does not exist yet.
+  const asReport = pane === "result" && hasDeliverable && !awaitingDetail;
+
+  const runPages = Math.max(1, Math.ceil(runs.length / RUNS_PER_PAGE));
+  const historyPage = clampPage(runPage, runPages);
+  const visibleRuns = runs.slice(
+    (historyPage - 1) * RUNS_PER_PAGE,
+    historyPage * RUNS_PER_PAGE,
+  );
 
   const stats = [
-    { k: "Status", v: <StatusBadge status={workflow.active ? "success" : "paused"} /> },
+    // "success" is not a state a workflow can be in — it is what a RUN is.
+    // Borrowing it for "enabled" put a green Success badge on a workflow whose
+    // every run had failed, directly above a 0% success rate, and the card
+    // people read first was the one telling them the opposite of the truth.
+    // The word matches the Pause/Resume control that changes it.
+    { k: "Status", v: <StatusBadge status={workflow.active ? "active" : "paused"} /> },
     { k: "Steps", v: workflow.nodeCount ?? "—" },
     // Null means never run. Showing 0% would claim it fails every time, which
     // is the same lie as 100% — just in the other direction.
@@ -257,31 +306,39 @@ export default function WorkflowDetail() {
               No runs yet. Press Run to start one.
             </p>
           ) : (
-            <ul className="max-h-[28rem] divide-y divide-slate-100 overflow-y-auto">
-              {runs.map((r) => (
-                <li key={r.id}>
-                  <button
-                    onClick={() => setSelected(r)}
-                    className={`flex w-full items-center justify-between gap-3 px-5 py-3 text-left transition hover:bg-slate-50 ${
-                      current?.id === r.id ? "bg-slate-50" : ""
-                    }`}
-                  >
-                    <span className="min-w-0">
-                      <span className="flex items-center gap-2">
-                        <StatusBadge status={badgeStatus(r.status)} />
-                        <span className="font-mono text-[11px] text-slate-400">#{r.id}</span>
+            <>
+              <ul className="divide-y divide-slate-100">
+                {visibleRuns.map((r) => (
+                  <li key={r.id}>
+                    <button
+                      onClick={() => setSelected(r)}
+                      className={`flex w-full items-center justify-between gap-3 px-5 py-3 text-left transition hover:bg-slate-50 ${
+                        current?.id === r.id ? "bg-slate-50" : ""
+                      }`}
+                    >
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-2">
+                          <StatusBadge status={badgeStatus(r.status)} />
+                          <span className="font-mono text-[11px] text-slate-400">#{r.id}</span>
+                        </span>
+                        <span className="mt-1 block truncate text-[11px] text-slate-500">
+                          {fmtDate(r.startedAt || r.createdAt)} · {r.by || "—"}
+                        </span>
                       </span>
-                      <span className="mt-1 block truncate text-[11px] text-slate-500">
-                        {fmtDate(r.startedAt || r.createdAt)} · {r.by || "—"}
+                      <span className="shrink-0 font-mono text-[11px] text-slate-400">
+                        {fmtDuration(r.durationMs)}
                       </span>
-                    </span>
-                    <span className="shrink-0 font-mono text-[11px] text-slate-400">
-                      {fmtDuration(r.durationMs)}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <PanelPager
+                page={historyPage}
+                totalPages={runPages}
+                onPageChange={setRunPage}
+                label={`${runs.length} run${runs.length === 1 ? "" : "s"} · page ${historyPage} of ${runPages}`}
+              />
+            </>
           )}
         </Card>
 
@@ -317,15 +374,23 @@ export default function WorkflowDetail() {
               Select a run to see what it produced.
             </p>
           ) : (
-            <pre
-              className={`max-h-[28rem] overflow-auto whitespace-pre-wrap break-words px-5 py-4 leading-relaxed ${
-                pane === "result" && hasDeliverable
-                  ? "text-[13px] text-slate-800"
-                  : "font-mono text-[12px] text-slate-700"
-              }`}
-            >
-              {shown}
-            </pre>
+            <>
+              <div className="max-h-[28rem] overflow-auto px-5 py-4">
+                {asReport ? (
+                  <ReportText source={pageText} />
+                ) : (
+                  <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-slate-700">
+                    {pageText}
+                  </pre>
+                )}
+              </div>
+              <PanelPager
+                page={shownPage}
+                totalPages={pages.length}
+                onPageChange={setOutputPage}
+                label={`Page ${shownPage} of ${pages.length}`}
+              />
+            </>
           )}
         </Card>
       </div>

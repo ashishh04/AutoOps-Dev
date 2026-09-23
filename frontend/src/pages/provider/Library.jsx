@@ -159,6 +159,7 @@ export default function ProviderLibrary() {
   // "still fetching" and "nobody has it" do not look the same.
   const [deliveries, setDeliveries] = useState(null);
   const [definition, setDefinition] = useState(null);
+  const [testing, setTesting] = useState(false);
   const [revoking, setRevoking] = useState(null);
   const [rolloutItem, setRolloutItem] = useState(null);
 
@@ -260,6 +261,40 @@ export default function ProviderLibrary() {
       cancelled = true;
     };
   }, [selectedItem]);
+
+  /**
+   * Deliver into the provider's own sandbox, then open it.
+   *
+   * A real rollout down the real path — a simulation would prove only that the
+   * simulation works, and the failures worth catching here (a persona that
+   * loops, a tool that resolves to nothing, a model this workspace cannot
+   * reach) are precisely the ones it would skip.
+   */
+  const testInSandbox = async (item) => {
+    setTesting(true);
+    try {
+      const result = await api.providerTestRollout(item.id);
+      const first = (result?.deliveries || [])[0];
+      if (!first || first.error) {
+        // The rollout path reports per target rather than throwing, so a
+        // failure arrives as a 200 with a reason. Treating that as success is
+        // how somebody ends up testing nothing.
+        pushToast(first?.error || "Could not deliver it for testing.", "red");
+        return;
+      }
+      pushToast(`Delivered to your ${"Catalog sandbox"} project — open it to run`, "emerald");
+      setSelectedItem(null);
+      navigate(
+        item.type === "agent"
+          ? `/app/projects/${first.projectId}/agents`
+          : `/app/projects/${first.projectId}/workflows`,
+      );
+    } catch (err) {
+      pushToast(err.message || "Could not deliver it for testing.", "red");
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const revoke = async (delivery) => {
     setRevoking(delivery.id);
@@ -658,7 +693,15 @@ export default function ProviderLibrary() {
               )}
 
               {selectedItem.type !== "script" && (
-                <div className="flex justify-end">
+                <div className="flex items-center justify-between gap-3">
+                  {/* Before, not after. A provider could publish an agent and
+                      roll it out to a paying customer without ever having run
+                      it — so the first execution of anything in this catalog
+                      happened in somebody else's estate. */}
+                  <SmallButton onClick={() => testInSandbox(selectedItem)}
+                               disabled={testing}>
+                    {testing ? "Delivering…" : "Test in my workspace"}
+                  </SmallButton>
                   <SmallButton
                     icon="bolt"
                     variant="primary"

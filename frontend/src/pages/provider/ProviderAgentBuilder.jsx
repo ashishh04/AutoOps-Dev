@@ -23,6 +23,16 @@ const AUTOMATION_TYPES = [
 /** Approval belongs on a state-changing agent; a read-only one asking for it is mis-tagged. */
 const STATE_CHANGING = AUTOMATION_TYPES.slice(1);
 
+/**
+ * "Whatever this customer runs on", said explicitly.
+ *
+ * The same sentinel NativeWorkflowService uses. Leaving the model blank means
+ * the same thing, but a form that can SHOW the intent is better than one where
+ * the absence of a field is the intent — and an agent is delivered to many
+ * workspaces, each with its own vendor.
+ */
+const TENANT_DEFAULT = "@tenant-default";
+
 const MIN_INSTRUCTIONS = 50;
 const MAX_DESCRIPTION = 512;
 
@@ -293,6 +303,9 @@ export default function ProviderAgentBuilder() {
   const modelOptions = useMemo(() => {
     const all = new Set([...models, ...catalogModels]);
     if (model.trim()) all.add(model.trim());
+    // The sentinel has its own entry above; listing it here too would show it
+    // twice, once as a literal id.
+    all.delete(TENANT_DEFAULT);
     return [...all].sort((a, b) => a.localeCompare(b));
   }, [models, catalogModels, model]);
 
@@ -356,7 +369,10 @@ export default function ProviderAgentBuilder() {
       found.push("Write a description — it is what a customer reads in the catalog.");
     if (description.trim().length > MAX_DESCRIPTION)
       found.push(`The description is over ${MAX_DESCRIPTION} characters.`);
-    if (!model.trim()) found.push("Choose a model.");
+    // Still required — but "the customer's default" is now one of the answers,
+    // rather than the field having to name a vendor the provider is guessing at.
+    if (!model.trim())
+      found.push("Choose a model, or let each customer use their own default.");
     if (instructions.trim().length < MIN_INSTRUCTIONS)
       found.push(
         `The operating instructions are the product — write at least ${MIN_INSTRUCTIONS} characters.`,
@@ -589,6 +605,12 @@ export default function ProviderAgentBuilder() {
                   className={`${inputCls} font-mono text-xs`}
                 >
                   <option value="">Choose a model…</option>
+                  {/* First, because it is the right answer for most catalog
+                      agents: the agent runs in the CUSTOMER's workspace, and
+                      the provider rarely knows which vendor they are on. */}
+                  <option value={TENANT_DEFAULT}>
+                    Use each customer&rsquo;s own default model
+                  </option>
                   {modelOptions.map((m) => (
                     <option key={m} value={m}>
                       {m}
