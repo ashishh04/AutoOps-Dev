@@ -513,7 +513,8 @@ export default function ProviderLibrary() {
                       </SmallButton>
                     </div>
                   ) : (
-                    <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex justify-end gap-2 whitespace-nowrap"
+                         onClick={(e) => e.stopPropagation()}>
                       {/* Workflows are editable now. This used to be agents
                           only, on the reasoning that a workflow's definition is
                           a node graph with no editor behind it — true until the

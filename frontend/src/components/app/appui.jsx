@@ -291,8 +291,13 @@ export const Chip = ({ children }) => (
 );
 
 export const SmallButton = ({ children, icon, variant = "ghost", ...rest }) => {
+  // whitespace-nowrap and shrink-0 are load-bearing, not polish. In a narrow
+  // table cell the label wrapped — "Roll out" became "Roll" over "out" — which
+  // doubled the height of every row in the catalog and pushed the column into
+  // a horizontal scrollbar. A button is as wide as its label; it is the column
+  // that should give.
   const base =
-    "inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition duration-300 disabled:cursor-not-allowed disabled:opacity-40";
+    "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-semibold transition duration-300 disabled:cursor-not-allowed disabled:opacity-40";
   const styles =
     variant === "primary"
       ? "bg-blue-600 text-white shadow-lg shadow-blue-600/40 hover:bg-blue-700"
