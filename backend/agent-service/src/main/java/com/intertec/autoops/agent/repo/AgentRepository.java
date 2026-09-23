@@ -45,4 +45,19 @@ public interface AgentRepository extends JpaRepository<Agent, Long> {
      * the same source past it.
      */
     boolean existsByProjectIdAndSourceId(Long projectId, Long sourceId);
+
+    /**
+     * Every live copy of one catalog item, across every customer.
+     *
+     * <p>The read behind the provider's revoke screen. Counting deliveries has
+     * been possible since rollout existed; NAMING them has not, which is why
+     * an agent could be rolled out from the console and only taken back with
+     * SQL — {@code AgentClient.revoke} has existed the whole time and had no
+     * caller.
+     *
+     * <p>Deliberately not tenant-scoped: it answers a provider's question
+     * ("who holds this?") and is reachable only from the internal surface,
+     * which core-service gates on the PROVIDER role.
+     */
+    List<Agent> findBySourceIdOrderByTenantIdAscIdAsc(Long sourceId);
 }

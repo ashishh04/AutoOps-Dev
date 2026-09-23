@@ -144,6 +144,77 @@ public class RolloutService {
                 delivered, deliveries.size() - delivered, deliveries);
     }
 
+    /** One customer's copy of a catalog item, and what it is. */
+    public record Delivery(Long id, String tenantId, Long projectId, String name,
+                           boolean enabled, String type) {
+    }
+
+    /**
+     * Who holds a catalog item right now.
+     *
+     * <p>Counted since rollout existed; never NAMED until now, which is why a
+     * delivery could be made from the console and only taken back with SQL.
+     * {@code AgentClient.revoke} and {@code WorkflowClient.revoke} have both
+     * existed the whole time with no caller.
+     *
+     * <p>Read live from the services that hold the copies rather than from a
+     * ledger here, for the same reason the counts are: a ledger can only ever
+     * go up, and would keep naming a customer who no longer has it.
+     */
+    public List<Delivery> deliveries(Long catalogId) {
+        LibraryItem item = libraryRepository.findByIdAndTenantIdIsNull(catalogId)
+                .orElseThrow(() -> CoreException.notFound("template_not_found",
+                        "No such catalog item"));
+        if (item.getType() == LibraryItem.Type.AGENT) {
+            return agentClient.deliveries(catalogId).stream()
+                    .map(d -> new Delivery(d.id(), d.tenantId(), d.projectId(), d.name(),
+                            d.enabled(), "agent"))
+                    .toList();
+        }
+        if (item.getType() == LibraryItem.Type.WORKFLOW) {
+            return workflowClient.deliveries(catalogId).stream()
+                    .map(d -> new Delivery(d.id(), d.tenantId(), d.projectId(), d.name(),
+                            d.enabled(), "workflow"))
+                    .toList();
+        }
+        // A SCRIPT is imported by the customer, not delivered to them: their
+        // copy is their own and the provider has no standing to remove it.
+        return List.of();
+    }
+
+    /**
+     * Take one delivered copy back.
+     *
+     * <p>The delivery is re-read from the holding service first and matched
+     * against this catalog item. Revoking by id alone would let a mistyped id
+     * delete an agent the customer built themselves, or one delivered from a
+     * different catalog entry — and neither is recoverable, because the copy is
+     * the only place a sealed persona exists outside the provider's catalog.
+     */
+    public void revoke(String actor, String accessToken, Long catalogId, String tenantId,
+                       Long deliveredId) {
+        Delivery found = deliveries(catalogId).stream()
+                .filter(d -> d.id().equals(deliveredId) && d.tenantId().equals(tenantId))
+                .findFirst()
+                .orElseThrow(() -> CoreException.notFound("delivery_not_found",
+                        "That customer does not hold a copy of this catalog item. It may "
+                                + "already have been revoked."));
+
+        if ("agent".equals(found.type())) {
+            agentClient.revoke(tenantId, accessToken, deliveredId);
+        } else {
+            workflowClient.revoke(tenantId, accessToken, deliveredId);
+        }
+        // TEMPLATE_REVOKED, not TEMPLATE_ROLLED_OUT. The audit trail is where a
+        // customer asks "when did this disappear from my workspace", and an
+        // entry labelled as a rollout answers the opposite question.
+        auditService.record(CoreAuditEventType.TEMPLATE_REVOKED, tenantId, actor,
+                found.projectId(), found.type().toUpperCase(java.util.Locale.ROOT),
+                deliveredId, found.name(), "revoked from catalog item " + catalogId);
+        log.info("Revoked {} {} ({}) from tenant {}", found.type(), deliveredId,
+                found.name(), tenantId);
+    }
+
     /**
      * The tenant-boundary proof. Reading by (id, tenantId) together is the
      * whole point: by id alone, a provider could deliver into a project that

@@ -82,6 +82,20 @@ public class InternalWorkflowController {
      * this returns counts keyed by catalog id and never names a tenant or
      * returns any workflow content.
      */
+    /** One delivered copy, as the provider's revoke screen lists it. */
+    public record Delivery(Long id, String tenantId, Long projectId, String name,
+                           boolean enabled) {
+    }
+
+    /** Who holds this catalog workflow. Names customers, never definitions. */
+    @GetMapping("/internal/workflows/deliveries")
+    public List<Delivery> deliveries(@RequestParam Long sourceId) {
+        return workflowService.deliveries(sourceId).stream()
+                .map(w -> new Delivery(w.getId(), w.getTenantId(), w.getProjectId(),
+                        w.getName(), w.isEnabled()))
+                .toList();
+    }
+
     @GetMapping("/internal/workflows/rollout-counts")
     public Map<String, Long> rolloutCounts() {
         return workflowService.rolloutCountsBySource();

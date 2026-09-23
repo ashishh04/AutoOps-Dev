@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -69,6 +70,26 @@ public class InternalAgentController {
                 request.instructions(), request.graphRef(), request.graphVersion(),
                 request.tools(), request.phases());
         return new RolledOutAgent(agent.getId(), agent.getName(), agent.getToolCount());
+    }
+
+    /** One delivered copy, as the provider's revoke screen lists it. */
+    public record Delivery(Long id, String tenantId, Long projectId, String name,
+                           boolean enabled) {
+    }
+
+    /**
+     * Who holds this catalog agent.
+     *
+     * <p>Never the persona and never the allow-list — this answers "which
+     * customers have it" and nothing about what it does, because that is the
+     * only question the screen above it asks.
+     */
+    @GetMapping("/internal/agents/deliveries")
+    public List<Delivery> deliveries(@RequestParam Long sourceId) {
+        return agentService.deliveries(sourceId).stream()
+                .map(a -> new Delivery(a.getId(), a.getTenantId(), a.getProjectId(),
+                        a.getName(), a.isEnabled()))
+                .toList();
     }
 
     /** Revoke: the provider withdrawing an agent it rolled out. */

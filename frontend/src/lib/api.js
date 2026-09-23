@@ -1624,6 +1624,20 @@ export const api = {
   // Deliberately NOT cached across a session. It is one small request per page
   // load, and a cache would mean a console kept offering yesterday's palette
   // after the runtime was upgraded underneath it.
+  // Who holds a catalog item right now. Read live from the services that hold
+  // the copies, so a revoked delivery leaves the list rather than lingering.
+  providerDeliveries: (catalogId) =>
+    realFetch(`/provider/rollout/${catalogId}/deliveries`, { auth: true }),
+
+  // The counterpart to rollout. tenantId travels explicitly: a delivery is
+  // identified by (tenant, id), and revoking on an id alone could take a copy
+  // from a customer nobody named.
+  providerRevoke: (catalogId, deliveredId, tenantId) =>
+    realFetch(
+      `/provider/rollout/${catalogId}/deliveries/${deliveredId}?tenantId=${encodeURIComponent(tenantId)}`,
+      { method: "DELETE", auth: true },
+    ),
+
   providerAuthoringSchema: () =>
     realFetch("/provider/authoring/schema", { auth: true }),
 

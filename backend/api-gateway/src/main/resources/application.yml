@@ -88,7 +88,7 @@ spring:
               # view; the .../projects sub-path below is core-service's — the
               # patterns do not overlap, so ordering between the two is not
               # load-bearing.
-              - Path=/api/projects/**,/api/jobs/**,/api/cloud/**,/api/runs/**,/api/approvals/**,/api/compliance/**,/api/governance/**,/api/audit/**,/api/notifications/**,/api/nodes/**,/api/secrets/**,/api/webhooks/**,/api/hooks/**,/api/library/**,/api/commands/**,/api/connectors/**,/api/model-providers/**,/api/provider/usage,/api/provider/health,/api/provider/broadcasts,/api/provider/library,/api/provider/library/*,/api/provider/tenants/*/projects,/api/provider/rollout,/api/provider/authoring/**
+              - Path=/api/projects/**,/api/jobs/**,/api/cloud/**,/api/runs/**,/api/approvals/**,/api/compliance/**,/api/governance/**,/api/audit/**,/api/notifications/**,/api/nodes/**,/api/secrets/**,/api/webhooks/**,/api/hooks/**,/api/library/**,/api/commands/**,/api/connectors/**,/api/model-providers/**,/api/provider/usage,/api/provider/health,/api/provider/broadcasts,/api/provider/library,/api/provider/library/*,/api/provider/tenants/*/projects,/api/provider/rollout,/api/provider/rollout/**,/api/provider/authoring/**
           # Aegis-01, the landing-page voice agent. Anonymous by design —
           # visitors have no account yet — so voice-agent caps it itself.
           - id: voice-agent

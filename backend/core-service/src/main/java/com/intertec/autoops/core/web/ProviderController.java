@@ -19,12 +19,14 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestClient;
 
@@ -422,6 +424,42 @@ public class ProviderController {
                 .toList();
         return rolloutService.rollOut(jwt.getSubject(), jwt.getTokenValue(),
                 request.catalogId(), targets);
+    }
+
+    /**
+     * Which customers hold this catalog item right now.
+     *
+     * <p>Read live from the services that hold the copies, so a revoked
+     * delivery disappears from the list rather than lingering in a ledger.
+     */
+    @GetMapping("/rollout/{catalogId}/deliveries")
+    public List<RolloutService.Delivery> deliveries(@PathVariable Long catalogId,
+                                                    @AuthenticationPrincipal Jwt jwt) {
+        requireProvider(jwt);
+        return rolloutService.deliveries(catalogId);
+    }
+
+    /**
+     * Take one delivered copy back out of a customer's workspace.
+     *
+     * <p>The counterpart to rollout, and the reason it did not exist before is
+     * worth recording: both revoke clients have been written since rollout
+     * shipped, and neither had a caller — so an agent could be delivered from
+     * the console and only removed with SQL.
+     *
+     * <p>{@code tenantId} is required rather than derived from the delivery id.
+     * A delivery is identified by the pair, and a revoke that trusted an id
+     * alone could remove a copy from a customer the provider did not name.
+     */
+    @DeleteMapping("/rollout/{catalogId}/deliveries/{deliveredId}")
+    public Map<String, Object> revoke(@PathVariable Long catalogId,
+                                      @PathVariable Long deliveredId,
+                                      @RequestParam String tenantId,
+                                      @AuthenticationPrincipal Jwt jwt) {
+        requireProvider(jwt);
+        rolloutService.revoke(jwt.getSubject(), jwt.getTokenValue(), catalogId, tenantId,
+                deliveredId);
+        return Map.of("revoked", true, "deliveredId", deliveredId, "tenantId", tenantId);
     }
 
     private void requireProvider(Jwt jwt) {

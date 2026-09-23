@@ -97,16 +97,32 @@ public class AgentService {
                          Long sourceId, String name, String description, String model,
                          String instructions, String graphRef, String graphVersion,
                          String tools, String phases) {
-        // One delivered copy per catalog item per project. The name check in
-        // doCreate stops the obvious repeat, but only while the names still
-        // match: rename the catalog item, roll out again, and it lets a second
-        // copy of the same source through. Matching on sourceId closes that,
-        // and gives the provider a conflict that says what actually happened
-        // instead of "an agent with this name already exists".
-        if (sourceId != null && agentRepository.existsByProjectIdAndSourceId(projectId, sourceId)) {
-            throw AgentException.conflict("already_delivered",
-                    "This project already has this agent. Edit the delivered copy to update "
-                            + "it, or roll out to a different project.");
+        // One delivered copy per catalog item per project, matched on sourceId
+        // rather than name: rename the catalog item, roll out again, and a name
+        // check lets a second copy of the same source through.
+        //
+        // A repeat rolls the UPDATE out rather than being refused. It used to
+        // throw `already_delivered` and tell the provider to "edit the
+        // delivered copy" — advice that does not scale past one customer and
+        // leaves the catalog and the fleet permanently out of step. Fixing a
+        // persona and pushing it to everyone who holds the agent is the whole
+        // point of a catalog.
+        //
+        // Overwriting is safe here and nowhere else: a PROVIDER-authored agent
+        // cannot be edited by the customer holding it (`requireOwner` refuses),
+        // so there are no local changes to destroy. If that ever stops being
+        // true, this has to stop being an overwrite.
+        if (sourceId != null) {
+            Agent existing = agentRepository
+                    .findBySourceIdOrderByTenantIdAscIdAsc(sourceId).stream()
+                    .filter(a -> projectId.equals(a.getProjectId())
+                            && tenantId.equals(a.getTenantId()))
+                    .findFirst()
+                    .orElse(null);
+            if (existing != null) {
+                return redeliver(existing, actor, accessToken, name, description, model,
+                        instructions, graphRef, graphVersion, tools, phases);
+            }
         }
         // planGate=false: the gate reads the tenant from the bearer token, and
         // on a rollout that token is the PROVIDER's — it would test the wrong
@@ -129,6 +145,38 @@ public class AgentService {
         Agent saved = agentRepository.save(agent);
         log.info("Rolled catalog agent {} out to tenant {} project {} as agent {}",
                 sourceId, tenantId, projectId, saved.getId());
+        return saved;
+    }
+
+    /**
+     * A catalog item rolled out again over the copy a project already holds.
+     *
+     * <p>Everything the catalog owns is replaced; everything the CUSTOMER owns
+     * is left alone. `enabled` is the one that matters: a customer who disabled
+     * a delivered agent has made a decision about their own workspace, and a
+     * provider pushing an update must not quietly switch it back on.
+     */
+    private Agent redeliver(Agent existing, String actor, String accessToken, String name,
+                            String description, String model, String instructions,
+                            String graphRef, String graphVersion, String tools,
+                            String phases) {
+        existing.setName(name);
+        existing.setDescription(description);
+        existing.setModel(blankToNull(model));
+        existing.setInstructions(blankToNull(instructions));
+        if (tools != null) {
+            String normalized = normalizeTools(existing.getTenantId(), existing.getProjectId(),
+                    tools);
+            existing.setTools(normalized);
+            existing.setToolCount(countTools(normalized));
+        }
+        existing.setGraphRef(blankToNull(graphRef));
+        existing.setGraphVersion(blankToNull(graphVersion));
+        existing.setPhases(graphRef == null ? blankToNull(phases) : null);
+        Agent saved = agentRepository.save(existing);
+        log.info("Re-delivered catalog agent {} to tenant {} project {} (agent {})",
+                existing.getSourceId(), existing.getTenantId(), existing.getProjectId(),
+                saved.getId());
         return saved;
     }
 
@@ -212,6 +260,19 @@ public class AgentService {
             agent.setToolCount(countTools(normalizedTools));
         }
         return agentRepository.save(agent);
+    }
+
+    /**
+     * Every live copy of one catalog agent, for the provider's revoke screen.
+     *
+     * <p>No plan gate and no tenant scope: this is the provider asking which of
+     * their customers holds a thing they published, and it is reachable only
+     * through the internal surface that core-service gates on PROVIDER.
+     */
+    public List<Agent> deliveries(Long sourceId) {
+        return sourceId == null
+                ? List.of()
+                : agentRepository.findBySourceIdOrderByTenantIdAscIdAsc(sourceId);
     }
 
     /** Disabling is the kill switch: a disabled agent may not act at all. */

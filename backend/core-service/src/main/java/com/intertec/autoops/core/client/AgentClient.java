@@ -10,6 +10,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -143,6 +144,32 @@ public class AgentClient {
     private static String field(Map<?, ?> body, String key, String fallback) {
         Object value = body == null ? null : body.get(key);
         return value == null || value.toString().isBlank() ? fallback : value.toString();
+    }
+
+    /** One customer's copy of a catalog agent. */
+    public record Delivery(Long id, String tenantId, Long projectId, String name,
+                           boolean enabled) {
+    }
+
+    /**
+     * Who holds this catalog agent.
+     *
+     * <p>An empty list on failure, never an exception. The screen this feeds
+     * also shows workflows, and one service being down should cost that panel
+     * its agent rows rather than the whole page.
+     */
+    public List<Delivery> deliveries(Long sourceId) {
+        try {
+            Delivery[] rows = agentRestClient.get()
+                    .uri("/internal/agents/deliveries?sourceId={sourceId}", sourceId)
+                    .header("X-Internal-Token", internalToken)
+                    .retrieve()
+                    .body(Delivery[].class);
+            return rows == null ? List.of() : List.of(rows);
+        } catch (Exception ex) {
+            log.warn("Could not list agent deliveries for {}: {}", sourceId, ex.getMessage());
+            return List.of();
+        }
     }
 
     /** Revoke a rolled-out agent. */

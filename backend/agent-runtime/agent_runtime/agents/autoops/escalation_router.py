@@ -44,6 +44,7 @@ does not record yet. Named so it is a known gap rather than a forgotten one.
 from __future__ import annotations
 
 from agent_runtime.agents.spec import AgentSpec, Manifest, ToolRef
+from agent_runtime.app.extraction import SubjectSource
 from agent_runtime.app.state import Phase
 from agent_runtime.graph import kit
 
@@ -151,11 +152,35 @@ MANIFEST = Manifest(
     domain="AutoOps",
     model="claude-sonnet-5",
     tools=[
-        # The open incidents. No subjects declared: an incident is not a durable
-        # subject a later run re-examines — it closes, and a coverage claim over
-        # closed incidents would mean nothing. The alarm rules behind them are
-        # subjects, and those belong to aws.alert_quality_analyst.
-        ToolRef("WORKFLOW", "RD-221-open-incident-routing-context", mutating=False),
+        # The open incidents, and they ARE durable subjects.
+        #
+        # This was left undeclared at first, on the reasoning that an incident
+        # closes and a coverage claim over closed incidents means nothing. That
+        # reasoning conflated two different kinds of disappearance. The test is
+        # not "does it persist forever" but "is its ABSENCE next run evidence of
+        # anything" — and an incident is absent because somebody RESOLVED it,
+        # unlike a CloudTrail event, which is absent because the window moved.
+        #
+        # It matters concretely: "INC-123 is unassigned" should stop being an
+        # open finding the moment INC-123 is closed. Undeclared, this agent
+        # claims no coverage, so nothing it reports can ever close by itself and
+        # every routing finding accumulates until a human dismisses it.
+        ToolRef(
+            "WORKFLOW", "RD-221-open-incident-routing-context", mutating=False,
+            subjects=(
+                # Qualified by tenant: incident ids come from the engine and are
+                # unique within a customer, not across the platform.
+                #
+                # NO total_field. The count RD-221 reports is `rows.size()` —
+                # derived from the very list it would be checking — so it agrees
+                # with that list in every case including the broken ones. It
+                # would read as verification while providing none.
+                SubjectSource(
+                    "incident", "incidents", "{tenant_id}/{id}",
+                    truncated_field="truncated",
+                ),
+            ),
+        ),
         # Step 4 of the resolution order: who changed something just before this
         # started. A lead, never an ownership record.
         ToolRef("WORKFLOW", "RD-211-cloudtrail-change-timeline", mutating=False),

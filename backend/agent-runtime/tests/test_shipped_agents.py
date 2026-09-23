@@ -411,13 +411,108 @@ def test_the_escalation_router_never_names_a_person_or_leaves_an_incident_unrout
     assert all(not t.mutating for t in spec.manifest.tools)
 
 
-def test_the_escalation_router_claims_no_coverage_over_incidents():
-    """An incident closes; it is not a durable subject a later run re-examines.
+def test_the_escalation_router_covers_the_incidents_it_routes():
+    """An incident IS a durable subject, and this test used to say it was not.
 
-    The alarm rules behind it are subjects, and those belong to the alert
-    quality analyst.
+    The original reasoning was that an incident closes, so a coverage claim over
+    it means nothing. That conflated two kinds of disappearance. The criterion
+    is not "does it persist forever" but "is its absence next run evidence of
+    anything" — and an incident is absent because somebody RESOLVED it, where a
+    CloudTrail event is absent because the window moved.
+
+    The consequence of the old reading was concrete: undeclared, this agent
+    claimed no coverage, so "INC-123 is unassigned" could never close by itself
+    and every routing finding accumulated until a human dismissed it.
     """
     from agent_runtime import agents
 
     spec = agents.REGISTRY["autoops.escalation_router"]
-    assert spec.declared_subject_kinds() == ()
+    assert spec.declared_subject_kinds() == ("incident",)
+
+
+def test_the_router_does_not_verify_its_coverage_against_a_derived_count():
+    """``total_field`` is omitted, and its absence is the assertion.
+
+    RD-221 reports ``incident_count``, which is ``rows.size()`` — computed from
+    the very list it would be checking. Pointing a total at it would agree with
+    that list in every case including the broken ones: verification that cannot
+    fail, which is worse than none because it looks like a check.
+    """
+    from agent_runtime import agents
+
+    spec = agents.REGISTRY["autoops.escalation_router"]
+    sources = [s for tool in spec.manifest.tools for s in tool.subjects]
+
+    assert sources, "the router must declare a subject source"
+    for source in sources:
+        assert source.total_field is None
+    # Truncation IS honoured: a list the platform shortened must not be read as
+    # complete coverage of what is open.
+    assert any(s.truncated_field == "truncated" for s in sources)
+
+
+def test_the_routers_declaration_actually_extracts_from_what_RD_221_emits():
+    """Declared AND working, which are different things.
+
+    A source can name a path that does not exist in the tool's output, and the
+    failure is silent: extraction finds nothing, the run claims no coverage, and
+    the agent looks exactly like one that had no declaration at all. The payload
+    below is the shape ``workflows/nodes.py::_run_incidents`` writes as its JSON
+    trailer, so this fails if either side moves.
+    """
+    import json
+
+    from agent_runtime import agents
+    from agent_runtime.app import extraction
+
+    spec = agents.REGISTRY["autoops.escalation_router"]
+    source = [s for tool in spec.manifest.tools for s in tool.subjects][0]
+
+    body = {
+        "tenant_id": "acme",
+        "project_id": 9001,
+        "incident_count": 2,
+        "truncated": False,
+        "incidents": [
+            {"id": "INC-123", "severity": "SEV1", "status": "OPEN", "assignee": None},
+            {"id": "INC-124", "severity": "SEV3", "status": "OPEN", "assignee": "ops"},
+        ],
+    }
+    # Built by joining rather than escaping: the human preamble before the JSON
+    # trailer is part of what extraction has to see past.
+    content = "\n".join(
+        ["OPEN INCIDENTS (2)", "tenant=acme project=9001", "", "JSON " + json.dumps(body)]
+    )
+
+    found = extraction.extract(content, source, tool_ok=True)
+
+    assert found.outcome is extraction.Outcome.ENUMERATED
+    # Tenant-qualified, resolved from the DOCUMENT, with the id from each ITEM.
+    assert list(found.subject_ids) == ["acme/INC-123", "acme/INC-124"]
+
+
+def test_a_truncated_incident_list_is_not_read_as_complete_coverage():
+    """The platform shortened the list, so what is open is partly unknown."""
+    import json
+
+    from agent_runtime import agents
+    from agent_runtime.app import extraction
+
+    spec = agents.REGISTRY["autoops.escalation_router"]
+    source = [s for tool in spec.manifest.tools for s in tool.subjects][0]
+
+    body = {"tenant_id": "acme", "truncated": True,
+            "incidents": [{"id": "INC-1"}]}
+    found = extraction.extract("JSON " + json.dumps(body), source, tool_ok=True)
+
+    assert found.outcome is not extraction.Outcome.ENUMERATED
+
+
+def test_the_routers_subject_ids_are_qualified_by_tenant():
+    """A bare incident id is unique within a customer, not across the platform."""
+    from agent_runtime import agents
+
+    spec = agents.REGISTRY["autoops.escalation_router"]
+    sources = [s for tool in spec.manifest.tools for s in tool.subjects]
+
+    assert all("{tenant_id}" in s.id_template for s in sources)

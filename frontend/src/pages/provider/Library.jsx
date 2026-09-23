@@ -164,6 +164,10 @@ export default function ProviderLibrary() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("all");
   const [selectedItem, setSelectedItem] = useState(null);
+  // Who holds the item currently open in the drawer. Null while loading, so
+  // "still fetching" and "nobody has it" do not look the same.
+  const [deliveries, setDeliveries] = useState(null);
+  const [revoking, setRevoking] = useState(null);
   const [rolloutItem, setRolloutItem] = useState(null);
 
   const load = async () => {
@@ -227,6 +231,39 @@ export default function ProviderLibrary() {
     (currentPage - 1) * pageSize,
     currentPage * pageSize,
   );
+
+  useEffect(() => {
+    if (!selectedItem || selectedItem.type === "script") {
+      setDeliveries(null);
+      return;
+    }
+    let cancelled = false;
+    setDeliveries(null);
+    api
+      .providerDeliveries(selectedItem.id)
+      .then((rows) => !cancelled && setDeliveries(rows || []))
+      // An empty list on failure would read as "nobody holds this", which is
+      // the answer that makes a provider stop looking.
+      .catch(() => !cancelled && setDeliveries("error"));
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedItem]);
+
+  const revoke = async (delivery) => {
+    setRevoking(delivery.id);
+    try {
+      await api.providerRevoke(selectedItem.id, delivery.id, delivery.tenantId);
+      setDeliveries((rows) => rows.filter((d) => d.id !== delivery.id));
+      pushToast(`Revoked from ${delivery.tenantId}`, "green");
+      // The rollout count on the card behind the drawer is now stale.
+      load();
+    } catch (err) {
+      pushToast(err.message || "Could not revoke.", "red");
+    } finally {
+      setRevoking(null);
+    }
+  };
 
   const handleQueryChange = (e) => {
     setQuery(e.target.value);
@@ -555,6 +592,52 @@ export default function ProviderLibrary() {
                   {prettyDefinition(selectedItem.definition)}
                 </pre>
               </div>
+
+              {selectedItem.type !== "script" && (
+                <div>
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Delivered to
+                  </p>
+                  {deliveries === null ? (
+                    <p className="text-sm text-slate-500">Loading…</p>
+                  ) : deliveries === "error" ? (
+                    // Not an empty list. "Nobody holds this" is the answer that
+                    // makes a provider stop looking, and it must not be what a
+                    // failed request looks like.
+                    <p className="text-sm text-amber-700" role="alert">
+                      Could not read who holds this. The list below is not empty —
+                      it is unknown.
+                    </p>
+                  ) : deliveries.length === 0 ? (
+                    <p className="text-sm text-slate-500">
+                      No customer holds a copy of this yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {deliveries.map((d) => (
+                        <div
+                          key={`${d.tenantId}-${d.id}`}
+                          className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-sm text-slate-900">{d.tenantId}</p>
+                            <p className="truncate font-mono text-[10px] text-slate-500">
+                              {d.name} · project {d.projectId}
+                              {!d.enabled && " · disabled"}
+                            </p>
+                          </div>
+                          <SmallButton
+                            onClick={() => revoke(d)}
+                            disabled={revoking === d.id}
+                          >
+                            {revoking === d.id ? "Revoking…" : "Revoke"}
+                          </SmallButton>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {selectedItem.type !== "script" && (
                 <div className="flex justify-end">

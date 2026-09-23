@@ -262,6 +262,26 @@ public class WorkflowClient {
         return value == null || value.toString().isBlank() ? fallback : value.toString();
     }
 
+    /** One customer's copy of a catalog workflow. */
+    public record Delivery(Long id, String tenantId, Long projectId, String name,
+                           boolean enabled) {
+    }
+
+    /** Who holds this catalog workflow. Empty on failure — see AgentClient. */
+    public List<Delivery> deliveries(Long sourceId) {
+        try {
+            Delivery[] rows = workflowRestClient.get()
+                    .uri("/internal/workflows/deliveries?sourceId={sourceId}", sourceId)
+                    .header("X-Internal-Token", internalToken)
+                    .retrieve()
+                    .body(Delivery[].class);
+            return rows == null ? List.of() : List.of(rows);
+        } catch (Exception ex) {
+            log.warn("Could not list workflow deliveries for {}: {}", sourceId, ex.getMessage());
+            return List.of();
+        }
+    }
+
     /** Revoke a rolled-out workflow. */
     public void revoke(String tenantId, String accessToken, Long workflowId) {
         try {

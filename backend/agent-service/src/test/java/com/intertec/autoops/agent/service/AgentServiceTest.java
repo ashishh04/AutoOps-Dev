@@ -281,6 +281,55 @@ class AgentServiceTest {
     }
 
     @Test
+    void rollingOutAgainUpdatesTheCopyInsteadOfRefusing() {
+        // It used to throw `already_delivered` and advise editing the delivered
+        // copy — advice that does not scale past one customer and leaves the
+        // catalog permanently out of step with the fleet. Fixing a persona and
+        // pushing it to everyone holding the agent is what a catalog is for.
+        Agent first = rolledOut("Cost Analyst", null);
+        clearInvocations(toolTargets);
+
+        Agent second = agentService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID,
+                "Cost Analyst", "Now with a better brief", "claude-sonnet-5",
+                "You are a cost analyst. Report before you act.", null, null, null,
+                "TRIAGE,GATHER,REPORT");
+
+        assertEquals(first.getId(), second.getId(), "the same row, updated");
+        assertEquals(1, agentRepository.count(), "never a second copy");
+        assertEquals("Now with a better brief", second.getDescription());
+        assertEquals("TRIAGE,GATHER,REPORT", second.getPhases());
+    }
+
+    @Test
+    void aRedeliveryDoesNotReEnableAnAgentTheCustomerDisabled() {
+        // Disabling is the customer's decision about their own workspace, and
+        // it is the kill switch. A provider pushing an update must never be
+        // able to switch an agent back on that somebody deliberately stopped.
+        Agent delivered = rolledOut("Cost Analyst", null);
+        agentService.setEnabled(TENANT, TOKEN, delivered.getId(), false);
+
+        Agent updated = agentService.rollOut(TENANT, ACTOR, TOKEN, PROJECT, CATALOG_ID,
+                "Cost Analyst", "Updated", "gpt-4o", "New brief.", null, null, null, null);
+
+        assertFalse(updated.isEnabled(), "a redelivery must not undo the kill switch");
+    }
+
+    @Test
+    void theSameCatalogAgentStillReachesASecondProject() {
+        // The de-dupe is per PROJECT, not per tenant: delivering one agent into
+        // two of a customer's projects is a legitimate rollout, and the update
+        // path must not have collapsed that into one.
+        rolledOut("Cost Analyst", null);
+
+        Agent other = agentService.rollOut(TENANT, ACTOR, TOKEN, OTHER_PROJECT, CATALOG_ID,
+                "Cost Analyst", "Watches production", "gpt-4o", "Escalate.",
+                null, null, null, null);
+
+        assertEquals(OTHER_PROJECT, other.getProjectId());
+        assertEquals(2, agentRepository.count());
+    }
+
+    @Test
     void aRolledOutPythonAgentStoresNoPhases() {
         // Its phases are in its graph. A second copy on the row would create
         // two answers to the same question, with the one a hand edit can reach

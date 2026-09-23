@@ -28,6 +28,15 @@ public interface WorkflowRepository extends JpaRepository<Workflow, Long> {
             + "GROUP BY w.sourceId")
     List<Object[]> countGroupedBySourceId();
 
+    /**
+     * Every live copy of one catalog workflow, across every customer.
+     *
+     * <p>The read behind the provider's revoke screen. Counting has been
+     * possible since rollout existed; naming the holders has not, so a
+     * delivered workflow could only be taken back with SQL.
+     */
+    List<Workflow> findBySourceIdOrderByTenantIdAscIdAsc(Long sourceId);
+
     List<Workflow> findByProjectIdAndTenantIdOrderByCreatedAtDesc(Long projectId, String tenantId);
 
     /** Tenant isolation: every by-id lookup is scoped to the caller's tenant. */

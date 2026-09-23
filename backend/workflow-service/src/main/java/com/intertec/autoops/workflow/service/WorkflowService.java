@@ -263,6 +263,13 @@ public class WorkflowService {
      * Jackson stringify them anyway invites a caller to look one up with a
      * number and miss.
      */
+    /** Every live copy of one catalog workflow, for the provider's revoke screen. */
+    public List<Workflow> deliveries(Long sourceId) {
+        return sourceId == null
+                ? List.of()
+                : workflowRepository.findBySourceIdOrderByTenantIdAscIdAsc(sourceId);
+    }
+
     public Map<String, Long> rolloutCountsBySource() {
         Map<String, Long> counts = new HashMap<>();
         for (Object[] row : workflowRepository.countGroupedBySourceId()) {
