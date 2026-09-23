@@ -123,3 +123,19 @@ management:
     web:
       exposure:
         include: health,info,prometheus
+  health:
+    redis:
+      # OFF, and this is not a convenience.
+      #
+      # Adding spring-boot-starter-data-redis for the rate limiter brought a
+      # Redis health indicator with it, so /actuator/health began reporting 503
+      # whenever Redis was unreachable — and the orchestrator kills a container
+      # that fails its liveness probe.
+      #
+      # That would have defeated the entire design. RateLimitFilter deliberately
+      # fails OPEN so a Redis incident costs the limiter and nothing else; a
+      # health check that takes the gateway down on the same event just moves
+      # the outage rather than preventing it. Redis is not a dependency this
+      # service needs in order to route traffic, so it is not part of whether
+      # this service is healthy.
+      enabled: false

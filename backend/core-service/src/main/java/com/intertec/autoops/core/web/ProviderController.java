@@ -433,7 +433,7 @@ public class ProviderController {
      * delivery disappears from the list rather than lingering in a ledger.
      */
     @GetMapping("/rollout/{catalogId}/deliveries")
-    public List<RolloutService.Delivery> deliveries(@PathVariable Long catalogId,
+    public List<RolloutService.Holder> deliveries(@PathVariable Long catalogId,
                                                     @AuthenticationPrincipal Jwt jwt) {
         requireProvider(jwt);
         return rolloutService.deliveries(catalogId);

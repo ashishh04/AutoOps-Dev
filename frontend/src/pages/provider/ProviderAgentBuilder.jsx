@@ -49,19 +49,17 @@ What you must not do:
  * delivered copies by ref, and a title is not a key.
  */
 function workflowOption(item) {
-  let spec = {};
-  try {
-    spec = JSON.parse(item.definition || "{}");
-  } catch {
-    spec = {};
-  }
   return {
     id: item.id,
     title: item.title,
-    ref: typeof spec.ref === "string" ? spec.ref : null,
-    // The text an agent's MODEL reads to decide whether this tool can answer
-    // the question, so the definition's copy wins over the catalog row's.
-    description: spec.description || item.description || "",
+    // Straight off the row now. `ref` used to be dug out of the definition
+    // JSON, which meant this screen had to download every definition in the
+    // catalog — about two megabytes — to read one string per workflow.
+    ref: typeof item.ref === "string" && item.ref ? item.ref : null,
+    // The catalog row's description. The definition carries its own, which the
+    // agent's MODEL reads at run time and which rollout delivers with the
+    // workflow — but that copy is not worth two megabytes to display here.
+    description: item.description || "",
     rollouts: item.rollouts ?? 0,
   };
 }
@@ -180,7 +178,7 @@ export default function ProviderAgentBuilder() {
       // has to be reported rather than absorbed.
       api.providerAuthoringSchema().catch((err) => ({ __error: err })),
     ])
-      .then(([rows, providers, contract]) => {
+      .then(async ([rows, providers, contract]) => {
         if (cancelled) return;
         if (contract && contract.__error) {
           setSchemaError(
@@ -209,27 +207,25 @@ export default function ProviderAgentBuilder() {
             ),
           ].sort((a, b) => a.localeCompare(b)),
         );
+        // `model` arrives as a column now, for the same reason `ref` does:
+        // reading one string per agent used to mean downloading every
+        // definition in the catalog.
         setCatalogModels([
           ...new Set(
-            list
-              .filter((r) => r.type === "agent")
-              .map((r) => {
-                try {
-                  return JSON.parse(r.definition || "{}").model;
-                } catch {
-                  return null;
-                }
-              })
-              .filter(Boolean),
+            list.filter((r) => r.type === "agent").map((r) => r.model).filter(Boolean),
           ),
         ]);
 
         if (!editing) return;
-        const item = list.find((r) => String(r.id) === String(id));
+        // ONE definition, fetched on its own. The list no longer carries them —
+        // a screen that edits a single agent has no business downloading every
+        // body in the catalog to find it.
+        const item = await api.libraryItem(id).catch(() => null);
         if (!item) {
           setError("That agent is no longer in the catalog.");
           return;
         }
+        if (cancelled) return;
         setSaved(item);
         setTitle(item.title || "");
         setCategory(item.category || "");

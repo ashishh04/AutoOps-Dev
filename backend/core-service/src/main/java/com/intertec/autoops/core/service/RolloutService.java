@@ -144,9 +144,17 @@ public class RolloutService {
                 delivered, deliveries.size() - delivered, deliveries);
     }
 
-    /** One customer's copy of a catalog item, and what it is. */
-    public record Delivery(Long id, String tenantId, Long projectId, String name,
-                           boolean enabled, String type) {
+    /**
+     * One customer's live copy of a catalog item.
+     *
+     * <p>Named Holder rather than Delivery because {@link Delivery} above
+     * already means something else here — the OUTCOME of a rollout attempt,
+     * carrying an error rather than a name. Two records called Delivery in one
+     * service, one describing an attempt and one describing a copy that exists,
+     * would be read as the same thing by everyone including the compiler.
+     */
+    public record Holder(Long id, String tenantId, Long projectId, String name,
+                         boolean enabled, String type) {
     }
 
     /**
@@ -161,19 +169,19 @@ public class RolloutService {
      * ledger here, for the same reason the counts are: a ledger can only ever
      * go up, and would keep naming a customer who no longer has it.
      */
-    public List<Delivery> deliveries(Long catalogId) {
+    public List<Holder> deliveries(Long catalogId) {
         LibraryItem item = libraryRepository.findByIdAndTenantIdIsNull(catalogId)
                 .orElseThrow(() -> CoreException.notFound("template_not_found",
                         "No such catalog item"));
         if (item.getType() == LibraryItem.Type.AGENT) {
             return agentClient.deliveries(catalogId).stream()
-                    .map(d -> new Delivery(d.id(), d.tenantId(), d.projectId(), d.name(),
+                    .map(d -> new Holder(d.id(), d.tenantId(), d.projectId(), d.name(),
                             d.enabled(), "agent"))
                     .toList();
         }
         if (item.getType() == LibraryItem.Type.WORKFLOW) {
             return workflowClient.deliveries(catalogId).stream()
-                    .map(d -> new Delivery(d.id(), d.tenantId(), d.projectId(), d.name(),
+                    .map(d -> new Holder(d.id(), d.tenantId(), d.projectId(), d.name(),
                             d.enabled(), "workflow"))
                     .toList();
         }
@@ -193,7 +201,7 @@ public class RolloutService {
      */
     public void revoke(String actor, String accessToken, Long catalogId, String tenantId,
                        Long deliveredId) {
-        Delivery found = deliveries(catalogId).stream()
+        Holder found = deliveries(catalogId).stream()
                 .filter(d -> d.id().equals(deliveredId) && d.tenantId().equals(tenantId))
                 .findFirst()
                 .orElseThrow(() -> CoreException.notFound("delivery_not_found",

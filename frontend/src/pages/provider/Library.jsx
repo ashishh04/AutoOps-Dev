@@ -74,7 +74,6 @@ function AgentCards({ agents, loading, onOpen, onEdit, onRollOut, page, pageSize
     <>
       <div className="mt-4 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
         {agents.map((a) => {
-          const spec = agentSpec(a.definition);
           return (
             <Card
               key={a.id}
@@ -94,10 +93,10 @@ function AgentCards({ agents, loading, onOpen, onEdit, onRollOut, page, pageSize
               </p>
 
               <div className="mt-4 flex flex-wrap items-center gap-1.5 text-xs">
-                {spec.model && (
+                {a.model && (
                   <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] text-slate-600">
                     <Icon name="sparkles" size={11} />
-                    {spec.model}
+                    {a.model}
                   </span>
                 )}
                 <Chip>{a.category}</Chip>
@@ -143,14 +142,6 @@ function AgentCards({ agents, loading, onOpen, onEdit, onRollOut, page, pageSize
 }
 
 /** An agent's catalog spec lives in `definition` as JSON; read it defensively. */
-function agentSpec(definition) {
-  try {
-    const spec = JSON.parse(definition || "{}");
-    return { model: spec.model || "", instructions: spec.instructions || "" };
-  } catch {
-    return { model: "", instructions: "" };
-  }
-}
 
 export default function ProviderLibrary() {
   const { pushToast } = useStore();
@@ -167,6 +158,7 @@ export default function ProviderLibrary() {
   // Who holds the item currently open in the drawer. Null while loading, so
   // "still fetching" and "nobody has it" do not look the same.
   const [deliveries, setDeliveries] = useState(null);
+  const [definition, setDefinition] = useState(null);
   const [revoking, setRevoking] = useState(null);
   const [rolloutItem, setRolloutItem] = useState(null);
 
@@ -231,6 +223,25 @@ export default function ProviderLibrary() {
     (currentPage - 1) * pageSize,
     currentPage * pageSize,
   );
+
+  // The definition for the item the drawer is showing. The list stopped
+  // carrying bodies — ~240 items at 8.6KB each made it a two-megabyte response
+  // for a panel that displays one at a time.
+  useEffect(() => {
+    if (!selectedItem) {
+      setDefinition(null);
+      return;
+    }
+    let dropped = false;
+    setDefinition(null);
+    api
+      .libraryItem(selectedItem.id)
+      .then((item) => !dropped && setDefinition(item?.definition ?? ""))
+      .catch(() => !dropped && setDefinition("error"));
+    return () => {
+      dropped = true;
+    };
+  }, [selectedItem]);
 
   useEffect(() => {
     if (!selectedItem || selectedItem.type === "script") {
@@ -589,7 +600,13 @@ export default function ProviderLibrary() {
                   Definition
                 </p>
                 <pre className="max-h-72 overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-4 font-mono text-[11px] leading-relaxed text-slate-200">
-                  {prettyDefinition(selectedItem.definition)}
+                  {definition === null
+                    ? "Loading…"
+                    : definition === "error"
+                      // Not an empty body. A definition that failed to load must
+                      // not read as one that is empty.
+                      ? "Could not load this definition."
+                      : prettyDefinition(definition)}
                 </pre>
               </div>
 

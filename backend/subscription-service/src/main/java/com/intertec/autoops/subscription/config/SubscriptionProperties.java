@@ -26,6 +26,38 @@ public class SubscriptionProperties {
     /** Dev/test knob: makes the stub provider decline every charge. */
     private boolean paymentStubFails = false;
 
+    /**
+     * Whether a subscription's BILLING LIFECYCLE can deny access.
+     *
+     * <p>Null means "decide from the payment provider", and that default is the
+     * point. While {@link #paymentProvider} is {@code stub} nobody can actually
+     * pay — so enforcing "your trial has ended" locks every customer out of a
+     * product they have no way to buy. That is what was happening in demos.
+     *
+     * <p>Deriving it rather than adding a flag also means it corrects itself:
+     * the day a real provider is configured, enforcement turns on without
+     * anybody remembering to flip anything. Set it explicitly to override in
+     * either direction — {@code true} to rehearse the paywall against the stub,
+     * {@code false} to run an unmetered environment against a real provider.
+     *
+     * <p>This gates the LIFECYCLE only. Plan features and numeric quotas are
+     * product behaviour, not payment, and are enforced either way.
+     */
+    private Boolean enforceBilling = null;
+
+    /** Resolved: explicit setting if given, otherwise "only with a real provider". */
+    public boolean isBillingEnforced() {
+        return enforceBilling != null ? enforceBilling : !"stub".equalsIgnoreCase(paymentProvider);
+    }
+
+    public Boolean getEnforceBilling() {
+        return enforceBilling;
+    }
+
+    public void setEnforceBilling(Boolean enforceBilling) {
+        this.enforceBilling = enforceBilling;
+    }
+
     public static final String DEV_INTERNAL_TOKEN = "dev-internal-token";
 
     /**

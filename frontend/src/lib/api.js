@@ -1676,10 +1676,18 @@ export const api = {
     }),
 
   // The provider template catalog is the managed slice of the shared library.
+  // The catalog WITHOUT definitions. ~240 items averaging 8.6KB of JSON made
+  // this a two-megabyte response on screens that render none of them, and
+  // three provider screens read it. `ref` — the one field anything reliably
+  // needed from inside a definition — is now a column on the row, so the
+  // agent builder no longer has a reason to ask for bodies at all.
   providerLibrary: async () => {
     const rows = (await realFetch("/library", { auth: true })) || [];
     return rows.filter((i) => i.managed);
   },
+
+  // One item, with its definition. What the drawer and the designer want.
+  libraryItem: (id) => realFetch(`/library/${id}`, { auth: true }),
 
   // ---- API keys (real: auth-service, API_ACCESS plan feature) ----
   // create() returns the raw key EXACTLY ONCE — show it, then it's gone.

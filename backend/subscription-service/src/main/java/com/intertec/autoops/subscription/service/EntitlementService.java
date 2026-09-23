@@ -108,6 +108,12 @@ public class EntitlementService {
         if (block != null) {
             return countedQuota(new QuotaDecision(false, block, null, null));
         }
+        if (subscription == null) {
+            // Only reachable with billing unenforced: no subscription means no
+            // plan, so there is no ceiling to compare against. Unlimited rather
+            // than zero — the gate above already decided this tenant is allowed.
+            return countedQuota(new QuotaDecision(true, "ok", null, null));
+        }
         Integer max = limit.maxFor(subscription.getPlan());
         if (max == null) {
             return countedQuota(new QuotaDecision(true, "ok", null, null)); // unlimited
@@ -123,6 +129,12 @@ public class EntitlementService {
         String block = statusBlock(subscription);
         if (block != null) {
             return new Decision(false, block);
+        }
+        if (subscription == null) {
+            // As above: unenforced billing and no subscription row. There is no
+            // plan to read a feature list from, and refusing here would put the
+            // paywall back that the gate just took down.
+            return new Decision(true, "ok");
         }
         if (featureCode != null && !featureCode.isBlank()) {
             Feature feature = Feature.fromCode(featureCode);
@@ -141,6 +153,14 @@ public class EntitlementService {
      * a denial reason, or {@code null} when the subscription is live.
      */
     private String statusBlock(Subscription subscription) {
+        // While no real payment provider is configured, the billing lifecycle
+        // cannot deny anyone: there is no way to pay, so "your trial has ended"
+        // is a locked door with no key. Includes the no-subscription case,
+        // because a tenant whose trial was never started is in exactly the same
+        // position — see SubscriptionProperties.isBillingEnforced().
+        if (!properties.isBillingEnforced()) {
+            return null;
+        }
         if (subscription == null) {
             return "no_subscription";
         }

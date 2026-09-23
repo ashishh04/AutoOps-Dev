@@ -600,13 +600,17 @@ class AgentServiceTest {
     // ------ one delivered copy per catalog item per project ------
 
     @Test
-    void deliveringTheSameCatalogAgentTwiceIsRefused() {
-        rolledOut("Banking Ops Copilot", null);
+    void deliveringTheSameCatalogAgentTwiceUpdatesTheOneCopy() {
+        // This asserted a refusal — `already_delivered`, advising the provider
+        // to edit the delivered copy by hand. The INTENT was "never a second
+        // copy", and that still holds; it is now reached by updating the
+        // existing one, which is what makes a catalog fix reach every customer
+        // who already has the agent.
+        Agent first = rolledOut("Banking Ops Copilot", null);
 
-        AgentException ex = assertThrows(AgentException.class,
-                () -> rolledOut("Banking Ops Copilot", null));
+        Agent again = rolledOut("Banking Ops Copilot", null);
 
-        assertEquals("already_delivered", ex.getError());
+        assertEquals(first.getId(), again.getId());
         assertEquals(1, agentRepository.count());
     }
 
@@ -619,11 +623,12 @@ class AgentServiceTest {
     void renamingTheCatalogItemDoesNotSlipASecondCopyThrough() {
         rolledOut("Compliance Research Analyst", null);
 
-        AgentException ex = assertThrows(AgentException.class,
-                () -> rolledOut("Compliance Analyst", null));
+        Agent renamed = rolledOut("Compliance Analyst", null);
 
-        assertEquals("already_delivered", ex.getError());
+        // Still one copy, and it now carries the new name: matching on
+        // sourceId rather than on the title is what sees through the rename.
         assertEquals(1, agentRepository.count());
+        assertEquals("Compliance Analyst", renamed.getName());
     }
 
     /**

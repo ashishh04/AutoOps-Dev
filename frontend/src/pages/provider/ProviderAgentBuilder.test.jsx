@@ -28,24 +28,23 @@ const apiMock = {
   providerCreateLibrary: vi.fn(),
   providerUpdateLibrary: vi.fn(),
   providerAuthoringSchema: vi.fn(),
+  libraryItem: vi.fn(),
 };
 vi.mock("../../lib/api", () => ({ api: apiMock }));
 
 const { default: ProviderAgentBuilder } = await import("./ProviderAgentBuilder");
 
+// No `definition`: the catalog list does not carry bodies any more. `ref` and
+// `model` arrive as columns, lifted server-side out of the definition, because
+// reading one string per row used to cost a two-megabyte response.
 const workflowItem = (over = {}) => ({
   id: 7,
   title: "Unused Resource Cleanup",
-  description: "Row description",
+  description: "Lists unattached EBS volumes and deletes approved ones.",
   type: "workflow",
   category: "AWS",
   rollouts: 2,
-  definition: JSON.stringify({
-    ref: "RD-142-unused-resource-cleanup",
-    description: "Lists unattached EBS volumes and deletes approved ones.",
-    nodes: [],
-    inputs: [],
-  }),
+  ref: "RD-142-unused-resource-cleanup",
   ...over,
 });
 
@@ -176,22 +175,22 @@ describe("ProviderAgentBuilder", () => {
     // agent by id in the same list — a fixture where both share an id would
     // load the workflow and the assertion would be about the wrong row.
     params = { id: "31" };
-    apiMock.providerLibrary.mockResolvedValue([
-      workflowItem(),
-      {
-        id: 31,
-        title: "Existing Agent",
+    apiMock.providerLibrary.mockResolvedValue([workflowItem()]);
+    // Fetched on its own now — see api.libraryItem.
+    apiMock.libraryItem.mockResolvedValue({
+      id: 31,
+      title: "Existing Agent",
+      description: "Already published",
+      type: "agent",
+      category: "AWS",
+      model: "openai.gpt-private-9",
+      definition: JSON.stringify({
         description: "Already published",
-        type: "agent",
-        category: "AWS",
-        definition: JSON.stringify({
-          description: "Already published",
-          model: "openai.gpt-private-9",
-          instructions: PERSONA,
-          tools: [],
-        }),
-      },
-    ]);
+        model: "openai.gpt-private-9",
+        instructions: PERSONA,
+        tools: [],
+      }),
+    });
 
     renderPage();
 
@@ -205,11 +204,7 @@ describe("ProviderAgentBuilder", () => {
     // panels below it out of reach.
     apiMock.providerLibrary.mockResolvedValue(
       Array.from({ length: 9 }, (_, i) =>
-        workflowItem({
-          id: i + 1,
-          title: `Workflow ${i + 1}`,
-          definition: JSON.stringify({ ref: `RD-00${i + 1}`, nodes: [], inputs: [] }),
-        }),
+        workflowItem({ id: i + 1, title: `Workflow ${i + 1}`, ref: `RD-00${i + 1}` }),
       ),
     );
 
@@ -232,11 +227,7 @@ describe("ProviderAgentBuilder", () => {
     // picked.
     apiMock.providerLibrary.mockResolvedValue(
       Array.from({ length: 9 }, (_, i) =>
-        workflowItem({
-          id: i + 1,
-          title: `Workflow ${i + 1}`,
-          definition: JSON.stringify({ ref: `RD-00${i + 1}`, nodes: [], inputs: [] }),
-        }),
+        workflowItem({ id: i + 1, title: `Workflow ${i + 1}`, ref: `RD-00${i + 1}` }),
       ),
     );
 
@@ -428,11 +419,7 @@ describe("ProviderAgentBuilder", () => {
 
   it("shows a workflow published without a ref as unselectable, and says why", async () => {
     apiMock.providerLibrary.mockResolvedValue([
-      workflowItem({
-        id: 8,
-        title: "Refless",
-        definition: JSON.stringify({ nodes: [] }),
-      }),
+      workflowItem({ id: 8, title: "Refless", ref: null }),
     ]);
     renderPage();
 
@@ -442,8 +429,8 @@ describe("ProviderAgentBuilder", () => {
 
   it("loads an existing agent for editing and saves through the update path", async () => {
     params = { id: "42" };
-    apiMock.providerLibrary.mockResolvedValue([
-      workflowItem(),
+    apiMock.providerLibrary.mockResolvedValue([workflowItem()]);
+    apiMock.libraryItem.mockResolvedValue(
       {
         id: 42,
         title: "EBS Cleanup Agent",
@@ -467,7 +454,7 @@ describe("ProviderAgentBuilder", () => {
           approvalRequired: true,
         }),
       },
-    ]);
+    );
     renderPage();
 
     await waitFor(() =>
@@ -485,21 +472,20 @@ describe("ProviderAgentBuilder", () => {
 
   it("refuses to edit a code-authored agent rather than replacing its reference", async () => {
     params = { id: "43" };
-    apiMock.providerLibrary.mockResolvedValue([
-      workflowItem(),
-      {
-        id: 43,
-        title: "Linux Server Health Check",
-        description: "Row description",
-        type: "agent",
-        category: "Linux",
-        definition: JSON.stringify({
-          kind: "PYTHON",
-          ref: "linux.server_health_check",
-          version: "1.0.0",
-        }),
-      },
-    ]);
+    apiMock.providerLibrary.mockResolvedValue([workflowItem()]);
+    apiMock.libraryItem.mockResolvedValue({
+      id: 43,
+      title: "Linux Server Health Check",
+      description: "Row description",
+      type: "agent",
+      category: "Linux",
+      ref: "linux.server_health_check",
+      definition: JSON.stringify({
+        kind: "PYTHON",
+        ref: "linux.server_health_check",
+        version: "1.0.0",
+      }),
+    });
     renderPage();
 
     expect(

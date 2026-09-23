@@ -77,6 +77,15 @@ class SubscriptionServiceTest {
     @BeforeEach
     void seedPlans() {
         properties.setPaymentStubFails(false);
+        // Reset, because SubscriptionProperties is a shared bean and a test
+        // that switches the provider would otherwise leave every later test
+        // asking for a Stripe bean that does not exist.
+        properties.setPaymentProvider("stub");
+        // Explicit, because the DEFAULT is now derived: with the stub payment
+        // provider, billing is unenforced (nobody can pay, so a paywall is a
+        // locked door with no key). Every test below is about the lifecycle
+        // RULES, which still exist — so they turn enforcement on and say so.
+        properties.setEnforceBilling(true);
         paymentRepository.deleteAll();
         auditLogRepository.deleteAll();
         subscriptionRepository.deleteAll();
@@ -151,6 +160,79 @@ class SubscriptionServiceTest {
         // And the surfaced status reflects it.
         assertEquals(SubscriptionStatus.EXPIRED,
                 subscriptionService.findCurrent(TENANT).orElseThrow().getStatus());
+    }
+
+    // ---------------- billing that cannot be paid is not enforced ----------
+
+    @Test
+    void anExpiredTrialStillWorksWhileNoRealPaymentProviderExists() {
+        // The demo failure. With paymentProvider=stub there is no way to buy
+        // anything, so denying an expired trial locks a customer out of a
+        // product they cannot purchase — and the only remedy was editing the
+        // database.
+        properties.setEnforceBilling(null);
+        properties.setPaymentProvider("stub");
+        subscriptionService.subscribe(TENANT, PlanCode.TEAM, ACTOR);
+        Subscription sub = subscriptionRepository.findByTenantId(TENANT).orElseThrow();
+        sub.setTrialEndsAt(Instant.now().minus(Duration.ofDays(1)));
+        subscriptionRepository.save(sub);
+
+        assertTrue(entitlementService.check(TENANT, null).entitled());
+    }
+
+    @Test
+    void theSameTrialIsDeniedOnceARealProviderIsConfigured() {
+        // The other half, and the reason this is derived rather than a flag:
+        // wiring a real provider turns the paywall on by itself, with nobody
+        // having to remember a setting.
+        properties.setEnforceBilling(null);
+        properties.setPaymentProvider("stripe");
+        subscriptionService.subscribe(TENANT, PlanCode.TEAM, ACTOR);
+        Subscription sub = subscriptionRepository.findByTenantId(TENANT).orElseThrow();
+        sub.setTrialEndsAt(Instant.now().minus(Duration.ofDays(1)));
+        subscriptionRepository.save(sub);
+
+        EntitlementService.Decision decision = entitlementService.check(TENANT, null);
+        assertFalse(decision.entitled());
+        assertEquals("trial_expired", decision.reason());
+    }
+
+    @Test
+    void aTenantWithNoSubscriptionAtAllIsAllowedWhileBillingIsUnenforced() {
+        // Signup starts the trial as a NON-FATAL follow-up call, so a tenant
+        // can legitimately exist with no subscription row. Under an unenforced
+        // paywall that must not be the one thing that still blocks them.
+        properties.setEnforceBilling(false);
+
+        assertTrue(entitlementService.check("tenant-with-nothing", null).entitled());
+        assertTrue(entitlementService
+                .quota("tenant-with-nothing", LimitType.MAX_PROJECTS, 999).entitled());
+    }
+
+    @Test
+    void quotasAreStillEnforcedWhenBillingIsNot() {
+        // Plan limits are PRODUCT behaviour, not payment. Turning the paywall
+        // off must not turn the product into an unlimited one for a tenant who
+        // does hold a plan.
+        properties.setEnforceBilling(false);
+        subscriptionService.subscribe(TENANT, PlanCode.TEAM, ACTOR);
+
+        EntitlementService.QuotaDecision decision =
+                entitlementService.quota(TENANT, LimitType.MAX_PROJECTS, 99999);
+
+        assertFalse(decision.entitled());
+        assertEquals("quota_exceeded", decision.reason());
+    }
+
+    @Test
+    void featuresOutsideThePlanAreStillRefusedWhenBillingIsNot() {
+        properties.setEnforceBilling(false);
+        subscriptionService.subscribe(TENANT, PlanCode.STARTER, ACTOR);
+
+        EntitlementService.Decision sso = entitlementService.check(TENANT, "SSO");
+
+        assertFalse(sso.entitled());
+        assertEquals("feature_not_in_plan", sso.reason());
     }
 
     @Test

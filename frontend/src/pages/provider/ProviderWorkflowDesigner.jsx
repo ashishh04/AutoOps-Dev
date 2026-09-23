@@ -272,8 +272,10 @@ export default function ProviderWorkflowDesigner() {
         setSchema(contract.workflow);
         setUndispatchable(contract.undispatchable_node_types || []);
         if (!editing) return;
-        const rows = await api.providerLibrary();
-        const item = (rows || []).find((r) => String(r.id) === String(id));
+        // ONE definition. The catalog list stopped carrying bodies: ~240 items
+        // averaging 8.6KB made it a two-megabyte response, and this screen
+        // edits exactly one of them.
+        const item = await api.libraryItem(id).catch(() => null);
         if (!item || cancelled) return;
         setTitle(item.title || "");
         setCategory(item.category || "General");
