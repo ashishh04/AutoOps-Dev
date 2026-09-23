@@ -15,6 +15,7 @@ import Icon from "../../components/Icon";
 import { api } from "../../lib/api";
 import { useStore } from "../../store/store";
 import RolloutDialog from "../../components/provider/RolloutDialog";
+import RequirementsPanel from "../../components/provider/RequirementsPanel";
 import ModalPortal from "../../components/app/ModalPortal";
 
 // The sidebar's Scripts / Workflows / Agents entries are this same page with
@@ -645,6 +646,15 @@ export default function ProviderLibrary() {
                       : prettyDefinition(definition)}
                 </pre>
               </div>
+
+              {selectedItem.type !== "script" && (
+                <div>
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    What the customer must grant
+                  </p>
+                  <RequirementsPanel itemId={selectedItem.id} />
+                </div>
+              )}
 
               {selectedItem.type !== "script" && (
                 <div>

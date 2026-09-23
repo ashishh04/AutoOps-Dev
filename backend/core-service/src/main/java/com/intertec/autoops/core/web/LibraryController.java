@@ -5,6 +5,7 @@ import com.intertec.autoops.core.domain.LibraryItem;
 import com.intertec.autoops.core.exception.CoreException;
 import com.intertec.autoops.core.service.AuditService;
 import com.intertec.autoops.core.service.LibraryService;
+import com.intertec.autoops.core.service.RequirementsService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -36,10 +37,13 @@ public class LibraryController {
 
     private final LibraryService libraryService;
     private final AuditService auditService;
+    private final RequirementsService requirementsService;
 
-    public LibraryController(LibraryService libraryService, AuditService auditService) {
+    public LibraryController(LibraryService libraryService, AuditService auditService,
+                             RequirementsService requirementsService) {
         this.libraryService = libraryService;
         this.auditService = auditService;
+        this.requirementsService = requirementsService;
     }
 
     /**
@@ -187,6 +191,22 @@ public class LibraryController {
                 .map(view -> LibraryItemResponse.from(view, rollouts, true))
                 .orElseThrow(() -> CoreException.notFound("template_not_found",
                         "No such catalog item"));
+    }
+
+    /**
+     * What a customer must grant before this item can do anything.
+     *
+     * <p>Not provider-only. The customer is the person who has to create the
+     * IAM role, and until now the only way they learned what it needed was to
+     * run the automation and read a permissions error — which reads as the
+     * automation being broken rather than unconfigured.
+     *
+     * <p>For an AGENT this is the union across its tools, which is the case
+     * nobody can work out by hand: the agent declares nothing itself.
+     */
+    @GetMapping("/{id}/requirements")
+    public RequirementsService.Requirements requirements(@PathVariable Long id) {
+        return requirementsService.forCatalogItem(id);
     }
 
     @PostMapping("/{id}/clone")

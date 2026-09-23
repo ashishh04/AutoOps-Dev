@@ -1691,6 +1691,11 @@ export const api = {
     return rows.filter((i) => i.managed);
   },
 
+  // What a customer must grant before this item can run: the connections, the
+  // exact permissions, and a pasteable IAM policy. For an AGENT this is the
+  // union across its tools, which is the only place it can be computed.
+  libraryRequirements: (id) => realFetch(`/library/${id}/requirements`, { auth: true }),
+
   // One item, with its definition. What the drawer and the designer want.
   libraryItem: (id) => realFetch(`/library/${id}`, { auth: true }),
 
