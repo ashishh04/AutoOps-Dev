@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { PageHeader, Card, SmallButton, Chip } from "../../components/app/appui";
 import Icon from "../../components/Icon";
@@ -261,6 +261,10 @@ export default function ProviderWorkflowDesigner() {
   // "list" or "canvas". The two are views of ONE draft, so switching is free
   // and lossless — there is no second copy of the graph to reconcile.
   const [view, setView] = useState("list");
+  // The Steps card, so switching to the canvas can bring it into view. It sits
+  // below Identity and the input form, which on a fresh workflow puts it off
+  // the bottom of the screen — so the canvas appeared not to open at all.
+  const stepsRef = useRef(null);
   const [selected, setSelected] = useState(null);
 
   useEffect(() => {
@@ -301,6 +305,12 @@ export default function ProviderWorkflowDesigner() {
       cancelled = true;
     };
   }, [editing, id]);
+
+  useEffect(() => {
+    if (view === "canvas") {
+      stepsRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    }
+  }, [view]);
 
   const nodeIds = useMemo(() => draft.nodes.map((n) => n.id), [draft.nodes]);
 
@@ -535,16 +545,49 @@ export default function ProviderWorkflowDesigner() {
         subtitle="Built from what this runtime can actually execute."
         actions={
           <>
-            {/* A toggle, not a replacement. The list is better for filling in
-                fields and is the one that works with a keyboard and a screen
-                reader; the canvas is better for seeing shape and branching.
-                Both serialise identically because both edit one draft. */}
-            <SmallButton
-              onClick={() => setView(view === "canvas" ? "list" : "canvas")}
+            {/* A segmented control showing BOTH views with the active one
+                lit, rather than one button labelled with the view you would
+                switch TO.
+
+                The single button was genuinely ambiguous: on the canvas it
+                read "List", which is equally believable as "you are on the
+                list" — so clicking Canvas appeared to do nothing. A toggle
+                whose label changes to the opposite of its state is a coin
+                flip for the reader, and half of them lose.
+
+                Both views edit one draft, so switching is free and lossless:
+                the list is better for filling in fields and is the one that
+                works with a keyboard and a screen reader; the canvas is
+                better for seeing shape and branching. */}
+            <div
+              role="group"
+              aria-label="View"
+              className="inline-flex rounded-lg border border-slate-200 p-0.5"
             >
-              <Icon name={view === "canvas" ? "list" : "blocks"} />
-              {view === "canvas" ? "List" : "Canvas"}
-            </SmallButton>
+              {[
+                // Real label text, not a lowercase key with `capitalize` on
+                // it: CSS capitalisation does not change the DOM, so the
+                // accessible name — and anything reading this page, including
+                // a test — still sees "canvas".
+                { value: "list", label: "List", icon: "list" },
+                { value: "canvas", label: "Canvas", icon: "blocks" },
+              ].map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={view === option.value}
+                  onClick={() => setView(option.value)}
+                  className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-semibold transition ${
+                    view === option.value
+                      ? "bg-blue-600 text-white"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <Icon name={option.icon} size={15} />
+                  {option.label}
+                </button>
+              ))}
+            </div>
             {!importing && (
               <SmallButton onClick={() => setImporting(true)}>Import</SmallButton>
             )}
@@ -716,7 +759,7 @@ export default function ProviderWorkflowDesigner() {
         </div>
       </Card>
 
-      <Card title="Steps">
+      <Card title="Steps" ref={stepsRef}>
         <div className="flex flex-wrap gap-1.5 border-b border-slate-100 p-4">
           {schema.node_types.map((type) => (
             <button

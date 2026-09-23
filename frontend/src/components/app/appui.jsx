@@ -1,4 +1,4 @@
-import React from "react";
+import React, { forwardRef } from "react";
 import Icon from "../Icon";
 
 // ...rest so a Card can be made interactive (onClick, role, aria-*) without a
@@ -17,8 +17,9 @@ import Icon from "../Icon";
  * label, so the assertion was satisfied by a different element than the one it
  * was written for.
  */
-export const Card = ({ children, className = "", title, ...rest }) => (
+export const Card = forwardRef(({ children, className = "", title, ...rest }, ref) => (
   <div
+    ref={ref}
     className={`rounded-2xl border border-slate-200 bg-slate-50 ${className}`}
     {...rest}
   >
@@ -29,7 +30,8 @@ export const Card = ({ children, className = "", title, ...rest }) => (
     )}
     {children}
   </div>
-);
+));
+Card.displayName = "Card";
 
 export const PageHeader = ({ title, subtitle, actions }) => (
   <div className="mb-7 flex flex-wrap items-end justify-between gap-4">

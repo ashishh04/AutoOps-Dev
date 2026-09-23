@@ -256,6 +256,27 @@ describe("ProviderWorkflowDesigner", () => {
     expect(screen.queryByRole("button", { name: "+ start" })).not.toBeInTheDocument();
   });
 
+  it("shows which view is ACTIVE, not which one you would switch to", async () => {
+    // The control used to be one button labelled with the destination: on the
+    // canvas it read "List", which is equally believable as "you are looking at
+    // the list" — so clicking Canvas appeared to do nothing at all. A toggle
+    // whose label is the opposite of its state is a coin flip for the reader.
+    renderPage();
+
+    const list = await screen.findByRole("button", { name: /List/ });
+    const canvas = screen.getByRole("button", { name: /Canvas/ });
+
+    // Both options are always visible, and exactly one is pressed.
+    expect(list).toHaveAttribute("aria-pressed", "true");
+    expect(canvas).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(canvas);
+
+    expect(canvas).toHaveAttribute("aria-pressed", "true");
+    expect(list).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("canvas")).toBeInTheDocument();
+  });
+
   it("shows the same steps in either view, because there is one draft", async () => {
     // Two editors over one document is how a list view and a canvas come to
     // disagree about what the workflow is. They share state precisely so that
