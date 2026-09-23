@@ -17,7 +17,10 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
+import com.intertec.autoops.gateway.security.RateLimitFilter;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -42,8 +45,12 @@ public class SecurityConfig {
 
     private final GatewayProperties properties;
 
-    public SecurityConfig(GatewayProperties properties) {
+    private final RateLimitFilter rateLimitFilter;
+
+    public SecurityConfig(GatewayProperties properties,
+                          @Autowired(required = false) RateLimitFilter rateLimitFilter) {
         this.properties = properties;
+        this.rateLimitFilter = rateLimitFilter;
     }
 
     @Bean
@@ -81,6 +88,18 @@ public class SecurityConfig {
                                     "{\"error\":\"unauthorized\",\"message\":\"A valid access token is required\"}");
                         })
                         .jwt(Customizer.withDefaults()));
+
+        // AFTER authorisation, not before. The bucket is keyed on the tenant in
+        // the JWT, and a filter placed ahead of the resource server would run
+        // before that token is parsed — so every authenticated request would
+        // fall back to the caller's IP and a whole office behind one NAT would
+        // share a single budget.
+        //
+        // Registered only when Redis is actually wired: a limiter with no
+        // counter store would log a warning on every request forever.
+        if (rateLimitFilter != null) {
+            http.addFilterAfter(rateLimitFilter, AuthorizationFilter.class);
+        }
         return http.build();
     }
 

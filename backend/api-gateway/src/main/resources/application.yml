@@ -4,6 +4,15 @@ server:
 spring:
   application:
     name: api-gateway
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Short, because a slow counter must not become slow traffic. The
+      # limiter fails OPEN on timeout, so the cost of a Redis stall is an
+      # unlimited window rather than a stalled request.
+      timeout: 250ms
+      connect-timeout: 250ms
   cloud:
     gateway:
       mvc:
@@ -98,6 +107,13 @@ spring:
 
 autoops:
   gateway:
+    rate-limit:
+      enabled: ${RATE_LIMIT_ENABLED:true}
+      # Per TENANT, per window. Generous on purpose: a limiter that trips on
+      # normal use gets switched off by whoever is on call, and then there is
+      # no limiter at all.
+      requests: ${RATE_LIMIT_REQUESTS:600}
+      window: ${RATE_LIMIT_WINDOW:1m}
     jwks-uri: ${AUTH_JWKS_URI:http://localhost:8081/oauth2/jwks}
     issuer: ${JWT_ISSUER:autoops-auth-service}
     cors-allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:3000}

@@ -482,9 +482,25 @@ services:
       VOICE_SERVICE_URL: http://voice-agent:8085
       AUTH_JWKS_URI: http://auth-service:8081/oauth2/jwks
       CORS_ALLOWED_ORIGINS: http://localhost:5173,http://localhost:3000
+      # Per-tenant rate limiting. Redis rather than an in-process counter
+      # because a JVM-local count is per-replica: two gateways would mean twice
+      # the intended limit, and the effective limit would change silently every
+      # time the deployment scaled.
+      #
+      # The limiter fails OPEN when Redis is unreachable — see RateLimitFilter.
+      # A limiter that 503s on a Redis blip is the most effective denial of
+      # service in the platform.
+      REDIS_HOST: redis
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-600}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-1m}
     ports:
       - "8080:8080"
     depends_on:
+      # Not service_healthy: redis has no healthcheck here, and the gateway
+      # must start whether or not the limiter can count.
+      redis:
+        condition: service_started
       auth-service:
         condition: service_healthy
       subscription-service:

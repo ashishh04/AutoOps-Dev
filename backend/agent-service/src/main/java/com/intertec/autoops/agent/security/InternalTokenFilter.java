@@ -38,8 +38,17 @@ public class InternalTokenFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
+        String expected = properties.getInternalToken();
         String presented = request.getHeader(HEADER);
-        if (presented == null || !constantTimeEquals(presented, properties.getInternalToken())) {
+        // A BLANK expected token refuses everything, and that guard is not
+        // decoration. Without it a service whose token is unconfigured accepts
+        // `X-Internal-Token:` with an empty value, because
+        // constantTimeEquals("", "") is true — so losing the configuration
+        // OPENS the internal surface instead of closing it, which is the wrong
+        // direction for the one credential that lets a caller roll out agents,
+        // revoke them and read sealed personas.
+        if (expected == null || expected.isBlank()
+                || presented == null || !constantTimeEquals(presented, expected)) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             response.setContentType("application/json");
             response.getWriter().write("{\"error\":\"invalid_internal_token\"}");
