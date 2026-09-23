@@ -16,6 +16,10 @@ export default function ProjectIntegrations() {
   const { projects, pushToast } = useStore();
   const project = projects.find((p) => String(p.id) === String(pid));
   const [clouds, setClouds] = useState([]);
+  // "Not loaded yet" and "none available" are different answers and this page
+  // stated the second before it knew. Less alarming than the workspace page —
+  // a sentence rather than a wall of platform cards — but the same untruth.
+  const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(null); // connection id being toggled
 
   // Only this project's connections and global ones are shown — a connection
@@ -29,7 +33,9 @@ export default function ProjectIntegrations() {
         ),
       );
     } catch {
-      /* keep current rows */
+      /* keep current rows: a failed refresh must not empty the list on screen */
+    } finally {
+      setLoaded(true);
     }
   }, [pid]);
   useEffect(() => {
@@ -91,7 +97,11 @@ export default function ProjectIntegrations() {
         }
       />
 
-      {clouds.length === 0 ? (
+      {!loaded ? (
+        <Card className="p-10 text-center text-sm text-slate-500">
+          Loading connections…
+        </Card>
+      ) : clouds.length === 0 ? (
         <Card className="p-10 text-center text-sm text-slate-500">
           No cloud connections available to this project yet.{" "}
           <Link to="/app/integrations" className="text-slate-900 hover:underline">

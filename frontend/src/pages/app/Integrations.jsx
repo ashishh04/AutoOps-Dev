@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../../lib/api";
 import {
+  Card,
   PageHeader,
   StatusBadge,
   SmallButton,
@@ -413,6 +414,13 @@ export default function Integrations() {
   const [modal, setModal] = useState(false);
   const [selected, setSelected] = useState(null);
   const [clouds, setClouds] = useState([]); // real rows only — no seed
+  // Three states, not two. `clouds.length === 0` cannot distinguish "the
+  // request has not come back yet" from "this workspace has no cloud
+  // connections", and the page renders the ENTIRE platform catalog for the
+  // second — so on every open, every platform flashed up as NOT CONFIGURED
+  // before the real rows replaced it.
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [confirm, setConfirm] = useState(null);
 
   // Live connections from core-service (credentials themselves never leave it).
@@ -438,8 +446,15 @@ export default function Integrations() {
           projectId: c.projectId, // null = global (all projects)
         })),
       );
+      setLoadFailed(false);
     } catch {
-      /* keep current rows */
+      // Kept, not cleared: a failed refresh must not empty a list that is
+      // already on screen. But it IS recorded — showing the "nothing
+      // configured" catalog because a request failed would tell somebody
+      // their connections are gone.
+      setLoadFailed(true);
+    } finally {
+      setLoaded(true);
     }
   }, []);
   useEffect(() => {
@@ -662,7 +677,18 @@ export default function Integrations() {
         }
       />
 
-      {clouds.length === 0 ? (
+      {!loaded ? (
+        <Card>
+          <div className="p-6 text-sm text-slate-500">Loading connections…</div>
+        </Card>
+      ) : loadFailed && clouds.length === 0 ? (
+        <Card>
+          <div className="p-6 text-sm text-amber-700" role="alert">
+            Could not load this workspace&rsquo;s cloud connections. This is not the
+            same as having none — try again rather than reconnecting anything.
+          </div>
+        </Card>
+      ) : clouds.length === 0 ? (
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {cloudPlatforms.map((p) => (
             <div
