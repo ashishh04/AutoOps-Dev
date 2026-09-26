@@ -58,7 +58,7 @@ const center = (id) => {
 
 export default function WorkflowDesigner() {
   return (
-    <section id="product" className="mx-auto max-w-7xl px-6 py-24">
+    <section id="product" className="mx-auto max-w-7xl scroll-mt-24 px-6 py-24">
       <div className="grid items-center gap-12 lg:grid-cols-2">
         <Reveal>
           <Pill>Workflow DAG Engine</Pill>

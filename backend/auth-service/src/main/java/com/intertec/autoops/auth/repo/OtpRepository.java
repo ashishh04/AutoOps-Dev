@@ -14,7 +14,7 @@ public interface OtpRepository extends JpaRepository<OtpEntry, Long> {
     Optional<OtpEntry> findTopByEmailAndTenantIdAndConsumedAtIsNullOrderByCreatedAtDesc(
             String email, String tenantId);
 
-    Optional<OtpEntry> findBySendgridMessageId(String sendgridMessageId);
+    Optional<OtpEntry> findByProviderMessageId(String providerMessageId);
 
     /** Retention sweep: challenges whose expiry is older than the cutoff. */
     @Modifying

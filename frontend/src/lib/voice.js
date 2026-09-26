@@ -10,19 +10,34 @@
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 export class VoiceError extends Error {
-  constructor(message, status) {
+  constructor(message, status, retryAfterSeconds) {
     super(message);
     this.name = "VoiceError";
     this.status = status;
+    /** Seconds until this is worth attempting again; only a 429 carries one. */
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
+/**
+ * The server sends Retry-After alongside a 429, and it is the only part of that
+ * response that tells a visitor whether to wait ten seconds or ten minutes.
+ * Dropping it leaves "try again shortly", which invites the immediate retry
+ * that is guaranteed to fail.
+ */
+function retryAfter(res) {
+  const header = res.headers?.get?.("Retry-After");
+  const seconds = Number(header);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+}
+
 async function readError(res, fallback) {
+  const wait = retryAfter(res);
   try {
     const data = await res.json();
-    return new VoiceError(data?.message || data?.error || fallback, res.status);
+    return new VoiceError(data?.message || data?.error || fallback, res.status, wait);
   } catch {
-    return new VoiceError(fallback, res.status);
+    return new VoiceError(fallback, res.status, wait);
   }
 }
 

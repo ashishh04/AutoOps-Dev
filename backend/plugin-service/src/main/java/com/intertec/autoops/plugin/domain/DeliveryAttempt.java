@@ -45,7 +45,7 @@ public class DeliveryAttempt {
     private Long ruleId;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "target_type", columnDefinition = "ENUM('JOB','WORKFLOW')")
+    @Column(name = "target_type", columnDefinition = "ENUM('JOB','WORKFLOW','AGENT','ALERT')")
     private TargetType targetType;
 
     @Column(name = "target_id")

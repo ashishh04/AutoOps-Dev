@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Card, StatusBadge, SmallButton, Skeleton } from "../../components/app/appui";
+import { useAlertScope } from "../../lib/alertScope";
+import {
+  Card,
+  StatusBadge,
+  SmallButton,
+  Skeleton,
+} from "../../components/app/appui";
 import Icon from "../../components/Icon";
 import { SeverityChip, severityTone } from "../../components/app/AlertSeverity";
 import { getAlert } from "../../lib/alerts";
@@ -37,7 +43,9 @@ const Meta = ({ icon, label, value, mono = false }) => (
 );
 
 export default function AlertDetail() {
-  const { pid, fingerprint } = useParams();
+  const { fingerprint } = useParams();
+  const scope = useAlertScope();
+  const pid = scope.projectId;
   const navigate = useNavigate();
   const [alert, setAlert] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -71,7 +79,7 @@ export default function AlertDetail() {
     <div className="animate-fade-up">
       <div className="mb-5 flex items-center justify-between gap-4">
         <button
-          onClick={() => navigate(`/app/projects/${pid}/alerts`)}
+          onClick={() => navigate(scope.link("/alerts"))}
           className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 transition hover:text-slate-900"
         >
           <Icon name="chevron" className="h-4 w-4 rotate-180" />

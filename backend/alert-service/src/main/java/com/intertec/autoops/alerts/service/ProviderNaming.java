@@ -3,7 +3,12 @@ package com.intertec.autoops.alerts.service;
 import com.intertec.autoops.alerts.exception.AlertException;
 
 /**
- * The tenant boundary for connected monitoring sources.
+ * The tenant boundary for the objects AutoOps creates inside the alert engine.
+ *
+ * <p>Two kinds so far, and they are named identically because they have the
+ * identical problem: connected monitoring SOURCES, and the correlation RULES
+ * that decide which alerts become one incident. The engine has no tenant
+ * concept for either, so for both the name IS the ownership record.
  *
  * <p>One engine holds every customer's providers, so — exactly as
  * {@code ProjectProvisioner} does for execution — the boundary is a
@@ -44,8 +49,45 @@ public final class ProviderNaming {
 
     /** The scope prefix every provider owned by this tenant+project starts with. */
     public static String prefix(String tenantId, String projectId) {
-        return PREFIX + SEP + sanitize(tenantId, MAX_TENANT) + SEP
-                + sanitize(projectId, MAX_TENANT) + SEP;
+        return tenantPrefix(tenantId) + sanitize(projectId, MAX_TENANT) + SEP;
+    }
+
+    /**
+     * The prefix every provider owned by this tenant starts with, whichever
+     * project connected it.
+     *
+     * <p>This is a boundary in its own right, not a loosened one. The separator
+     * is two hyphens and {@link #sanitize} collapses runs, so no tenant id can
+     * contain one — which means {@code autoops--acme--} cannot be a prefix of
+     * any name belonging to a tenant other than {@code acme}. The project
+     * segment that follows is the only thing this stops checking.
+     */
+    public static String tenantPrefix(String tenantId) {
+        return PREFIX + SEP + sanitize(tenantId, MAX_TENANT) + SEP;
+    }
+
+    /**
+     * The prefix for a scope, which is tenant-wide when no project is named.
+     *
+     * <p>A null project means "everything this tenant connected", and that is
+     * the whole reason the alert plane can be read at workspace level: a
+     * customer connects Datadog once and sees its alerts without having to
+     * repeat the connection in every project.
+     *
+     * <p>A BLANK project is rejected rather than treated as null. Blank is what
+     * an empty form field or a stringified absent value looks like, and
+     * silently reading it as "the whole tenant" would widen a scope by
+     * accident — the one direction this class exists to prevent.
+     */
+    private static String scopePrefix(String tenantId, String projectId) {
+        if (projectId == null) {
+            return tenantPrefix(tenantId);
+        }
+        if (projectId.isBlank()) {
+            throw AlertException.badRequest("invalid_project",
+                    "Name a project, or omit it entirely to include the whole workspace.");
+        }
+        return prefix(tenantId, projectId);
     }
 
     /** Full engine name for a source the customer calls {@code label}. */
@@ -58,17 +100,58 @@ public final class ProviderNaming {
         return prefix(tenantId, projectId) + clean;
     }
 
-    /** Whether an engine provider name belongs to this tenant+project. */
+    /**
+     * Whether an engine provider name belongs to this scope.
+     *
+     * <p>{@code projectId} null widens to the whole tenant. It cannot widen
+     * past one: the tenant segment is still compared in full.
+     */
     public static boolean belongsTo(String engineName, String tenantId, String projectId) {
-        return engineName != null && engineName.startsWith(prefix(tenantId, projectId));
+        return engineName != null && engineName.startsWith(scopePrefix(tenantId, projectId));
     }
 
-    /** The customer's own label, with the scoping prefix removed. */
+    /**
+     * The customer's own label, with the scoping prefix removed.
+     *
+     * <p>With no project in hand the project segment is stripped too, so a
+     * workspace-level list shows the name the customer typed rather than
+     * {@code 9004--production-datadog}. Which project it belongs to is a
+     * separate field — see {@link #projectOf} — because a label is what a human
+     * reads and an id is what the console navigates with.
+     */
     public static String label(String engineName, String tenantId, String projectId) {
-        String p = prefix(tenantId, projectId);
-        return engineName != null && engineName.startsWith(p)
-                ? engineName.substring(p.length())
-                : engineName;
+        if (!belongsTo(engineName, tenantId, projectId)) {
+            return engineName;
+        }
+        String rest = engineName.substring(scopePrefix(tenantId, projectId).length());
+        if (projectId != null) {
+            return rest;
+        }
+        int sep = rest.indexOf(SEP);
+        return sep < 0 ? rest : rest.substring(sep + SEP.length());
+    }
+
+    /**
+     * Which project connected this source, read back out of its own name.
+     *
+     * <p>Needed only by the workspace-level list, where sources from several
+     * projects appear together and each row has to say where it lives. Derived
+     * rather than stored because the name is the record — there is no row in
+     * any AutoOps table for a connected source.
+     *
+     * @return null when the name does not belong to this tenant at all, or
+     *         carries no project segment
+     */
+    public static String projectOf(String engineName, String tenantId) {
+        if (!belongsTo(engineName, tenantId, null)) {
+            return null;
+        }
+        String rest = engineName.substring(tenantPrefix(tenantId).length());
+        int sep = rest.indexOf(SEP);
+        if (sep <= 0) {
+            return null;
+        }
+        return rest.substring(0, sep);
     }
 
     /**

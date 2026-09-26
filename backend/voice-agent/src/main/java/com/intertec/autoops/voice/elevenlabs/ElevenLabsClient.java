@@ -63,25 +63,39 @@ public class ElevenLabsClient {
                     .retrieve()
                     .onStatus(status -> status.value() == 401 || status.value() == 403,
                             (req, res) -> {
-                                log.error("ElevenLabs rejected our API key ({})", res.getStatusCode());
+                                // The REASON, not just the code. A 401 here has
+                                // two completely different causes with two
+                                // different fixes — a key that is wrong, and a
+                                // key that is right but too narrowly scoped —
+                                // and ElevenLabs distinguishes them in the body
+                                // ("missing the permission convai_write"). Logging
+                                // only "rejected our API key" throws that away and
+                                // sends whoever reads it off rotating a key that
+                                // was never the problem.
+                                log.error("ElevenLabs refused the signed-URL request ({}): {}. "
+                                                + "Check the key's permissions in Dashboard -> Developers -> "
+                                                + "API Keys; minting a conversation URL needs Conversational AI "
+                                                + "WRITE, which a read-only key does not have.",
+                                        res.getStatusCode(), reason(res));
                                 throw new ElevenLabsException(HttpStatus.SERVICE_UNAVAILABLE,
                                         "The voice agent is not available right now");
                             })
                     .onStatus(status -> status.value() == 404,
                             (req, res) -> {
-                                log.error("ElevenLabs does not know agent id '{}'", properties.getAgentId());
+                                log.error("ElevenLabs does not know agent id '{}': {}",
+                                        properties.getAgentId(), reason(res));
                                 throw new ElevenLabsException(HttpStatus.SERVICE_UNAVAILABLE,
                                         "The voice agent is not available right now");
                             })
                     .onStatus(status -> status.value() == 429,
                             (req, res) -> {
-                                log.warn("ElevenLabs rate-limited this deployment");
+                                log.warn("ElevenLabs rate-limited this deployment: {}", reason(res));
                                 throw new ElevenLabsException(HttpStatus.TOO_MANY_REQUESTS,
                                         "The voice agent is busy — please try again shortly");
                             })
                     .onStatus(org.springframework.http.HttpStatusCode::isError,
                             (req, res) -> {
-                                log.error("ElevenLabs returned {}", res.getStatusCode());
+                                log.error("ElevenLabs returned {}: {}", res.getStatusCode(), reason(res));
                                 throw new ElevenLabsException(HttpStatus.BAD_GATEWAY,
                                         "The voice agent is not available right now");
                             })
@@ -99,6 +113,30 @@ public class ElevenLabsClient {
                     "The voice agent is not available right now", e);
         }
 
+        return required(response);
+    }
+
+    /**
+     * ElevenLabs' own explanation of a refusal, for the log only.
+     *
+     * <p>It is their error text about our request — never the key, and never
+     * anything the visitor sent — so it is safe here and useless anywhere a
+     * customer reads. Capped, because an upstream that answers an API call with
+     * an HTML error page should not put a page of markup in the log.
+     */
+    private static String reason(org.springframework.http.client.ClientHttpResponse res) {
+        try (java.io.InputStream body = res.getBody()) {
+            String text = new String(body.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim();
+            if (text.isEmpty()) {
+                return "(no response body)";
+            }
+            return text.length() > 500 ? text.substring(0, 500) + "…" : text;
+        } catch (Exception e) {
+            return "(response body unreadable: " + e.getMessage() + ")";
+        }
+    }
+
+    private static String required(SignedUrlResponse response) {
         if (response == null || response.signed_url() == null || response.signed_url().isBlank()) {
             log.error("ElevenLabs returned a success with no signed_url");
             throw new ElevenLabsException(HttpStatus.BAD_GATEWAY,

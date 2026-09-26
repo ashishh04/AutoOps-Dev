@@ -11,6 +11,9 @@ import {
 import Icon from "../../components/Icon";
 import RunInputsDialog from "../../components/app/RunInputsDialog";
 import ReportText from "../../components/app/ReportText";
+import StructuredResult, {
+  parseStructured,
+} from "../../components/app/StructuredResult";
 import { api } from "../../lib/api";
 import { useStore } from "../../store/store";
 import { fmtDate, fmtDuration, badgeStatus } from "../../lib/format";
@@ -107,7 +110,12 @@ export default function WorkflowDetail() {
         setRuns((rs) =>
           rs.map((r) =>
             r.id === d.id
-              ? { ...r, status: d.status, durationMs: d.durationMs, finishedAt: d.finishedAt }
+              ? {
+                  ...r,
+                  status: d.status,
+                  durationMs: d.durationMs,
+                  finishedAt: d.finishedAt,
+                }
               : r,
           ),
         );
@@ -137,7 +145,10 @@ export default function WorkflowDetail() {
       const res = await api.runWorkflow(id, inputs);
       setPrompt(null);
       if (res?.approvalRequired) {
-        pushToast("Approval requested — an admin must approve this run", "amber");
+        pushToast(
+          "Approval requested — an admin must approve this run",
+          "amber",
+        );
       } else {
         pushToast("Workflow run started", "cyan");
       }
@@ -158,11 +169,19 @@ export default function WorkflowDetail() {
       try {
         state = await api.workflowReadiness(id);
       } catch (readinessError) {
-        console.warn("Readiness check unavailable; running anyway", readinessError);
+        console.warn(
+          "Readiness check unavailable; running anyway",
+          readinessError,
+        );
       }
       if (state && state.ready === false) {
         const first = (state.blockers || [])[0];
-        pushToast(first ? `${first.title} — ${first.detail}` : "This workflow is not ready", "amber");
+        pushToast(
+          first
+            ? `${first.title} — ${first.detail}`
+            : "This workflow is not ready",
+          "amber",
+        );
         return;
       }
       const fields = await api.workflowInputs(id);
@@ -192,10 +211,16 @@ export default function WorkflowDetail() {
   if (notFound || !workflow)
     return (
       <div className="animate-fade-up">
-        <PageHeader title="Workflow not found" subtitle="This workflow isn’t available." />
+        <PageHeader
+          title="Workflow not found"
+          subtitle="This workflow isn’t available."
+        />
         <Card className="p-10 text-center text-sm text-slate-500">
           Nothing here.{" "}
-          <Link to={`${b}/workflows`} className="text-slate-900 hover:underline">
+          <Link
+            to={`${b}/workflows`}
+            className="text-slate-900 hover:underline"
+          >
             Back to workflows
           </Link>
         </Card>
@@ -209,10 +234,12 @@ export default function WorkflowDetail() {
   // with the PREVIOUS run's report and the previous run's id under it. Picking
   // a failed run and reading the successful one's output is not a flicker; it
   // is the wrong answer to the question the reader just asked.
-  const settled = detail && selected && detail.id === selected.id ? detail : null;
+  const settled =
+    detail && selected && detail.id === selected.id ? detail : null;
   const current = settled || selected;
   const awaitingDetail = !!selected && !settled;
-  const running = current && ["queued", "running"].includes(badgeStatus(current.status));
+  const running =
+    current && ["queued", "running"].includes(badgeStatus(current.status));
 
   // The DELIVERABLE first — the report the person asked for. The engine's
   // trace is a second tab, not a preamble: a customer wanting a meeting
@@ -227,11 +254,11 @@ export default function WorkflowDetail() {
   const shown = awaitingDetail
     ? "Loading this run…"
     : pane === "result"
-      ? (hasDeliverable
-          ? deliverable
-          : current?.error
-            || (running ? "Running…" : trace || "This run produced no document."))
-      : (trace || "No trace recorded.");
+      ? hasDeliverable
+        ? deliverable
+        : current?.error ||
+          (running ? "Running…" : trace || "This run produced no document.")
+      : trace || "No trace recorded.";
 
   // The report is prose and pages as prose; the trace is machine output and
   // pages the same way, so "2 of 4" means the same thing in either pane.
@@ -242,6 +269,13 @@ export default function WorkflowDetail() {
   // a trace or a "Running…" placeholder stays monospaced — it is output, not
   // writing, and dressing it up would imply a report that does not exist yet.
   const asReport = pane === "result" && hasDeliverable && !awaitingDetail;
+  // Some workflows are dual-purpose: an agent calls them as a tool, and a
+  // customer can also run them. Their output is written for the agent —
+  // `events_total=7 runs_failed=0` — which is right for a model and reads as
+  // escaped debug output on a customer's screen. The numbers were always
+  // correct; they were never laid out. Null for a written report, which is
+  // most of them, and those keep rendering as prose.
+  const structured = asReport ? parseStructured(pageText) : null;
 
   const runPages = Math.max(1, Math.ceil(runs.length / RUNS_PER_PAGE));
   const historyPage = clampPage(runPage, runPages);
@@ -256,7 +290,10 @@ export default function WorkflowDetail() {
     // every run had failed, directly above a 0% success rate, and the card
     // people read first was the one telling them the opposite of the truth.
     // The word matches the Pause/Resume control that changes it.
-    { k: "Status", v: <StatusBadge status={workflow.active ? "active" : "paused"} /> },
+    {
+      k: "Status",
+      v: <StatusBadge status={workflow.active ? "active" : "paused"} />,
+    },
     { k: "Steps", v: workflow.nodeCount ?? "—" },
     // Null means never run. Showing 0% would claim it fails every time, which
     // is the same lie as 100% — just in the other direction.
@@ -275,11 +312,19 @@ export default function WorkflowDetail() {
         subtitle={workflow.description || "Automation workflow"}
         actions={
           <>
-            <SmallButton icon="chevron" onClick={() => navigate(`${b}/workflows`)}>
+            <SmallButton
+              icon="chevron"
+              onClick={() => navigate(`${b}/workflows`)}
+            >
               All workflows
             </SmallButton>
             {canRun && (
-              <SmallButton icon="play" variant="primary" onClick={startRun} disabled={starting}>
+              <SmallButton
+                icon="play"
+                variant="primary"
+                onClick={startRun}
+                disabled={starting}
+              >
                 {starting ? "Starting…" : "Run"}
               </SmallButton>
             )}
@@ -290,7 +335,9 @@ export default function WorkflowDetail() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         {stats.map((s) => (
           <Card key={s.k} className="p-4">
-            <p className="text-[11px] uppercase tracking-wide text-slate-500">{s.k}</p>
+            <p className="text-[11px] uppercase tracking-wide text-slate-500">
+              {s.k}
+            </p>
             <div className="mt-1 text-sm font-medium text-slate-900">{s.v}</div>
           </Card>
         ))}
@@ -319,7 +366,9 @@ export default function WorkflowDetail() {
                       <span className="min-w-0">
                         <span className="flex items-center gap-2">
                           <StatusBadge status={badgeStatus(r.status)} />
-                          <span className="font-mono text-[11px] text-slate-400">#{r.id}</span>
+                          <span className="font-mono text-[11px] text-slate-400">
+                            #{r.id}
+                          </span>
                         </span>
                         <span className="mt-1 block truncate text-[11px] text-slate-500">
                           {fmtDate(r.startedAt || r.createdAt)} · {r.by || "—"}
@@ -361,7 +410,9 @@ export default function WorkflowDetail() {
             </div>
             {current && (
               <span className="flex items-center gap-2 text-[11px] text-slate-500">
-                {running && <Icon name="refresh" size={13} className="animate-spin" />}
+                {running && (
+                  <Icon name="refresh" size={13} className="animate-spin" />
+                )}
                 <span className="font-mono">#{current.id}</span>
                 {current.stepCompleted != null && current.stepTotal != null
                   ? `${current.stepCompleted}/${current.stepTotal}`
@@ -376,7 +427,9 @@ export default function WorkflowDetail() {
           ) : (
             <>
               <div className="max-h-[28rem] overflow-auto px-5 py-4">
-                {asReport ? (
+                {structured ? (
+                  <StructuredResult data={structured} />
+                ) : asReport ? (
                   <ReportText source={pageText} />
                 ) : (
                   <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-slate-700">

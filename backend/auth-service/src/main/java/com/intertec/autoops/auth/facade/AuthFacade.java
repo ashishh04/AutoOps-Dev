@@ -16,7 +16,7 @@ import com.intertec.autoops.auth.service.KeycloakAdminService;
 import com.intertec.autoops.auth.service.OtpService;
 import com.intertec.autoops.auth.service.RateLimitService;
 import com.intertec.autoops.auth.service.RefreshTokenService;
-import com.intertec.autoops.auth.service.SendGridEmailService;
+import com.intertec.autoops.auth.service.ResendEmailService;
 import com.intertec.autoops.auth.service.SocialOidcService;
 import com.intertec.autoops.auth.service.UserService;
 import com.intertec.autoops.auth.service.WorkspaceService;
@@ -53,7 +53,7 @@ public class AuthFacade {
     private final SubscriptionServiceClient subscriptionServiceClient;
     private final AuditService auditService;
     private final WorkspaceService workspaceService;
-    private final SendGridEmailService sendGridEmailService;
+    private final ResendEmailService resendEmailService;
     private final SocialOidcService socialOidcService;
     private final EnterpriseSsoService enterpriseSsoService;
     private final PasswordEncoder passwordEncoder;
@@ -74,7 +74,7 @@ public class AuthFacade {
                       SubscriptionServiceClient subscriptionServiceClient,
                       AuditService auditService,
                       WorkspaceService workspaceService,
-                      SendGridEmailService sendGridEmailService,
+                      ResendEmailService resendEmailService,
                       SocialOidcService socialOidcService,
                       EnterpriseSsoService enterpriseSsoService,
                       PasswordEncoder passwordEncoder,
@@ -88,7 +88,7 @@ public class AuthFacade {
         this.subscriptionServiceClient = subscriptionServiceClient;
         this.auditService = auditService;
         this.workspaceService = workspaceService;
-        this.sendGridEmailService = sendGridEmailService;
+        this.resendEmailService = resendEmailService;
         this.socialOidcService = socialOidcService;
         this.enterpriseSsoService = enterpriseSsoService;
         this.passwordEncoder = passwordEncoder;
@@ -624,7 +624,7 @@ public class AuthFacade {
                 callerTenantId, null, ipAddress, userAgent, "role=" + request.role());
         // Best-effort invite ("sign in with a one-time code") — the member can
         // log in either way.
-        sendGridEmailService.sendInvite(user.getEmail(),
+        resendEmailService.sendInvite(user.getEmail(),
                 workspaceService.displayName(callerTenantId).orElse(callerTenantId));
         return user;
     }

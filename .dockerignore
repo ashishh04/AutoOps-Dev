@@ -1,0 +1,28 @@
+# Applies only to builds that use the repository root as their context — today
+# that is the frontend image, which needs frontend/ and docs/ and nothing else.
+# Each backend service builds from its own directory and is unaffected.
+.git
+.github
+.idea
+.m2
+.m2;C
+.dify-archive
+.ruff_cache
+.agents
+.tools
+node_modules
+**/node_modules
+**/.venv
+**/target
+**/dist
+backend
+backups
+demo-data
+reports
+brag-output
+Scripts
+*.log
+*.txt
+*.sql
+*.pdf
+*.xlsx

@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useParams } from "react-router-dom";
 import { useStore } from "./store/store";
 import Home from "./pages/Home";
 import Pricing from "./pages/Pricing";
@@ -10,6 +10,7 @@ import FeaturePage from "./pages/FeaturePage";
 import Playground from "./pages/Playground";
 import BookDemo from "./pages/BookDemo";
 import Docs from "./pages/Docs";
+import DocArticle from "./pages/DocArticle";
 import AuthCallback from "./pages/AuthCallback";
 import NotFound from "./pages/NotFound";
 import { LogoMark } from "./components/ui";
@@ -39,6 +40,7 @@ import Alerts from "./pages/app/Alerts";
 import AlertDetail from "./pages/app/AlertDetail";
 import AlertProviders from "./pages/app/AlertProviders";
 import Incidents from "./pages/app/Incidents";
+import CorrelationRules from "./pages/app/CorrelationRules";
 import IncidentDetail from "./pages/app/IncidentDetail";
 import Approvals from "./pages/app/Approvals";
 import Audit from "./pages/app/Audit";
@@ -119,6 +121,24 @@ function RequireProvider({ children }) {
   return children;
 }
 
+/**
+ * Sends an old project-scoped alert-plane URL to its workspace-level home.
+ *
+ * The alert plane moved out from under `/app/projects/:pid` — see the routes
+ * below for why — and a bookmark is a promise. Redirecting preserves both
+ * halves of the old URL: the project becomes the `?project=` filter, so the
+ * screen opens narrowed exactly as it used to, and any trailing id or
+ * fingerprint is carried through so a link to one incident still opens THAT
+ * incident rather than the list.
+ *
+ * `replace` so the dead URL does not sit in history waiting for a Back press.
+ */
+function ToWorkspace({ to, param }) {
+  const params = useParams();
+  const tail = param ? `/${encodeURIComponent(params[param] ?? "")}` : "";
+  return <Navigate to={`/app${to}${tail}?project=${params.pid}`} replace />;
+}
+
 // Send a signed-in client to the console that matches their role.
 function RoleHome() {
   const { clientRole } = useStore();
@@ -132,6 +152,8 @@ export default function App() {
       <Route path="/" element={<Home />} />
       <Route path="/pricing" element={<Pricing />} />
       <Route path="/docs" element={<Docs />} />
+      <Route path="/docs/:category" element={<DocArticle />} />
+      <Route path="/docs/:category/:slug" element={<DocArticle />} />
       <Route path="/demo" element={<BookDemo />} />
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
@@ -239,7 +261,10 @@ export default function App() {
           }
         />
         {/* The short-lived separate route; kept so existing links resolve. */}
-        <Route path="ai-providers" element={<Navigate to="/app/models" replace />} />
+        <Route
+          path="ai-providers"
+          element={<Navigate to="/app/models" replace />}
+        />
         {/*
           Outbound notification channels and the rules that fire them. Distinct
           from "notifications" below, which is the in-app inbox — this one is
@@ -282,7 +307,10 @@ export default function App() {
             job's do. A workflow run and a job run are the same row in the
             same table; to an operator asking "did the 2am automation
             work" they are the same question. */}
-        <Route path="projects/:pid/workflows/:id" element={<WorkflowDetail />} />
+        <Route
+          path="projects/:pid/workflows/:id"
+          element={<WorkflowDetail />}
+        />
         <Route path="projects/:pid/executions" element={<Executions />} />
         <Route
           path="projects/:pid/executions/:id"
@@ -291,13 +319,47 @@ export default function App() {
         <Route path="projects/:pid/nodes" element={<Nodes />} />
         <Route path="projects/:pid/schedule" element={<Schedule />} />
         <Route path="projects/:pid/webhooks" element={<Webhooks />} />
-        <Route path="projects/:pid/alerts" element={<Alerts />} />
+        {/* The alert plane is WORKSPACE-level, and these five routes are where
+            it lives. It used to hang off a project, which meant connecting the
+            same Datadog account once per project and then guessing which one an
+            alert had landed in before it could be read — and a monitoring tool
+            has never heard of an AutoOps project, so the answer was usually
+            "none of them". The project survives as an optional `?project=`
+            filter; see lib/alertScope.js.
+
+            The old project paths redirect rather than 404, carrying the project
+            through as that filter, so a bookmark still lands somewhere true. */}
+        <Route path="alerts" element={<Alerts />} />
         {/* Before the :fingerprint route below, or "sources" is parsed as one. */}
-        <Route path="projects/:pid/alerts/sources" element={<AlertProviders />} />
-        <Route path="projects/:pid/incidents" element={<Incidents />} />
-        <Route path="projects/:pid/incidents/:id" element={<IncidentDetail />} />
+        <Route path="alerts/sources" element={<AlertProviders />} />
         {/* Encoded in the link: a fingerprint is opaque and may contain a slash. */}
-        <Route path="projects/:pid/alerts/:fingerprint" element={<AlertDetail />} />
+        <Route path="alerts/:fingerprint" element={<AlertDetail />} />
+        <Route path="incidents" element={<Incidents />} />
+        {/* Before the :id route below, or "rules" is parsed as an incident id
+            — the same trap as alerts/sources above. */}
+        <Route path="incidents/rules" element={<CorrelationRules />} />
+        <Route path="incidents/:id" element={<IncidentDetail />} />
+
+        <Route
+          path="projects/:pid/alerts"
+          element={<ToWorkspace to="/alerts" />}
+        />
+        <Route
+          path="projects/:pid/alerts/sources"
+          element={<ToWorkspace to="/alerts/sources" />}
+        />
+        <Route
+          path="projects/:pid/alerts/:fingerprint"
+          element={<ToWorkspace to="/alerts" param="fingerprint" />}
+        />
+        <Route
+          path="projects/:pid/incidents"
+          element={<ToWorkspace to="/incidents" />}
+        />
+        <Route
+          path="projects/:pid/incidents/:id"
+          element={<ToWorkspace to="/incidents" param="id" />}
+        />
         <Route path="projects/:pid/commands" element={<Commands />} />
         <Route path="projects/:pid/approvals" element={<Approvals />} />
         <Route path="projects/:pid/audit" element={<Audit />} />
@@ -342,8 +404,14 @@ export default function App() {
             exactly that. There is no palette in the frontend to go stale — the
             failure that has already hit NativeWorkflowService.GRAPH_NODE_TYPES
             twice. */}
-        <Route path="library/workflow/new" element={<ProviderWorkflowDesigner />} />
-        <Route path="library/workflow/:id" element={<ProviderWorkflowDesigner />} />
+        <Route
+          path="library/workflow/new"
+          element={<ProviderWorkflowDesigner />}
+        />
+        <Route
+          path="library/workflow/:id"
+          element={<ProviderWorkflowDesigner />}
+        />
         <Route path="library/script/new" element={<ProviderScriptEditor />} />
         <Route path="library/script/:id" element={<ProviderScriptEditor />} />
         {/* The agent builder. Unlike a workflow, an agent has no canvas to

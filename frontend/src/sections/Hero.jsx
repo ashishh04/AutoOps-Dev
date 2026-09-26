@@ -14,7 +14,7 @@ export default function Hero() {
   };
 
   return (
-    <section id="solutions" className="grid-bg relative overflow-hidden pt-8 pb-20 lg:pt-12 lg:pb-24 min-h-[calc(100vh-80px)] flex items-center">
+    <section id="top" className="grid-bg relative overflow-hidden pt-8 pb-20 lg:pt-12 lg:pb-24 min-h-[calc(100vh-80px)] flex items-center">
       <div className="px-6 max-w-7xl mx-auto relative z-10 w-full">
         <div className="flex flex-col lg:flex-row items-center justify-between gap-12 lg:gap-16">
           {/* Left Content */}

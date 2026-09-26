@@ -41,7 +41,10 @@ class EmailProviderTest {
                 9L, "Platform", "schedule", detail,
                 Instant.parse("2026-08-08T09:00:00Z"),
                 event == LifecycleEvent.MISSED ? null : Duration.ofSeconds(95),
-                event == LifecycleEvent.MISSED ? "" : "https://console.example.com/app/runs/1234");
+                event == LifecycleEvent.MISSED ? "" : "https://console.example.com/app/runs/1234",
+                // Null: let the message take the event's own severity, which is
+                // what everything that RUNS does. Only an alert overrides it.
+                null);
     }
 
     // ---------------- rendering ----------------

@@ -1,6 +1,9 @@
 import React from "react";
 import {
   Lightning,
+  RocketLaunch,
+  Stack,
+  PuzzlePiece,
   ShieldCheck,
   Code,
   Pulse,
@@ -63,6 +66,11 @@ import {
    so every existing call site keeps working; only the visual style changes. */
 const ICONS = {
   bolt: Lightning,
+  // The docs categories. Before these existed every unmapped name fell back to
+  // Lightning, so three of the six category cards showed the same bolt.
+  rocket: RocketLaunch,
+  layers: Stack,
+  puzzle: PuzzlePiece,
   shield: ShieldCheck,
   api: Code,
   pulse: Pulse,

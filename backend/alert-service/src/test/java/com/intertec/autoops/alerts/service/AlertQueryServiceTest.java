@@ -173,4 +173,77 @@ class AlertQueryServiceTest {
         assertThat(service.list(TenantScope.of(jwt("acme", "CLIENT"), 7L), null, null, 100))
                 .isEmpty();
     }
+
+    @Test
+    @DisplayName("at WORKSPACE level an unlabelled alert is still admitted, across every project")
+    void workspaceScopeResolvesEveryOwnedSource() {
+        // The bug this pins. enrich() used to give up when no project was
+        // named, so the workspace view fell back to the label rule alone — and
+        // most real alerts carry no label, because the monitoring tool that
+        // raised them has never heard of AutoOps. They did not appear as
+        // another tenant's; they appeared as not existing.
+        Map<String, Object> datadog = new HashMap<>();
+        datadog.put("fingerprint", "from-datadog");
+        datadog.put("status", "firing");
+        datadog.put("providerId", "prov-in-project-7");
+
+        Map<String, Object> grafana = new HashMap<>();
+        grafana.put("fingerprint", "from-grafana");
+        grafana.put("status", "firing");
+        grafana.put("providerId", "prov-in-project-9004");
+
+        when(engine.alerts()).thenReturn(List.of(datadog, grafana));
+        when(providers.connectedIds("acme", null))
+                .thenReturn(java.util.Set.of("prov-in-project-7", "prov-in-project-9004"));
+
+        var result = service.list(TenantScope.of(jwt("acme", "CLIENT"), null), null, null, 100);
+
+        assertThat(result).extracting("fingerprint")
+                .containsExactly("from-datadog", "from-grafana");
+    }
+
+    @Test
+    @DisplayName("workspace level widens across the tenant's projects and no further")
+    void workspaceScopeStopsAtTheTenant() {
+        Map<String, Object> theirs = new HashMap<>();
+        theirs.put("fingerprint", "globex-datadog");
+        theirs.put("status", "firing");
+        theirs.put("providerId", "prov-globex");
+        when(engine.alerts()).thenReturn(List.of(theirs));
+        when(providers.connectedIds("acme", null)).thenReturn(java.util.Set.of("prov-acme"));
+
+        assertThat(service.list(TenantScope.of(jwt("acme", "CLIENT"), null), null, null, 100))
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("a workspace-level alert opens rather than 404ing")
+    void workspaceScopeOpensWhatItListed() {
+        // The symptom a customer would actually hit: the feed shows the alert,
+        // clicking it says it does not exist. Listing and opening must resolve
+        // ownership the same way.
+        Map<String, Object> a = new HashMap<>();
+        a.put("fingerprint", "from-datadog");
+        a.put("status", "firing");
+        a.put("providerId", "prov-1");
+        when(engine.alert("from-datadog")).thenReturn(a);
+        when(providers.connectedIds("acme", null)).thenReturn(java.util.Set.of("prov-1"));
+
+        assertThat(service.get(TenantScope.of(jwt("acme", "CLIENT"), null), "from-datadog")
+                .fingerprint()).isEqualTo("from-datadog");
+    }
+
+    @Test
+    @DisplayName("naming a project still NARROWS the workspace answer")
+    void projectStillNarrows() {
+        Map<String, Object> elsewhere = new HashMap<>();
+        elsewhere.put("fingerprint", "other-project");
+        elsewhere.put("status", "firing");
+        elsewhere.put("providerId", "prov-in-project-9004");
+        when(engine.alerts()).thenReturn(List.of(elsewhere));
+        when(providers.connectedIds("acme", "7")).thenReturn(java.util.Set.of("prov-in-project-7"));
+
+        assertThat(service.list(TenantScope.of(jwt("acme", "CLIENT"), 7L), null, null, 100))
+                .isEmpty();
+    }
 }

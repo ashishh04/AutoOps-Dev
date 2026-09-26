@@ -34,12 +34,23 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-/** A fetch Response double: `json()`/`text()` behave like the real thing. */
-export function response(status, body) {
+/**
+ * A fetch Response double: `json()`/`text()` behave like the real thing.
+ *
+ * `headers` is a real Headers-shaped lookup because some responses carry their
+ * meaning there rather than in the body — Retry-After on a 429 is the whole
+ * difference between "wait ten seconds" and "wait ten minutes", and a double
+ * without it lets code that drops the header pass.
+ */
+export function response(status, body, headers = {}) {
   const text = body === undefined ? "" : JSON.stringify(body);
+  const lower = new Map(
+    Object.entries(headers).map(([k, v]) => [k.toLowerCase(), String(v)]),
+  );
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: { get: (name) => lower.get(String(name).toLowerCase()) ?? null },
     text: async () => text,
     json: async () => JSON.parse(text),
   };

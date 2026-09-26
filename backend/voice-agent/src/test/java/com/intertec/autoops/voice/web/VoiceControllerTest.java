@@ -115,4 +115,30 @@ class VoiceControllerTest {
                 .andExpect(jsonPath("$.error").value("voice_unavailable"))
                 .andExpect(jsonPath("$.message").value("The voice agent is not available right now"));
     }
+
+    @Test
+    void anUpstreamFailureHandsTheVisitorTheirSlotBack() throws Exception {
+        // Nothing was minted and nothing was spent, so nothing should be
+        // charged. Counting these turned a bad API key into a ten-minute
+        // lockout whose message blamed the visitor for conversations they
+        // never had, and buried the real error for the length of the window.
+        given(rateLimiter.tryAcquire("203.0.113.7")).willReturn(SessionRateLimiter.Decision.ALLOWED);
+        given(elevenLabs.signedUrl()).willThrow(new ElevenLabsException(
+                HttpStatus.SERVICE_UNAVAILABLE, "The voice agent is not available right now"));
+
+        mockMvc.perform(post("/api/voice/session").header("X-Forwarded-For", "203.0.113.7"))
+                .andExpect(status().isServiceUnavailable());
+
+        verify(rateLimiter).release("203.0.113.7");
+    }
+
+    @Test
+    void aSessionThatWasActuallyMintedKeepsItsSlot() throws Exception {
+        given(rateLimiter.tryAcquire(any())).willReturn(SessionRateLimiter.Decision.ALLOWED);
+        given(elevenLabs.signedUrl()).willReturn("wss://example.invalid/session");
+
+        mockMvc.perform(post("/api/voice/session")).andExpect(status().isOk());
+
+        verify(rateLimiter, never()).release(any());
+    }
 }

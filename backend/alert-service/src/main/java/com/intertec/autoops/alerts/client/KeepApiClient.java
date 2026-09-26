@@ -122,11 +122,30 @@ public class KeepApiClient {
      * Forwards one inbound alert. Uses the INGEST key, whose role is
      * write:alert and nothing else — a leak of it cannot read the stream back.
      */
-    public void ingest(String providerType, Map<String, Object> alert) {
+    /**
+     * Forwards an arriving alert to the engine.
+     *
+     * <p>{@code providerId} names the connected source it came through, and it
+     * is what makes the alert recognisable as a tenant's own when the LABELS do
+     * not survive — which is the common case, not the edge one. The engine runs
+     * each source type's own parser, and a parser that rebuilds the alert from
+     * the vendor's shape (Alertmanager nests its labels under
+     * {@code alerts[].labels}) discards the {@code autoops_tenant} stamp
+     * applied at the top level. The alert then belongs to nobody and the
+     * customer who just sent it cannot see it.
+     *
+     * <p>Null when this scope has no matching connection. The alert still
+     * arrives; it is simply recognisable only by whatever labels survived.
+     */
+    public void ingest(String providerType, Map<String, Object> alert, String providerId) {
         String t = java.net.URLEncoder.encode(providerType, java.nio.charset.StandardCharsets.UTF_8);
+        String path = "/alerts/event/" + t;
+        if (providerId != null && !providerId.isBlank()) {
+            path += "?provider_id=" + java.net.URLEncoder.encode(
+                    providerId, java.nio.charset.StandardCharsets.UTF_8);
+        }
         String key = engine.getIngestApiKey();
-        postWith(key == null || key.isBlank() ? adminKey() : key,
-                "/alerts/event/" + t, alert);
+        postWith(key == null || key.isBlank() ? adminKey() : key, path, alert);
     }
 
     private Map<String, Object> post(String path, Map<String, Object> payload) {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { projectNav } from "./AppLayout";
+import { projectNav, workspaceNav } from "./AppLayout";
 import { ROLE_CAPS } from "../../store/store";
 
 // A page can have a route, a component and passing tests and still be
@@ -94,5 +94,94 @@ describe("project sidebar", () => {
         expect(group.items.length, `${group.group} is empty for ${role}`).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("workspace sidebar", () => {
+  const nav = (role = "admin") => workspaceNav(canFor(role), role);
+
+  /**
+   * The alert plane is WORKSPACE-level. It used to hang off a project, which
+   * meant connecting the same Datadog account once per project and then
+   * guessing which project an alert had landed in before it could be read —
+   * and for an alert carrying no AutoOps labels, which is most of them, the
+   * answer was none of them.
+   */
+  it("offers the alert plane at workspace level", () => {
+    const found = labels(nav());
+    expect(found).toContain("Incidents");
+    expect(found).toContain("Alert Feed");
+    expect(found).toContain("Monitoring Sources");
+  });
+
+  /**
+   * Nothing correlates without a rule, so a customer looking at an empty
+   * Incidents page needs the thing that fills it within reach. Buried in
+   * settings, they conclude the feature is broken instead of unconfigured.
+   */
+  it("offers Correlation Rules directly under Incidents", () => {
+    const operate = nav().find((g) => g.group === "Operate");
+    const order = operate.items.map((i) => i.label);
+    expect(order.indexOf("Correlation Rules")).toBe(order.indexOf("Incidents") + 1);
+    expect(byLabel(nav(), "Correlation Rules").to).toBe("/app/incidents/rules");
+  });
+
+  /**
+   * Incidents must be `end`, or it stays highlighted while you are on
+   * Correlation Rules — which lives underneath it as /app/incidents/rules.
+   */
+  it("marks Incidents as an exact match so its child route does not light it up", () => {
+    expect(byLabel(nav(), "Incidents").end).toBe(true);
+  });
+
+  it("points them at workspace routes, not at a project", () => {
+    expect(byLabel(nav(), "Incidents").to).toBe("/app/incidents");
+    expect(byLabel(nav(), "Alert Feed").to).toBe("/app/alerts");
+    expect(byLabel(nav(), "Monitoring Sources").to).toBe("/app/alerts/sources");
+  });
+
+  /**
+   * Alert Feed must be `end`, or it stays highlighted while you are on
+   * Monitoring Sources — which lives underneath it as /app/alerts/sources.
+   */
+  it("marks Alert Feed as an exact match so its child route does not light it up", () => {
+    expect(byLabel(nav(), "Alert Feed").end).toBe(true);
+  });
+
+  it("gives every item a destination and an icon", () => {
+    for (const role of ["admin", "operator", "viewer"]) {
+      for (const item of flatten(nav(role))) {
+        expect(item.to, `${item.label} has no destination`).toBeTruthy();
+        expect(item.icon, `${item.label} has no icon`).toBeTruthy();
+      }
+    }
+  });
+
+  it("drops no group to an empty item list", () => {
+    for (const role of ["admin", "operator", "viewer"]) {
+      for (const group of nav(role)) {
+        expect(group.items.length, `${group.group} is empty for ${role}`).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+describe("project sidebar no longer duplicates the alert plane", () => {
+  /**
+   * Two entries for one screen is the split this change removed. A customer
+   * who sees "Alert Feed" in both places has to learn which of the two shows
+   * their alerts, and the answer used to be "the project one, but only some".
+   */
+  it("leaves incidents, alerts and sources to the workspace nav", () => {
+    const found = labels(projectNav(B, canFor("admin")));
+    expect(found).not.toContain("Incidents");
+    expect(found).not.toContain("Alert Feed");
+    expect(found).not.toContain("Monitoring Sources");
+  });
+
+  it("keeps the rest of Operate where it was", () => {
+    const found = labels(projectNav(B, canFor("admin")));
+    expect(found).toContain("Executions");
+    expect(found).toContain("Nodes");
   });
 });

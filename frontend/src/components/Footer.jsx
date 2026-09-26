@@ -27,10 +27,13 @@ const COLS = [
   {
     h: "Resources",
     links: [
-      { label: "Terms of service", href: "#" },
-      { label: "Cookie Policy", href: "#" },
-      { label: "FAQ", to: "/docs" },
-      { label: "Privacy Policy", href: "#" },
+      { label: "Documentation", to: "/docs" },
+      { label: "Quickstart Guide", to: "/docs/getting-started/quickstart" },
+      { label: "API Reference", to: "/docs/api/rest-api" },
+      { label: "Security & RBAC", to: "/docs/security/authentication-oidc" },
+      // Terms, Cookie Policy and Privacy Policy still have no page to point at.
+      // They are left off rather than linked to `#`, which scrolls to the top
+      // and reads as a broken link — worse than an absent one.
     ],
   },
 ];

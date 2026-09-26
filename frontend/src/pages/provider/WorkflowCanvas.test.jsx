@@ -40,6 +40,9 @@ vi.mock("@xyflow/react", () => ({
             >
               drag {n.id}
             </button>
+            <button onClick={() => onNodesChange([{ type: "remove", id: n.id }])}>
+              backspace {n.id}
+            </button>
           </div>
         ))}
         {edges.map((e) => (
@@ -48,14 +51,43 @@ vi.mock("@xyflow/react", () => ({
           </div>
         ))}
         <button onClick={() => onConnect({ source: "start", target: "end" })}>connect</button>
+        <button
+          onClick={() =>
+            onConnect({ source: "gate", target: "end", sourceHandle: "false" })
+          }
+        >
+          connect false arm
+        </button>
       </div>
     );
   },
   Background: () => null,
   Controls: () => null,
   MiniMap: () => null,
+  // A custom node draws its OWN connection points. The real Handle renders a
+  // positioned div; here it renders a marker carrying the two things the node
+  // decides — which side it is and, for a condition, which branch it starts.
+  Handle: ({ type, id }) => (
+    <span data-testid={`handle-${type}${id ? `-${id}` : ""}`} />
+  ),
+  Position: { Left: "left", Right: "right" },
   addEdge: vi.fn(),
-  applyNodeChanges: vi.fn(),
+  // Minimal but REAL: the canvas now applies changes to a render mirror so a
+  // drag is smooth, and a mock returning undefined would hide whether it does.
+  applyNodeChanges: (changes, nodes) => {
+    let next = nodes;
+    for (const change of changes) {
+      if (change.type === "position" && change.position) {
+        next = next.map((n) =>
+          n.id === change.id ? { ...n, position: change.position } : n,
+        );
+      }
+      if (change.type === "remove") {
+        next = next.filter((n) => n.id !== change.id);
+      }
+    }
+    return next;
+  },
 }));
 
 const { default: WorkflowCanvas } = await import("./WorkflowCanvas");
@@ -81,6 +113,7 @@ const handlers = {
   onSelect: vi.fn(),
   onMove: vi.fn(),
   onConnect: vi.fn(),
+  onDelete: vi.fn(),
   onDisconnect: vi.fn(),
 };
 
@@ -194,7 +227,107 @@ describe("WorkflowCanvas", () => {
 
     fireEvent.click(screen.getByText("connect"));
 
-    expect(handlers.onConnect).toHaveBeenCalledWith("start", "end");
+    // The third argument is the branch, taken from the handle that was
+    // dragged. A plain node has no handle id, so it connects with no branch.
+    expect(handlers.onConnect).toHaveBeenCalledWith("start", "end", "");
+  });
+
+  it("gives every node the connection points a drag needs", () => {
+    // A custom React Flow node draws its own handles. Without them there is
+    // nothing to start a drag from and nothing to drop onto, so onConnect can
+    // never fire — the canvas renders perfectly and cannot be drawn on, which
+    // is exactly how it shipped.
+    renderCanvas({
+      nodes: [
+        { id: "start", type: "start", values: {} },
+        { id: "w", type: "llm", values: { prompt: "x" } },
+        { id: "end", type: "end", values: {} },
+      ],
+      edges: [],
+    });
+
+    const within = (id) => screen.getByTestId(`node-${id}`);
+    // start is only ever a source; end is only ever a target. Offering the
+    // other handle invites an edge the runtime refuses at save time.
+    expect(within("start").querySelector('[data-testid="handle-source"]')).toBeTruthy();
+    expect(within("start").querySelector('[data-testid="handle-target"]')).toBeNull();
+    expect(within("end").querySelector('[data-testid="handle-target"]')).toBeTruthy();
+    expect(within("end").querySelector('[data-testid="handle-source"]')).toBeNull();
+    // Everything in between is both.
+    expect(within("w").querySelector('[data-testid="handle-target"]')).toBeTruthy();
+    expect(within("w").querySelector('[data-testid="handle-source"]')).toBeTruthy();
+  });
+
+  it("gives a condition two labelled source handles, one per branch", () => {
+    // This is the node the canvas exists for. Two unlabelled lines out of one
+    // point is the ambiguity it is meant to remove, so the branch is chosen by
+    // WHICH handle you drag from.
+    renderCanvas({
+      nodes: [{ id: "gate", type: "condition", values: { when: "x", equals: "y" } }],
+      edges: [],
+    });
+
+    const gate = screen.getByTestId("node-gate");
+    expect(gate.querySelector('[data-testid="handle-source-true"]')).toBeTruthy();
+    expect(gate.querySelector('[data-testid="handle-source-false"]')).toBeTruthy();
+    expect(screen.getByText("true")).toBeInTheDocument();
+    expect(screen.getByText("false")).toBeInTheDocument();
+  });
+
+  it("reports which branch a line left a condition by", () => {
+    renderCanvas({
+      nodes: [
+        { id: "gate", type: "condition", values: {} },
+        { id: "end", type: "end", values: {} },
+      ],
+      edges: [],
+    });
+
+    fireEvent.click(screen.getByText("connect false arm"));
+
+    expect(handlers.onConnect).toHaveBeenCalledWith("gate", "end", "false");
+  });
+
+  it("moves the box under the cursor while the drag is still happening", () => {
+    // The bug this replaces: positions were derived from a draft that only
+    // updated on pointer-up, so the node sat frozen for the whole drag and
+    // then teleported. That reads as lag, and waiting never fixed it — those
+    // frames were never coming.
+    renderCanvas({
+      nodes: [{ id: "start", type: "start", values: {} }],
+      edges: [],
+    });
+
+    fireEvent.click(screen.getByText("drag start"));
+
+    expect(screen.getByTestId("node-start")).toHaveAttribute("data-pos", "99,99");
+    // ...and the DEFINITION is still untouched. Writing every intermediate
+    // position would rewrite it dozens of times a second.
+    expect(handlers.onMove).not.toHaveBeenCalled();
+  });
+
+  it("offers a delete button on the node itself", () => {
+    // Deleting the thing you are looking at should not mean scrolling to a
+    // different control below the canvas to do it.
+    renderCanvas({
+      nodes: [{ id: "gate", type: "condition", values: {} }],
+      edges: [],
+    });
+
+    fireEvent.click(screen.getByLabelText("Delete gate"));
+
+    expect(handlers.onDelete).toHaveBeenCalledWith("gate");
+  });
+
+  it("deletes on the keyboard too, not only the button", () => {
+    renderCanvas({
+      nodes: [{ id: "w", type: "llm", values: { prompt: "x" } }],
+      edges: [],
+    });
+
+    fireEvent.click(screen.getByText("backspace w"));
+
+    expect(handlers.onDelete).toHaveBeenCalledWith("w");
   });
 
   it("does not hand React Flow an edge that is only half drawn", () => {

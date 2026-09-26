@@ -12,6 +12,12 @@ agent). The whole platform runs as one `docker compose up` stack; the frontend
 is wired to real APIs everywhere except the node catalogue, which has no engine
 yet.
 
+**Product documentation lives in [`docs/`](docs/README.md)** — quickstart,
+installation, architecture, workflow authoring, security, integrations and the
+API reference. Those files are the single copy: the console renders them at
+`/docs`, so editing one is editing the site. This README stays the
+engineering-level view of the repository.
+
 ---
 
 ## 1. Architecture
@@ -87,7 +93,7 @@ Browser / SPA (:5173 — Vite dev proxy, or nginx in the compose stack)
 ### 2.1 auth-service (:8081)
 
 Identity and token authority. Spring Boot 3.4.2, Spring Authorization Server
-(SAS 1.4), MySQL `autoops_auth` (Flyway V1–V4), Redis, BCrypt, SendGrid
+(SAS 1.4), MySQL `autoops_auth` (Flyway V1–V11), Redis, BCrypt, Resend
 (prod-only; dev prints OTPs to the console).
 
 #### Endpoints
@@ -112,7 +118,7 @@ Identity and token authority. Spring Boot 3.4.2, Spring Authorization Server
 | POST | `/api/auth/onboard` | bearer ADMIN | Create a user **in the caller's own tenant** |
 | POST | `/api/auth/offboard/{id}` | bearer ADMIN | Disable + kill sessions (404 for other tenants' users) |
 | GET | `/api/auth/me` | bearer | Current profile |
-| POST | `/api/auth/webhooks/sendgrid` | signed | SendGrid delivery events (ECDSA-verified) |
+| POST | `/api/auth/webhooks/resend` | signed | Resend delivery events (Svix HMAC-SHA256, replay-windowed) |
 | GET | `/oauth2/jwks` | public | Public keys (all keystore aliases published) |
 | POST | `/oauth2/introspect` | gateway client | RFC 7662 (SAS-issued tokens only — user tokens go through `/authorize`) |
 
@@ -146,7 +152,7 @@ Identity and token authority. Spring Boot 3.4.2, Spring Authorization Server
 
 - `users` — email, BCrypt `password_hash` (NULL for OTP/SSO-only), role/status
   ENUMs, `tenant_id`, `token_version`, `keycloak_subject`
-- `otp_entries` — hashed challenges, attempts, lockout, SendGrid delivery status
+- `otp_entries` — hashed challenges, attempts, lockout, provider delivery status
 - `refresh_token_sessions` — hashed secrets, rotation chain, `reuse_detected`
 - `auth_audit_log` — 17 event types (ENUM)
 - `oauth2_registered_client` / `oauth2_authorization` — SAS (gateway client)
@@ -402,7 +408,7 @@ Start job-service and set `EXECUTION_MODE=remote` to run steps for real.
 Dev notes:
 
 - **OTP / verification codes are printed to the auth-service console**
-  (`[DEV ONLY] OTP for … = 123456`) because SendGrid isn't configured locally.
+  (`[DEV ONLY] OTP for … = 123456`) because Resend isn't configured locally.
   Codes expire after 5 minutes.
 - Sign up at `/signup` → enter the console code → the selected plan's 14-day
   trial starts automatically → `/app` → **Billing** shows the real subscription.
@@ -481,7 +487,7 @@ feature chain → tenant-spoof rejection → metrics.
 | `GATEWAY_CLIENT_ID` / `GATEWAY_CLIENT_SECRET` | gateway / gateway-secret (dev) | auth `/authorize` + introspection |
 | `ENTITLEMENT_FAIL_OPEN` | `false` | auth (fail-closed entitlements) |
 | `TENANT_REQUIRE_HEADER` | dev `false` / prod `true` | auth |
-| `SENDGRID_API_KEY` / `_OTP_TEMPLATE_ID` / `_FROM_EMAIL` / `_WEBHOOK_PUBLIC_KEY` | placeholders | auth (prod email) |
+| `RESEND_API_KEY` / `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` / `RESEND_WEBHOOK_SECRET` | placeholders | auth (prod email). The from-address must be on a domain verified in Resend |
 | `KEYCLOAK_ISSUER_URI` / `_CLIENT_ID` / `_CLIENT_SECRET` | `:8180/realms/autoops` | auth (SSO) |
 | `SSO_SUCCESS_REDIRECT` | dev: `http://localhost:5173/auth/callback` | auth |
 | `RETENTION_OTP` / `_SESSIONS` / `_AUDIT` | 1d / 30d / 180d | auth purge |

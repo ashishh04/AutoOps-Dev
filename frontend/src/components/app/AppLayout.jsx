@@ -109,7 +109,9 @@ const accessLink = (clientRole) => {
 };
 
 // Sidebar options are filtered per persona so no console shows another's options.
-const workspaceNav = (can, clientRole) => {
+// Exported for tests for the same reason projectNav is: a page with a route and
+// no nav entry is unreachable, and that has shipped twice.
+export const workspaceNav = (can, clientRole) => {
   const workspace = [
     { to: "/app/projects", label: "Projects", icon: "folder" },
   ];
@@ -149,8 +151,28 @@ const workspaceNav = (can, clientRole) => {
     account.push({ to: "/app/models", label: "Models", icon: "sparkles" });
   account.push({ to: "/app/settings", label: "Settings", icon: "gear" });
 
+  // WORKSPACE-level, not per project, and that is the point rather than a
+  // layout preference. A monitoring tool raises alerts about an estate; it has
+  // never heard of an AutoOps project. Hanging these three off a project meant
+  // connecting the same Datadog account once per project and then guessing
+  // which project an alert had landed in before it could be read — and for an
+  // alert carrying no AutoOps labels, which is most of them, the honest answer
+  // was "none of them". Narrowing to a project is still offered, as a filter on
+  // the page.
+  const operate = [
+    { to: "/app/incidents", label: "Incidents", icon: "pulse", end: true },
+    // Directly under Incidents, because it is the thing that MAKES them.
+    // Nothing correlates without a rule, so a customer looking at an empty
+    // Incidents page needs the next step within reach rather than buried in
+    // settings — otherwise they conclude the feature is broken.
+    { to: "/app/incidents/rules", label: "Correlation Rules", icon: "blocks" },
+    { to: "/app/alerts", label: "Alert Feed", icon: "radar", end: true },
+    { to: "/app/alerts/sources", label: "Monitoring Sources", icon: "cube" },
+  ];
+
   return [
     { group: "Workspace", items: workspace },
+    { group: "Operate", items: operate },
     { group: "Console", items: [accessLink(clientRole)] },
     { group: "Account", items: account },
   ];
@@ -193,10 +215,10 @@ export const projectNav = (b, can) =>
     },
     {
       group: "Operate",
+      // Incidents, the alert feed and monitoring sources used to sit at the top
+      // of this group. They are workspace-level now — see workspaceNav — so a
+      // customer connects a monitoring source once instead of once per project.
       items: [
-        { to: `${b}/incidents`, label: "Incidents", icon: "pulse" },
-        { to: `${b}/alerts`, label: "Alert Feed", icon: "radar", end: true },
-        { to: `${b}/alerts/sources`, label: "Monitoring Sources", icon: "cube" },
         { to: `${b}/executions`, label: "Executions", icon: "play" },
         { to: `${b}/nodes`, label: "Nodes", icon: "server" },
         { to: `${b}/integrations`, label: "Cloud", icon: "cloud" },
@@ -334,9 +356,7 @@ function SidebarContent({ inProject, project }) {
           <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
             <span className="flex items-center gap-2 truncate">
               <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" />{" "}
-              <span className="truncate">
-                {workspace?.name || "Workspace"}
-              </span>
+              <span className="truncate">{workspace?.name || "Workspace"}</span>
             </span>
             <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-900">
               {workspace?.plan || "Free"}
@@ -489,7 +509,8 @@ export default function AppLayout() {
       if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
       return `${Math.floor(s / 86400)}d ago`;
     };
-    api.listNotifications()
+    api
+      .listNotifications()
       .then((rows) =>
         setNotifications(
           (Array.isArray(rows) ? rows : []).map((n) => ({
@@ -498,7 +519,12 @@ export default function AppLayout() {
             read: !!n.read,
             link: n.link || "/app/notifications",
             channel: n.kind === "PROVIDER" ? "provider" : "internal",
-            tone: n.kind === "ALERT" ? "red" : n.kind === "PROVIDER" ? "violet" : "cyan",
+            tone:
+              n.kind === "ALERT"
+                ? "red"
+                : n.kind === "PROVIDER"
+                  ? "violet"
+                  : "cyan",
             icon: n.kind === "ALERT" ? "shield" : "bell",
             time: timeAgo(n.createdAt),
           })),
@@ -567,7 +593,6 @@ export default function AppLayout() {
             />
           </div>
           <div className="ml-auto flex items-center gap-3">
-
             <NotificationsMenu
               items={notifications}
               viewAllTo="/app/notifications"

@@ -181,9 +181,19 @@ def workflow_payload(doc, ref):
     # question at all. With only the title to go on, an agent asked to
     # inventory S3 buckets refused, because "S3 Public Access Audit" sounds
     # like a security scan rather than the bucket listing it actually returns.
+    # edges[] is NOT optional, and leaving it out does not produce a broken
+    # workflow that announces itself. The runtime starts at the `start` node and
+    # follows edges; with none, it executes that one node and stops. Three
+    # shipped workflows arrived this way — three nodes, no connections — and a
+    # run took 70ms, produced no output, and reported Success under a
+    # validation badge reading Valid.
+    #
+    # The comment that used to sit here said "nodes[] is what ExecutionEngine
+    # walks". That was the mistake: it walks edges.
     definition = {"ref": ref, "description": doc["description"],
                   "requires": doc.get("requires", []),
-                  "nodes": doc["nodes"], "inputs": doc["inputs"]}
+                  "nodes": doc["nodes"], "edges": doc.get("edges", []),
+                  "inputs": doc["inputs"]}
     return {
         "title": doc["title"],
         "description": doc["description"],

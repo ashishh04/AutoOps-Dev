@@ -33,6 +33,7 @@ const apiMock = {
   providerCreateLibrary: vi.fn(),
   providerUpdateLibrary: vi.fn(),
   providerLibrary: vi.fn(),
+  listWorkspaceModels: vi.fn(),
 };
 vi.mock("../../lib/api", () => ({ api: apiMock }));
 
@@ -86,6 +87,12 @@ const SCHEMA = {
           { name: "url", wire_name: "url", type: "text", required: true },
           { name: "headers", wire_name: "headers", type: "map", required: false },
         ] },
+      { type: "llm", summary: "Ask a model.", contributes: ["text"],
+        fields: [
+          { name: "prompt", wire_name: "prompt", type: "list", required: true },
+          { name: "model", wire_name: "model", type: "text", required: false },
+          { name: "temperature", wire_name: "temperature", type: "number", required: false },
+        ] },
       { type: "end", summary: "Where the run finishes.", contributes: [],
         fields: [{ name: "title", wire_name: "title", type: "text", required: false }] },
     ],
@@ -112,6 +119,16 @@ beforeEach(() => {
   apiMock.providerCreateLibrary.mockResolvedValue({ id: 51 });
   apiMock.providerUpdateLibrary.mockResolvedValue({ id: 7 });
   apiMock.providerLibrary.mockResolvedValue([]);
+  // The model palette cannot come from the runtime's schema — it has no idea
+  // which vendors a workspace has connected — so it is fetched separately.
+  apiMock.listWorkspaceModels.mockResolvedValue([
+    {
+      kind: "BEDROCK",
+      providerName: "AWS Bedrock",
+      models: ["deepseek.v3.2", "amazon.nova-pro-v1:0", "titan-embed-v2"],
+      modelsByPurpose: { CHAT: ["deepseek.v3.2", "amazon.nova-pro-v1:0"] },
+    },
+  ]);
 });
 
 describe("ProviderWorkflowDesigner", () => {
@@ -124,9 +141,9 @@ describe("ProviderWorkflowDesigner", () => {
     for (const type of ["start", "platform", "http", "end"]) {
       expect(await screen.findByRole("button", { name: `+ ${type}` })).toBeInTheDocument();
     }
-    // And nothing it did not publish. `llm` is real in the runtime and absent
+    // And nothing it did not publish. `job` is real in the runtime and absent
     // from this fixture; if it appeared, the palette came from somewhere else.
-    expect(screen.queryByRole("button", { name: "+ llm" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "+ job" })).not.toBeInTheDocument();
   });
 
   it("writes each field under its WIRE name, not the Python one", async () => {

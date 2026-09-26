@@ -27,9 +27,14 @@ import java.util.Map;
 /**
  * The rules that decide which lifecycle events reach which channel.
  *
- * <p>Jobs and workflows are covered by the same endpoints — they share one run
- * engine in core-service, so they share one rule shape here. {@code
- * targetType} is what distinguishes them.
+ * <p>Jobs, workflows, agents and alerts are covered by the same endpoints —
+ * they differ in what raises the event, not in what a customer wants said about
+ * it. {@code targetType} is what distinguishes them.
+ *
+ * <p>They are NOT interchangeable, though: an alert never stalls and a job
+ * never waits for approval. Which events belong to which target is published by
+ * {@code /api/plugins/events} and enforced here, so a rule that could never
+ * fire is refused rather than saved and left looking armed.
  */
 @RestController
 public class NotificationRuleController {
@@ -70,7 +75,7 @@ public class NotificationRuleController {
         String tenantId = tenant(jwt);
         NotificationRule rule = ruleService.create(tenantId, jwt.getSubject(),
                 request.installationId(), request.targetType(), request.targetId(),
-                request.projectId(), request.events());
+                request.projectId(), request.events(), request.minSeverity());
         return toResponse(tenantId, rule);
     }
 
@@ -80,7 +85,7 @@ public class NotificationRuleController {
         String tenantId = tenant(jwt);
         NotificationRule rule = ruleService.update(tenantId, id, request.installationId(),
                 request.targetType(), request.targetId(), request.projectId(),
-                request.events(), request.enabled());
+                request.events(), request.enabled(), request.minSeverity());
         return toResponse(tenantId, rule);
     }
 

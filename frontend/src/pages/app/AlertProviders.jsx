@@ -1,10 +1,19 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { PageHeader, Card, SmallButton, Skeleton, ConfirmModal } from "../../components/app/appui";
+import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
+import {
+  PageHeader,
+  Card,
+  SmallButton,
+  Skeleton,
+  ConfirmModal,
+} from "../../components/app/appui";
 import Icon from "../../components/Icon";
 import ProviderLogo from "../../components/app/ProviderLogo";
 import ConnectProviderPanel from "../../components/app/ConnectProviderPanel";
 import { useStore } from "../../store/store";
+import { api } from "../../lib/api";
+import { useAlertScope } from "../../lib/alertScope";
 import {
   listProviderTypes,
   listConnectedProviders,
@@ -19,6 +28,15 @@ import {
  * filtering on one tag hid ones people actually wanted. With that many, the tag
  * chips are not decoration: "Alerts" is the default view because raising alerts
  * is what this page is for, and everything else is one click away.
+ *
+ * <h2>Reading is workspace-wide; connecting is not</h2>
+ * Listing and disconnecting are answered for the whole workspace, so a customer
+ * sees every source they have connected in one place instead of hunting through
+ * projects. Connecting still needs a project, and that asymmetry is real rather
+ * than an oversight: a connection mints an ingest token that stamps a project
+ * onto every alert arriving through it, so there is no such thing as a
+ * workspace-wide source. Where the project is not already implied, this page
+ * asks for it rather than picking one.
  */
 
 const TAGS = [
@@ -31,7 +49,8 @@ const TAGS = [
 ];
 
 export default function AlertProviders() {
-  const { pid } = useParams();
+  const scope = useAlertScope();
+  const pid = scope.projectId;
   const navigate = useNavigate();
   const { pushToast } = useStore();
 
@@ -44,6 +63,34 @@ export default function AlertProviders() {
   const [chosen, setChosen] = useState(null);
   const [removing, setRemoving] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [projects, setProjects] = useState([]);
+  // Which project a NEW connection lands in, when the page filter does not
+  // already say. Cleared whenever the dialog closes, so an answer given for
+  // one connection is never silently reused for the next.
+  const [connectInto, setConnectInto] = useState("");
+
+  useEffect(() => {
+    let dropped = false;
+    api
+      .listProjects()
+      .then((rows) => !dropped && setProjects(Array.isArray(rows) ? rows : []))
+      // Quietly. The catalog and the connected list are the page; losing
+      // project names costs a label, not the screen.
+      .catch(() => !dropped && setProjects([]));
+    return () => {
+      dropped = true;
+    };
+  }, []);
+
+  // A workspace with exactly one project has no decision to make, and asking
+  // would be a dialog whose only option is already selected.
+  const target =
+    pid || connectInto || (projects.length === 1 ? String(projects[0].id) : "");
+
+  const projectName = useCallback(
+    (id) => projects.find((p) => String(p.id) === String(id))?.name || null,
+    [projects],
+  );
 
   const load = useCallback(() => {
     setLoading(true);
@@ -77,7 +124,8 @@ export default function AlertProviders() {
     // A search means "find this thing", so it looks across the WHOLE catalog.
     // Leaving the tag filter on would hide the one source someone just typed
     // the name of, which reads as "you don't support it".
-    const base = q || !tag ? types : types.filter((t) => (t.tags || []).includes(tag));
+    const base =
+      q || !tag ? types : types.filter((t) => (t.tags || []).includes(tag));
     if (!q) return base;
     return base.filter(
       (t) =>
@@ -88,9 +136,10 @@ export default function AlertProviders() {
   }, [types, query, tag]);
 
   const submit = async ({ name, config }) => {
-    await connectProvider(pid, { type: chosen.type, name, config });
+    await connectProvider(target, { type: chosen.type, name, config });
     pushToast(`${chosen.displayName} connected`, "emerald");
     setChosen(null);
+    setConnectInto("");
     load();
   };
 
@@ -115,7 +164,10 @@ export default function AlertProviders() {
         title="Monitoring Sources"
         subtitle="Connect the tools that already watch your estate — their alerts land in AutoOps"
         actions={
-          <SmallButton icon="radar" onClick={() => navigate(`/app/projects/${pid}/alerts`)}>
+          <SmallButton
+            icon="radar"
+            onClick={() => navigate(scope.link("/alerts"))}
+          >
             View alerts
           </SmallButton>
         }
@@ -151,6 +203,14 @@ export default function AlertProviders() {
                       ? `Last alert ${new Date(c.lastAlertAt).toLocaleString()}`
                       : "No alerts received yet"}
                   </div>
+                  {/* Only workspace-wide, where the rows genuinely come from
+                      different projects and a row that did not say which would
+                      send someone to the wrong place to change it. */}
+                  {!pid && projectName(c.projectId) && (
+                    <div className="truncate text-[11px] text-slate-400">
+                      {projectName(c.projectId)}
+                    </div>
+                  )}
                 </div>
                 <button
                   onClick={() => setRemoving(c)}
@@ -248,12 +308,32 @@ export default function AlertProviders() {
         </div>
       )}
 
-      {chosen && (
+      {chosen && target && (
         <ConnectProviderPanel
           provider={chosen}
-          projectId={pid}
-          onClose={() => setChosen(null)}
+          projectId={target}
+          onClose={() => {
+            setChosen(null);
+            setConnectInto("");
+          }}
           onSubmit={submit}
+        />
+      )}
+
+      {chosen && !target && (
+        // Asked, not guessed. The ingest token this connection mints stamps a
+        // project onto every alert that arrives through it, so choosing one on
+        // the customer's behalf would quietly file their whole Datadog feed
+        // under whichever project happened to sort first.
+        <ProjectChoice
+          provider={chosen}
+          projects={projects}
+          value={connectInto}
+          onChange={setConnectInto}
+          onClose={() => {
+            setChosen(null);
+            setConnectInto("");
+          }}
         />
       )}
 
@@ -268,5 +348,66 @@ export default function AlertProviders() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Which project a new connection belongs to.
+ *
+ * Not a ConfirmModal, for two reasons. There is nothing to confirm — choosing
+ * the project IS the action, and the dialog gives way to the connect panel the
+ * moment one is picked. And ConfirmModal renders its message inside a <p>,
+ * which a <select> may not legally live in.
+ *
+ * Portalled to document.body like every other overlay here: a bare
+ * `fixed inset-0` does not cover the viewport in this app, because an ancestor
+ * carries a transform and becomes the containing block.
+ */
+function ProjectChoice({ provider, projects, value, onChange, onClose }) {
+  return createPortal(
+    <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
+      <div
+        className="absolute inset-0 bg-slate-900/25 backdrop-blur-md"
+        onClick={onClose}
+      />
+      <div className="rw-pop relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+        <h2 className="text-base font-semibold text-slate-900">
+          Connect {provider.displayName}
+        </h2>
+        <p className="mt-1 text-sm leading-relaxed text-slate-500">
+          Alerts from this source will be filed under the project you choose.
+          You will still see them on the workspace alert feed.
+        </p>
+        {projects.length === 0 ? (
+          <p className="mt-4 text-sm text-amber-700">
+            This workspace has no projects yet. Create one first — a monitoring
+            source has to belong to something.
+          </p>
+        ) : (
+          <select
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            aria-label="Project"
+            className="mt-4 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+          >
+            <option value="">Choose a project…</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <div className="mt-6 flex justify-end">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-900 transition hover:border-blue-600 hover:bg-blue-600 hover:text-white"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }

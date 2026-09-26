@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Card, StatusBadge, SmallButton, Skeleton } from "../../components/app/appui";
+import { useAlertScope } from "../../lib/alertScope";
+import {
+  Card,
+  StatusBadge,
+  SmallButton,
+  Skeleton,
+} from "../../components/app/appui";
 import Icon from "../../components/Icon";
 import { SeverityChip, severityTone } from "../../components/app/AlertSeverity";
 import Investigation from "../../components/app/Investigation";
@@ -27,7 +33,9 @@ const Meta = ({ label, children }) => (
 );
 
 export default function IncidentDetail() {
-  const { pid, id } = useParams();
+  const { id } = useParams();
+  const scope = useAlertScope();
+  const pid = scope.projectId;
   const navigate = useNavigate();
   const { pushToast } = useStore();
 
@@ -61,7 +69,9 @@ export default function IncidentDetail() {
 
   useEffect(() => {
     load();
-    getIncidentCapabilities().then((c) => setCanInvestigate(!!c?.investigation));
+    getIncidentCapabilities().then((c) =>
+      setCanInvestigate(!!c?.investigation),
+    );
   }, [load]);
 
   const act = async (fn, ok) => {
@@ -103,12 +113,20 @@ export default function IncidentDetail() {
         result = await getInvestigation(id, pid);
       }
       if (result?.status === "failed") {
-        setInvestigationError(result.message || "The investigation did not complete");
+        setInvestigationError(
+          result.message || "The investigation did not complete",
+        );
       } else if (result?.status === "complete") {
-        setData((d) => ({ ...d, investigation: result.investigation, engine: result.engine }));
+        setData((d) => ({
+          ...d,
+          investigation: result.investigation,
+          engine: result.engine,
+        }));
       }
     } catch (e) {
-      setInvestigationError(e.message || "The investigation could not be completed");
+      setInvestigationError(
+        e.message || "The investigation could not be completed",
+      );
     } finally {
       setInvestigating(false);
     }
@@ -121,7 +139,7 @@ export default function IncidentDetail() {
     <div className="animate-fade-up">
       <div className="mb-5">
         <button
-          onClick={() => navigate(`/app/projects/${pid}/incidents`)}
+          onClick={() => navigate(scope.link("/incidents"))}
           className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 transition hover:text-slate-900"
         >
           <Icon name="chevron" className="h-4 w-4 rotate-180" />
@@ -217,6 +235,26 @@ export default function IncidentDetail() {
               The alerts correlated into this incident. Grouping is the alert
               plane's decision, not the console's.
             </p>
+            {/*
+              Said, not hidden. "Alerts" above comes from the alert plane and
+              counts every alert in the group, including ones this workspace may
+              not see — so a count of 4 over a list of 1 reads as a bug in
+              AutoOps unless the page explains itself.
+
+              It says HOW MANY and never whose. That an incident is shared is
+              something the reader has to know to make sense of the page; who
+              they are sharing it with is not theirs to learn here.
+            */}
+            {data.withheldEvidence > 0 && (
+              <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+                {data.withheldEvidence} alert
+                {data.withheldEvidence === 1 ? " is" : "s are"} part of this
+                incident but not visible in this workspace, so
+                {data.withheldEvidence === 1 ? " it is" : " they are"} not
+                listed below and an investigation cannot run. Ask your provider
+                to review how these alerts were grouped.
+              </p>
+            )}
             <div className="mt-4 divide-y divide-slate-100">
               {(data.evidence || []).length === 0 && (
                 <p className="py-3 text-sm text-slate-400">

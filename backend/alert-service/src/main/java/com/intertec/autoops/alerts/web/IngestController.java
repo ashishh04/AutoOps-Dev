@@ -1,6 +1,8 @@
 package com.intertec.autoops.alerts.web;
 
 import com.intertec.autoops.alerts.client.KeepApiClient;
+import com.intertec.autoops.alerts.client.PluginClient;
+import com.intertec.autoops.alerts.service.ProviderCatalogService;
 import com.intertec.autoops.alerts.config.AlertProperties;
 import com.intertec.autoops.alerts.exception.AlertException;
 import com.intertec.autoops.alerts.service.IngestToken;
@@ -35,10 +37,31 @@ public class IngestController {
 
     private final KeepApiClient engine;
     private final AlertProperties properties;
+    private final PluginClient notifications;
+    private final ProviderCatalogService providers;
 
-    public IngestController(KeepApiClient engine, AlertProperties properties) {
+    public IngestController(KeepApiClient engine, AlertProperties properties,
+                            PluginClient notifications, ProviderCatalogService providers) {
         this.engine = engine;
         this.properties = properties;
+        this.notifications = notifications;
+        this.providers = providers;
+    }
+
+    /**
+     * Which connected source this token's scope owns for that type.
+     *
+     * <p>Never fails the ingest. This is a best-effort improvement to how
+     * recognisable the alert is; a monitoring tool that gets an error back will
+     * retry, and duplicate alerts are a worse outcome than one alert that is
+     * harder to attribute.
+     */
+    private String connectionFor(IngestToken.Scope scope, String providerType) {
+        try {
+            return providers.connectedIdFor(scope.tenantId(), scope.projectId(), providerType);
+        } catch (RuntimeException ex) {
+            return null;
+        }
     }
 
     @PostMapping("/api/alerts/ingest/{providerType}")
@@ -74,7 +97,26 @@ public class IngestController {
         labels.put(TenantScope.PROJECT_LABEL, scope.projectId());
         alert.put("labels", labels);
 
-        engine.ingest(providerType, alert);
+        // TWO ways to recognise this alert later, because one of them is not
+        // reliable. The labels above are stamped at the top level of the
+        // payload; the engine then runs this source type's own parser, and a
+        // parser that rebuilds the alert from the vendor's shape — Alertmanager
+        // nests its labels under alerts[].labels — throws the stamp away. The
+        // alert then belongs to nobody, and the customer who just sent it does
+        // not see it in their own feed.
+        //
+        // Naming the connection it arrived through is the second route, and the
+        // one that survives any parser. See TenantScope.arrivedThroughOwnedSource.
+        engine.ingest(providerType, alert, connectionFor(scope, providerType));
+
+        // AFTER the engine has it, and only then. A notification for an alert
+        // that failed to land would send someone to a feed it is not in — and
+        // the ingest call throwing is how this door tells the monitoring tool
+        // to retry, which must not be pre-empted by a Slack message.
+        //
+        // The SIGNED scope, not the payload, decides whose channels this
+        // reaches. The body is a third party's.
+        notifications.publish(scope, alert);
         return Map.of("accepted", true);
     }
 }

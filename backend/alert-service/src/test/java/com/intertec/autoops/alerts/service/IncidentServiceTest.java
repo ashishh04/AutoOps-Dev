@@ -314,4 +314,162 @@ class IncidentServiceTest {
         assertThat(result.message()).contains("AWS incident analyst");
         verify(holmes, never()).investigate(anyString(), any(), any());
     }
+
+    // ---- cross-tenant correlation ---------------------------------------
+    //
+    // The hole these close. An incident carries NO tenant label — it is a
+    // correlation over alerts — so visibility is INFERRED: yours if at least
+    // one of its alerts is. That inference is all-or-nothing, and it used to
+    // let the whole group through once any single alert qualified.
+    //
+    // Whether correlation can actually cross a tenant boundary depends on rules
+    // configured in the engine, which AutoOps only reads. So this is not a
+    // theoretical shape: it is one operator's rule away, and nothing in this
+    // codebase can prevent it being written.
+
+    /** An alert with a fingerprint of its own, so the two are distinguishable. */
+    private static Map<String, Object> evidenceAlert(String fingerprint, String tenant) {
+        Map<String, Object> a = new HashMap<>();
+        a.put("fingerprint", fingerprint);
+        a.put("name", fingerprint + "-alarm");
+        a.put("description", "secret detail belonging to " + tenant);
+        if (tenant != null) {
+            a.put("labels", Map.of(TenantScope.TENANT_LABEL, tenant));
+        }
+        return a;
+    }
+
+    private void mixedIncident() {
+        // Visible to acme, because one of its alerts is acme's.
+        when(alerts.alerts()).thenReturn(List.of(alert("acme", "inc-1")));
+        when(incidents.incident("inc-1")).thenReturn(incident("inc-1"));
+        when(incidents.rules()).thenReturn(List.of());
+        when(incidents.incidentAlerts(anyString(), anyInt())).thenReturn(List.of(
+                evidenceAlert("mine", "acme"),
+                evidenceAlert("theirs", "globex")));
+    }
+
+    @Test
+    @DisplayName("the evidence under a shared incident shows only THIS tenant's alerts")
+    void evidenceIsFiltered() {
+        mixedIncident();
+
+        var detail = service.get(TenantScope.of(jwt("acme", "CLIENT"), null), "inc-1");
+
+        assertThat(detail.evidence()).extracting("fingerprint").containsExactly("mine");
+    }
+
+    @Test
+    @DisplayName("and says how many were withheld, because the engine's count includes them")
+    void withheldIsReportedNotHidden() {
+        // incident.alertCount comes from the engine and counts them all. A page
+        // reading "4 alerts" above a list of one is indistinguishable from a
+        // bug in AutoOps, which is worse than saying what happened.
+        mixedIncident();
+
+        var detail = service.get(TenantScope.of(jwt("acme", "CLIENT"), null), "inc-1");
+
+        assertThat(detail.withheldEvidence()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("nothing is withheld from an incident that is wholly one tenant's")
+    void nothingWithheldWhenIsolated() {
+        when(alerts.alerts()).thenReturn(List.of(alert("acme", "inc-1")));
+        when(incidents.incident("inc-1")).thenReturn(incident("inc-1"));
+        when(incidents.rules()).thenReturn(List.of());
+        when(incidents.incidentAlerts(anyString(), anyInt())).thenReturn(List.of(
+                evidenceAlert("mine", "acme"),
+                evidenceAlert("also-mine", "acme")));
+
+        var detail = service.get(TenantScope.of(jwt("acme", "CLIENT"), null), "inc-1");
+
+        assertThat(detail.evidence()).hasSize(2);
+        assertThat(detail.withheldEvidence()).isZero();
+    }
+
+    @Test
+    @DisplayName("a PROVIDER still sees the whole group — it operates the platform")
+    void providerSeesEverything() {
+        mixedIncident();
+
+        var detail = service.get(TenantScope.of(jwt("intertec", "PROVIDER"), null), "inc-1");
+
+        assertThat(detail.evidence()).hasSize(2);
+        assertThat(detail.withheldEvidence()).isZero();
+    }
+
+    @Test
+    @DisplayName("investigating a mixed incident is REFUSED, not quietly redacted")
+    void mixedIncidentIsNotInvestigated() {
+        // Investigating is not reading. Dropping the foreign alerts from the
+        // prompt would have the engine reason about a production incident from
+        // deliberately incomplete evidence and present the conclusion with no
+        // hint that half the signal was removed — and somebody acts on that.
+        mixedIncident();
+        when(holmes.isEnabled()).thenReturn(true);
+
+        assertThatThrownBy(() -> service.investigate(
+                TenantScope.of(jwt("acme", "CLIENT"), null), "inc-1", null, null, "bearer", 7L))
+                .isInstanceOf(AlertException.class)
+                .hasMessageContaining("cannot see");
+
+        verify(holmes, never()).investigate(anyString(), any(), any());
+    }
+
+    @Test
+    @DisplayName("the refusal does not name the other workspace")
+    void refusalDoesNotDisclose() {
+        // The caller is entitled to know the answer would be unsound. They are
+        // not entitled to know whose data made it so.
+        mixedIncident();
+        when(holmes.isEnabled()).thenReturn(true);
+
+        assertThatThrownBy(() -> service.investigate(
+                TenantScope.of(jwt("acme", "CLIENT"), null), "inc-1", null, null, "bearer", 7L))
+                .hasMessageNotContainingAny("globex", "theirs");
+    }
+
+    @Test
+    @DisplayName("an isolated incident still investigates normally")
+    void isolatedIncidentStillInvestigates() {
+        // The refusal must be reachable ONLY by the mixed case. A guard that
+        // blocks everything is indistinguishable from a broken feature.
+        when(alerts.alerts()).thenReturn(List.of(alert("acme", "inc-1")));
+        when(incidents.incident("inc-1")).thenReturn(incident("inc-1"));
+        when(incidents.rules()).thenReturn(List.of());
+        when(incidents.incidentAlerts(anyString(), anyInt()))
+                .thenReturn(List.of(evidenceAlert("mine", "acme")));
+        when(holmes.isEnabled()).thenReturn(true);
+        when(holmes.investigate(anyString(), any(), any()))
+                .thenReturn(Map.of("analysis", "Disk filled."));
+
+        var status = service.investigate(
+                TenantScope.of(jwt("acme", "CLIENT"), null), "inc-1", null, null, "bearer", 7L);
+
+        assertThat(status).isNotNull();
+        verify(holmes).investigate(anyString(), any(), any());
+    }
+
+    @Test
+    @DisplayName("an UNLABELLED alert is withheld too, unless its source is this tenant's")
+    void unlabelledEvidenceIsWithheldWithoutProvenance() {
+        // The route that matters most in practice. A Datadog alert has never
+        // heard of AutoOps and carries no label at all, so the only thing that
+        // makes it yours is the source it arrived through. Admitting it because
+        // it was merely grouped with one of yours is the whole bug.
+        when(alerts.alerts()).thenReturn(List.of(alert("acme", "inc-1")));
+        when(incidents.incident("inc-1")).thenReturn(incident("inc-1"));
+        when(incidents.rules()).thenReturn(List.of());
+        Map<String, Object> unlabelled = evidenceAlert("from-datadog", null);
+        unlabelled.put("providerId", "prov-globex");
+        when(incidents.incidentAlerts(anyString(), anyInt())).thenReturn(List.of(
+                evidenceAlert("mine", "acme"), unlabelled));
+        when(providers.connectedIds("acme", null)).thenReturn(java.util.Set.of("prov-acme"));
+
+        var detail = service.get(TenantScope.of(jwt("acme", "CLIENT"), null), "inc-1");
+
+        assertThat(detail.evidence()).extracting("fingerprint").containsExactly("mine");
+        assertThat(detail.withheldEvidence()).isEqualTo(1);
+    }
 }

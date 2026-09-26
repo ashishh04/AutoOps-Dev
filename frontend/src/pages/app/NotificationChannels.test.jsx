@@ -18,6 +18,7 @@ const apiMock = {
   listInstallations: vi.fn(),
   listNotificationRules: vi.fn(),
   pluginEvents: vi.fn(),
+  pluginTargetTypes: vi.fn(),
   pluginDeliveries: vi.fn(),
   installPlugin: vi.fn(),
   updateInstallation: vi.fn(),
@@ -100,6 +101,7 @@ beforeEach(() => {
       description: "A step failed.",
       severity: "CRITICAL",
       terminal: true,
+      appliesTo: ["JOB", "WORKFLOW", "AGENT"],
     },
     {
       value: "MISSED",
@@ -107,7 +109,30 @@ beforeEach(() => {
       description: "A scheduled window passed and nothing ran.",
       severity: "CRITICAL",
       terminal: false,
+      appliesTo: ["JOB", "WORKFLOW"],
     },
+    {
+      value: "AWAITING_APPROVAL",
+      label: "Waiting for approval",
+      description: "An agent has stopped and is waiting for someone.",
+      severity: "WARNING",
+      terminal: false,
+      appliesTo: ["AGENT"],
+    },
+    {
+      value: "TRIGGERED",
+      label: "Firing",
+      description: "An alert arrived from your monitoring and is firing.",
+      severity: "CRITICAL",
+      terminal: false,
+      appliesTo: ["ALERT"],
+    },
+  ]);
+  apiMock.pluginTargetTypes.mockResolvedValue([
+    { value: "JOB", label: "Jobs", identifiesTargets: true },
+    { value: "WORKFLOW", label: "Workflows", identifiesTargets: true },
+    { value: "AGENT", label: "AI Agents", identifiesTargets: true },
+    { value: "ALERT", label: "Alerts", identifiesTargets: false },
   ]);
   apiMock.pluginDeliveries.mockResolvedValue([]);
   apiMock.listProjects.mockResolvedValue([{ id: 3, name: "Platform" }]);
@@ -290,6 +315,10 @@ describe("notification channels", () => {
         targetId: null,
         projectId: null,
         events: ["FAILED", "MISSED"],
+        // Null, not absent and not "". Every rule written before the severity
+        // floor existed means "no opinion", and that has to keep being what
+        // sending nothing says.
+        minSeverity: null,
       }),
     );
   });
@@ -312,5 +341,114 @@ describe("notification channels", () => {
 
     expect(await screen.findByText("plugin-service unreachable")).toBeInTheDocument();
     expect(screen.queryByText("Slack")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Jobs and workflows were the only things a rule could watch. Agents and
+ * alerts are now two more, and they are NOT interchangeable with them — an
+ * alert never stalls, a job never parks on an approval. A form that offered
+ * every event for every target would let someone save a rule that can never
+ * fire, which reads as a broken channel rather than as a rule they mis-wrote.
+ */
+describe("watching agents and alerts", () => {
+  const openRuleForm = async () => {
+    apiMock.listInstallations.mockResolvedValue([channel()]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Ops alerts")).toBeTruthy());
+    fireEvent.click(screen.getByText("New rule"));
+    await waitFor(() => expect(screen.getByText("New notification rule")).toBeTruthy());
+  };
+
+  const watchSelect = () => screen.getByLabelText("Watch", { selector: "select" });
+
+  it("offers every target type the server publishes", async () => {
+    await openRuleForm();
+    const options = [...screen.getAllByRole("option")].map((o) => o.textContent);
+    expect(options).toContain("AI Agents");
+    expect(options).toContain("Alerts");
+  });
+
+  it("only offers events that can happen to the chosen target", async () => {
+    await openRuleForm();
+    // A job can be missed; an alert cannot — nothing was scheduled.
+    expect(screen.getByText("Did not run")).toBeTruthy();
+
+    fireEvent.change(watchSelect(), { target: { value: "ALERT" } });
+
+    await waitFor(() => expect(screen.queryByText("Did not run")).toBeNull());
+    expect(screen.getByText("Firing")).toBeTruthy();
+  });
+
+  it("offers the approval event for agents and nothing else", async () => {
+    await openRuleForm();
+    expect(screen.queryByText("Waiting for approval")).toBeNull();
+
+    fireEvent.change(watchSelect(), { target: { value: "AGENT" } });
+
+    await waitFor(() => expect(screen.getByText("Waiting for approval")).toBeTruthy());
+    // An agent is not scheduled, so there is no window for it to miss.
+    expect(screen.queryByText("Did not run")).toBeNull();
+  });
+
+  it("does not offer to watch ONE alert, because there is no id to watch", async () => {
+    await openRuleForm();
+    expect(screen.getByText("One job")).toBeTruthy();
+
+    fireEvent.change(watchSelect(), { target: { value: "ALERT" } });
+
+    await waitFor(() => expect(screen.queryByText("One alert")).toBeNull());
+    expect(screen.getByText("Whole workspace")).toBeTruthy();
+  });
+
+  /**
+   * A workspace takes hundreds of alerts a day, most of them informational. A
+   * rule that cannot say "critical only" is a rule nobody can afford to leave
+   * on, and a channel people mute is worse than one they never had.
+   */
+  it("offers a severity floor for alerts and not for runs", async () => {
+    await openRuleForm();
+    expect(screen.queryByText("Only if at least")).toBeNull();
+
+    fireEvent.change(watchSelect(), { target: { value: "ALERT" } });
+
+    await waitFor(() => expect(screen.getByText("Only if at least")).toBeTruthy());
+  });
+
+  it("sends the target type, the events and the floor that were chosen", async () => {
+    apiMock.createNotificationRule.mockResolvedValue({});
+    await openRuleForm();
+
+    fireEvent.change(watchSelect(), { target: { value: "ALERT" } });
+    await waitFor(() => expect(screen.getByText("Firing")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Only if at least", { selector: "select" }), {
+      target: { value: "CRITICAL" },
+    });
+    fireEvent.click(screen.getByText("Create rule"));
+
+    await waitFor(() =>
+      expect(apiMock.createNotificationRule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targetType: "ALERT",
+          events: ["TRIGGERED"],
+          minSeverity: "CRITICAL",
+          targetId: null,
+        }),
+      ),
+    );
+  });
+
+  it("sends no floor at all when none was chosen", async () => {
+    // Null, not "". Every rule written before this control existed means "no
+    // opinion", and an empty string would be a severity nobody picked.
+    apiMock.createNotificationRule.mockResolvedValue({});
+    await openRuleForm();
+    fireEvent.click(screen.getByText("Create rule"));
+
+    await waitFor(() =>
+      expect(apiMock.createNotificationRule).toHaveBeenCalledWith(
+        expect.objectContaining({ minSeverity: null }),
+      ),
+    );
   });
 });

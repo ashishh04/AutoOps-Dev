@@ -88,7 +88,7 @@ spring:
           - id: alert-service
             uri: ${ALERT_SERVICE_URL:http://localhost:8091}
             predicates:
-              - Path=/api/alerts/**,/api/incidents/**,/api/alert-providers,/api/alert-providers/**,/api/provider/fleet/alerts,/api/provider/fleet/incidents
+              - Path=/api/alerts/**,/api/incidents/**,/api/alert-providers,/api/alert-providers/**,/api/correlation-rules,/api/correlation-rules/**,/api/provider/fleet/alerts,/api/provider/fleet/incidents
           # Projects, jobs, cloud integrations, runs (subscription-gated mutations).
           - id: core-service
             uri: ${CORE_SERVICE_URL:http://localhost:8083}

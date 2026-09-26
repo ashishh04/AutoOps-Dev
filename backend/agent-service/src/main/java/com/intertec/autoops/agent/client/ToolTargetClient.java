@@ -47,6 +47,56 @@ public class ToolTargetClient {
         this.workflowToken = properties.getWorkflow().getInternalToken();
     }
 
+
+    /**
+     * What an agent's tools need that this project cannot reach.
+     *
+     * <p>Asked BEFORE a run is queued. An agent whose tools want an AWS account
+     * in a project with no AWS account used to start, resolve a model, spend
+     * tokens on a plan and fail at the first tool call — minutes and money
+     * after the click, with a message about a credential. None of that was
+     * unknowable: the tools declare what they need and the project either holds
+     * it or does not.
+     *
+     * <p>Answered by core-service because cloud connections are its, and the
+     * visibility rule (a connection with no project is global; one with a
+     * project serves only that project) is enforced beside the code that binds
+     * them. A copy here would drift and become its own bug.
+     *
+     * <p><b>Fails OPEN.</b> If core-service cannot answer, the run proceeds.
+     * This is a courtesy that saves a doomed run, not a permission check — and
+     * turning another service's outage into "your agent is misconfigured" would
+     * send whoever reads it somewhere useless.
+     */
+    public List<String> missingConnections(String tenantId, Long projectId,
+                                           List<Long> workflowIds) {
+        if (projectId == null || workflowIds == null || workflowIds.isEmpty()) {
+            return List.of();
+        }
+        try {
+            Map<String, Object> body = coreRestClient.get()
+                    .uri(builder -> builder.path("/internal/agent/readiness")
+                            .queryParam("tenantId", tenantId)
+                            .queryParam("projectId", projectId)
+                            .queryParam("workflowIds", workflowIds)
+                            .build())
+                    .header("X-Internal-Token", coreToken)
+                    .retrieve()
+                    .body(new ParameterizedTypeReference<Map<String, Object>>() {
+                    });
+            Object missing = body == null ? null : body.get("missing");
+            if (!(missing instanceof List<?> list)) {
+                return List.of();
+            }
+            return list.stream().filter(java.util.Objects::nonNull)
+                    .map(String::valueOf).toList();
+        } catch (Exception ex) {
+            log.debug("Could not pre-flight agent tools for project {}: {}",
+                    projectId, ex.getMessage());
+            return List.of();
+        }
+    }
+
     /** A job or workflow as the allow-list needs to see it. */
     public record Target(Long id, Long projectId, String name) {
     }

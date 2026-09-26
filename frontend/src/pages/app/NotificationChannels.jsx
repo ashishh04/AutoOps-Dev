@@ -1,5 +1,6 @@
 /**
- * Notification channels — where this workspace's job and workflow events go.
+ * Notification channels — where this workspace's job, workflow, agent and
+ * alert events go.
  *
  * Replaces the hard-coded three-option connector form in Settings. Everything
  * here is generated from what plugin-service reports: the install form comes
@@ -40,18 +41,59 @@ const SEVERITY_TONE = {
 /** Parked outranks everything: the platform stopped trying, whatever else is true. */
 function channelStatus(channel) {
   if (channel.parked)
-    return { label: "Paused after failures", tone: "bg-red-50 text-red-700", verified: false };
+    return {
+      label: "Paused after failures",
+      tone: "bg-red-50 text-red-700",
+      verified: false,
+    };
   if (!channel.enabled)
-    return { label: "Disabled", tone: "bg-slate-100 text-slate-500", verified: false };
+    return {
+      label: "Disabled",
+      tone: "bg-slate-100 text-slate-500",
+      verified: false,
+    };
   if (channel.lastTestOk === true)
-    return { label: "Verified", tone: "bg-emerald-50 text-emerald-700", verified: true };
+    return {
+      label: "Verified",
+      tone: "bg-emerald-50 text-emerald-700",
+      verified: true,
+    };
   if (channel.lastTestOk === false)
-    return { label: "Last test failed", tone: "bg-red-50 text-red-700", verified: false };
-  return { label: "Not tested", tone: "bg-amber-50 text-amber-700", verified: false };
+    return {
+      label: "Last test failed",
+      tone: "bg-red-50 text-red-700",
+      verified: false,
+    };
+  return {
+    label: "Not tested",
+    tone: "bg-amber-50 text-amber-700",
+    verified: false,
+  };
 }
 
+/**
+ * Display names for what a rule can watch.
+ *
+ * A fallback, not a catalog — the server publishes the authoritative list at
+ * /plugins/target-types, and this only has to render a type that already came
+ * back on a saved rule. An unrecognised one falls through to its raw name
+ * rather than being hidden, so a type added server-side shows up looking
+ * unpolished instead of silently vanishing from the rules table.
+ */
+const TARGET_PLURAL = {
+  JOB: "Jobs",
+  WORKFLOW: "Workflows",
+  AGENT: "AI Agents",
+  ALERT: "Alerts",
+};
+
+const singular = (type) =>
+  ({ JOB: "job", WORKFLOW: "workflow", AGENT: "agent", ALERT: "alert" })[
+    type
+  ] || String(type).toLowerCase();
+
 const scopeLabel = (rule) => {
-  if (rule.scope === "TARGET") return `One ${rule.targetType.toLowerCase()}`;
+  if (rule.scope === "TARGET") return `One ${singular(rule.targetType)}`;
   if (rule.scope === "PROJECT") return "One project";
   return "Whole workspace";
 };
@@ -64,6 +106,13 @@ export default function NotificationChannels() {
   const [channels, setChannels] = useState(null);
   const [rules, setRules] = useState(null);
   const [events, setEvents] = useState([]);
+  // What a rule can watch, read from the server. Falls back to the two that
+  // have always existed rather than to nothing — an empty list would leave the
+  // "Watch" dropdown blank and the form unusable over a catalog hiccup.
+  const [targetTypes, setTargetTypes] = useState([
+    { value: "JOB", label: "Jobs", identifiesTargets: true },
+    { value: "WORKFLOW", label: "Workflows", identifiesTargets: true },
+  ]);
   const [deliveries, setDeliveries] = useState([]);
   const [loadError, setLoadError] = useState(null);
 
@@ -82,13 +131,15 @@ export default function NotificationChannels() {
       api.listNotificationRules(),
       api.pluginEvents().catch(() => []),
       api.pluginDeliveries(50).catch(() => []),
+      api.pluginTargetTypes().catch(() => null),
     ])
-      .then(([c, i, r, e, d]) => {
+      .then(([c, i, r, e, d, t]) => {
         setCatalog(c);
         setChannels(i);
         setRules(r);
         setEvents(e);
         setDeliveries(d);
+        if (Array.isArray(t) && t.length > 0) setTargetTypes(t);
       })
       .catch((err) => {
         // Honest failure: an empty page and the reason, never invented rows.
@@ -138,7 +189,7 @@ export default function NotificationChannels() {
     <div className="animate-fade-up">
       <PageHeader
         title="Notifications"
-        subtitle="Send job and workflow events to Slack, Teams, Outlook, Gmail, GitHub or any webhook. Credentials are stored encrypted and never shown again."
+        subtitle="Send job, workflow, agent and alert events to Slack, Teams, Outlook, Gmail, GitHub or any webhook. Credentials are stored encrypted and never shown again."
         actions={
           <SmallButton icon="refresh" onClick={load}>
             Refresh
@@ -163,8 +214,8 @@ export default function NotificationChannels() {
         <Card className="mb-6 text-center">
           <p className="text-sm font-medium text-slate-700">No channels yet</p>
           <p className="mx-auto mt-1 max-w-md text-sm text-slate-500">
-            Add one below, then create a rule telling AutoOps which events to send
-            through it. Nothing is sent until both exist.
+            Add one below, then create a rule telling AutoOps which events to
+            send through it. Nothing is sent until both exist.
           </p>
         </Card>
       ) : (
@@ -196,7 +247,9 @@ export default function NotificationChannels() {
                       <p className="truncate text-sm font-semibold text-slate-900">
                         {channel.displayName}
                       </p>
-                      <p className="mt-0.5 text-xs text-slate-500">{channel.pluginName}</p>
+                      <p className="mt-0.5 text-xs text-slate-500">
+                        {channel.pluginName}
+                      </p>
                     </div>
                   </div>
                   <span
@@ -208,8 +261,9 @@ export default function NotificationChannels() {
 
                 {channel.parked && (
                   <p className="mt-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
-                    Delivery stopped after {channel.consecutiveFailures} failures in a
-                    row. Fix the settings and run Test to switch it back on.
+                    Delivery stopped after {channel.consecutiveFailures}{" "}
+                    failures in a row. Fix the settings and run Test to switch
+                    it back on.
                   </p>
                 )}
                 {channel.lastTestDetail && !channel.parked && (
@@ -265,7 +319,9 @@ export default function NotificationChannels() {
       )}
 
       {/* ---------------- catalog ---------------- */}
-      <h2 className="mb-2 text-sm font-semibold text-slate-900">Add a channel</h2>
+      <h2 className="mb-2 text-sm font-semibold text-slate-900">
+        Add a channel
+      </h2>
       {/* auto-rows-fr + h-full: one summary runs to two lines and another to
           one, which used to leave the Add buttons on different lines within
           the same row. Now every tile is the same height and they line up. */}
@@ -342,14 +398,19 @@ export default function NotificationChannels() {
             </thead>
             <tbody>
               {rules.map((rule) => (
-                <tr key={rule.id} className="border-b border-slate-50 last:border-0">
+                <tr
+                  key={rule.id}
+                  className="border-b border-slate-50 last:border-0"
+                >
                   <td className="px-4 py-2.5 font-medium text-slate-900">
                     {rule.installationName}
                   </td>
                   <td className="px-4 py-2.5 text-slate-600">
-                    {rule.targetType === "JOB" ? "Jobs" : "Workflows"}
+                    {TARGET_PLURAL[rule.targetType] || rule.targetType}
                   </td>
-                  <td className="px-4 py-2.5 text-slate-600">{scopeLabel(rule)}</td>
+                  <td className="px-4 py-2.5 text-slate-600">
+                    {scopeLabel(rule)}
+                  </td>
                   <td className="px-4 py-2.5">
                     <div className="flex flex-wrap gap-1">
                       {rule.events.map((e) => (
@@ -380,7 +441,9 @@ export default function NotificationChannels() {
       )}
 
       {/* ---------------- delivery log ---------------- */}
-      <h2 className="mb-2 text-sm font-semibold text-slate-900">Recent deliveries</h2>
+      <h2 className="mb-2 text-sm font-semibold text-slate-900">
+        Recent deliveries
+      </h2>
       {deliveries.length === 0 ? (
         <Card className="text-center">
           <p className="text-sm text-slate-500">
@@ -402,17 +465,23 @@ export default function NotificationChannels() {
             </thead>
             <tbody>
               {deliveries.map((row) => (
-                <tr key={row.id} className="border-b border-slate-50 last:border-0">
+                <tr
+                  key={row.id}
+                  className="border-b border-slate-50 last:border-0"
+                >
                   <td className="whitespace-nowrap px-4 py-2.5 text-xs text-slate-500">
                     {new Date(row.attemptedAt).toLocaleString()}
                   </td>
                   <td className="px-4 py-2.5 text-slate-600">
-                    {channelsById[row.installationId]?.displayName || row.pluginKey}
+                    {channelsById[row.installationId]?.displayName ||
+                      row.pluginKey}
                   </td>
                   <td className="px-4 py-2.5 text-slate-600">
                     {row.connectionTest ? "Connection test" : row.event}
                   </td>
-                  <td className="px-4 py-2.5 text-slate-600">{row.targetName || "—"}</td>
+                  <td className="px-4 py-2.5 text-slate-600">
+                    {row.targetName || "—"}
+                  </td>
                   <td className="px-4 py-2.5">
                     <span
                       className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
@@ -459,6 +528,7 @@ export default function NotificationChannels() {
         <RuleModal
           channels={channels || []}
           events={events}
+          targetTypes={targetTypes}
           onClose={() => setAddingRule(false)}
           onSaved={() => {
             setAddingRule(false);
@@ -558,7 +628,10 @@ function ChannelModal({ plugin, existing, onClose, onSaved }) {
           displayName: displayName.trim(),
           config,
         });
-        pushToast(`${plugin.displayName} added — run Test to verify it`, "green");
+        pushToast(
+          `${plugin.displayName} added — run Test to verify it`,
+          "green",
+        );
       }
       onSaved();
     } catch (err) {
@@ -576,7 +649,9 @@ function ChannelModal({ plugin, existing, onClose, onSaved }) {
       >
         <div className="border-b border-slate-100 bg-gradient-to-br from-slate-50 to-white px-4 py-3.5">
           <h3 className="text-[15px] font-semibold leading-snug text-slate-900">
-            {existing ? `Edit ${existing.displayName}` : `Add ${plugin.displayName}`}
+            {existing
+              ? `Edit ${existing.displayName}`
+              : `Add ${plugin.displayName}`}
           </h3>
           <p className="mt-0.5 text-xs text-slate-500">
             Stored encrypted by AutoOps and never returned to this browser.
@@ -597,7 +672,8 @@ function ChannelModal({ plugin, existing, onClose, onSaved }) {
               className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-300"
             />
             <p className="mt-1 text-[11px] text-slate-400">
-              How this channel appears in rules. Must be unique in this workspace.
+              How this channel appears in rules. Must be unique in this
+              workspace.
             </p>
           </div>
 
@@ -621,7 +697,9 @@ function ChannelModal({ plugin, existing, onClose, onSaved }) {
                 }
                 className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-300 focus:ring-2 focus:ring-slate-300"
               />
-              {f.help && <p className="mt-1 text-[11px] text-slate-400">{f.help}</p>}
+              {f.help && (
+                <p className="mt-1 text-[11px] text-slate-400">{f.help}</p>
+              )}
             </div>
           ))}
 
@@ -651,7 +729,12 @@ function ChannelModal({ plugin, existing, onClose, onSaved }) {
           >
             Cancel
           </button>
-          <SmallButton icon="check" variant="primary" type="submit" disabled={busy}>
+          <SmallButton
+            icon="check"
+            variant="primary"
+            type="submit"
+            disabled={busy}
+          >
             {busy ? "Saving…" : "Save"}
           </SmallButton>
         </div>
@@ -660,32 +743,78 @@ function ChannelModal({ plugin, existing, onClose, onSaved }) {
   );
 }
 
-/** Builds a rule: which events, for what, through which channel. */
-function RuleModal({ channels, events, onClose, onSaved }) {
+/** Which console resource backs each kind of target. */
+const TARGET_RESOURCE = { JOB: "jobs", WORKFLOW: "workflows", AGENT: "agents" };
+
+/**
+ * Builds a rule: which events, for what, through which channel.
+ *
+ * <h2>Not every event fits every target</h2>
+ * An alert never stalls and a job never parks on an approval. The server says
+ * which is which — each event carries an `appliesTo` list — and this form only
+ * offers the ones that can actually happen. Offering the rest would let someone
+ * save a rule that never fires, which reads as a broken channel rather than as
+ * a rule they mis-wrote. The server refuses them too; this is so nobody has to
+ * find out that way.
+ */
+function RuleModal({ channels, events, targetTypes, onClose, onSaved }) {
   const { pushToast } = useStore();
   const [installationId, setInstallationId] = useState(channels[0]?.id ?? "");
   const [targetType, setTargetType] = useState("JOB");
   const [scope, setScope] = useState("ALL");
   const [projectId, setProjectId] = useState("");
   const [targetId, setTargetId] = useState("");
-  const [selected, setSelected] = useState(() => new Set(["FAILED", "MISSED"]));
+  const [selected, setSelected] = useState(() => new Set());
+  const [minSeverity, setMinSeverity] = useState("");
   const [projects, setProjects] = useState([]);
   const [targets, setTargets] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
+  const applicable = events.filter(
+    (e) => !e.appliesTo || e.appliesTo.includes(targetType),
+  );
+  const identifiesTargets =
+    targetTypes.find((t) => t.value === targetType)?.identifiesTargets ?? true;
+
   useEffect(() => {
-    api.listProjects().then(setProjects).catch(() => setProjects([]));
+    api
+      .listProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
   }, []);
+
+  // Reset the selection whenever the kind of target changes, rather than
+  // filtering it. Keeping the overlap would silently drop the events someone
+  // had already ticked and leave a rule narrower than the one they thought
+  // they were writing.
+  useEffect(() => {
+    const defaults = events
+      .filter((e) => !e.appliesTo || e.appliesTo.includes(targetType))
+      // What a person almost always wants to hear about: something broke, or
+      // something is blocked waiting on them.
+      .filter((e) =>
+        ["FAILED", "MISSED", "AWAITING_APPROVAL", "TRIGGERED"].includes(
+          e.value,
+        ),
+      )
+      .map((e) => e.value);
+    setSelected(new Set(defaults));
+    // An alert rule cannot name one alert — there is no id to name.
+    if (!identifiesTargets) {
+      setScope((current) => (current === "TARGET" ? "ALL" : current));
+      setTargetId("");
+    }
+  }, [targetType, events, identifiesTargets]);
 
   // Targets depend on both the project and which kind we are watching.
   useEffect(() => {
-    if (scope !== "TARGET" || !projectId) {
+    if (scope !== "TARGET" || !projectId || !TARGET_RESOURCE[targetType]) {
       setTargets([]);
       return;
     }
     api
-      .list(targetType === "JOB" ? "jobs" : "workflows", projectId)
+      .list(TARGET_RESOURCE[targetType], projectId)
       .then((rows) => setTargets(rows || []))
       .catch(() => setTargets([]));
     setTargetId("");
@@ -712,6 +841,10 @@ function RuleModal({ channels, events, onClose, onSaved }) {
         targetId: scope === "TARGET" && targetId ? Number(targetId) : null,
         projectId: scope === "PROJECT" && projectId ? Number(projectId) : null,
         events: [...selected],
+        // Empty means no floor at all, which is what every rule written before
+        // this control existed means. Sent as null rather than "" so it cannot
+        // be read as a severity nobody chose.
+        minSeverity: minSeverity || null,
       });
       pushToast("Rule created", "green");
       onSaved();
@@ -736,7 +869,8 @@ function RuleModal({ channels, events, onClose, onSaved }) {
             New notification rule
           </h3>
           <p className="mt-0.5 text-xs text-slate-500">
-            Choose what to watch and which events are worth interrupting someone for.
+            Choose what to watch and which events are worth interrupting someone
+            for.
           </p>
         </div>
 
@@ -765,11 +899,15 @@ function RuleModal({ channels, events, onClose, onSaved }) {
               </label>
               <select
                 value={targetType}
+                aria-label="Watch"
                 onChange={(e) => setTargetType(e.target.value)}
                 className={selectClass}
               >
-                <option value="JOB">Jobs</option>
-                <option value="WORKFLOW">Workflows</option>
+                {targetTypes.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
               </select>
             </div>
             <div>
@@ -778,23 +916,28 @@ function RuleModal({ channels, events, onClose, onSaved }) {
               </label>
               <select
                 value={scope}
+                aria-label="Scope"
                 onChange={(e) => setScope(e.target.value)}
                 className={selectClass}
               >
                 <option value="ALL">Whole workspace</option>
                 <option value="PROJECT">One project</option>
-                <option value="TARGET">
-                  One {targetType === "JOB" ? "job" : "workflow"}
-                </option>
+                {/* Absent for alerts. An alert is identified by a fingerprint
+                    its monitoring tool chose, not by an id a customer could
+                    pick from a list, so there is nothing to offer here. */}
+                {identifiesTargets && (
+                  <option value="TARGET">One {singular(targetType)}</option>
+                )}
               </select>
             </div>
           </div>
 
           {scope === "ALL" && (
             <p className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
-              Covers everything in the workspace, including
-              {targetType === "JOB" ? " jobs" : " workflows"} added later. A rule
-              written per-target never covers the one someone adds next week.
+              Covers everything in the workspace, including{" "}
+              {(TARGET_PLURAL[targetType] || targetType).toLowerCase()} added
+              later. A rule written per-target never covers the one someone adds
+              next week.
             </p>
           )}
 
@@ -821,7 +964,7 @@ function RuleModal({ channels, events, onClose, onSaved }) {
           {scope === "TARGET" && (
             <div>
               <label className="mb-1.5 block text-xs font-semibold text-slate-700">
-                {targetType === "JOB" ? "Job" : "Workflow"}
+                {singular(targetType).replace(/^./, (c) => c.toUpperCase())}
               </label>
               <select
                 value={targetId}
@@ -840,7 +983,8 @@ function RuleModal({ channels, events, onClose, onSaved }) {
               </select>
               {projectId && targets.length === 0 && (
                 <p className="mt-1 text-[11px] text-slate-400">
-                  This project has no {targetType === "JOB" ? "jobs" : "workflows"} yet.
+                  This project has no{" "}
+                  {(TARGET_PLURAL[targetType] || targetType).toLowerCase()} yet.
                 </p>
               )}
             </div>
@@ -851,7 +995,7 @@ function RuleModal({ channels, events, onClose, onSaved }) {
               Notify me when
             </label>
             <div className="space-y-1.5">
-              {events.map((event) => (
+              {applicable.map((event) => (
                 <label
                   key={event.value}
                   className="flex cursor-pointer items-start gap-2.5 rounded-lg px-2 py-1.5 transition hover:bg-slate-50"
@@ -881,13 +1025,43 @@ function RuleModal({ channels, events, onClose, onSaved }) {
                   </span>
                 </label>
               ))}
-              {events.length === 0 && (
+              {applicable.length === 0 && (
                 <p className="text-xs text-slate-400">
-                  The event list could not be loaded.
+                  {events.length === 0
+                    ? "The event list could not be loaded."
+                    : `Nothing to watch for ${(TARGET_PLURAL[targetType] || targetType).toLowerCase()} yet.`}
                 </p>
               )}
             </div>
           </div>
+
+          {/*
+            Matters for alerts and barely at all for runs. A workspace takes
+            hundreds of alerts a day, most of them informational — a rule that
+            cannot say "critical only" is a rule nobody can afford to leave on,
+            and a channel people mute is worse than one they never had.
+          */}
+          {targetType === "ALERT" && (
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-slate-700">
+                Only if at least
+              </label>
+              <select
+                value={minSeverity}
+                aria-label="Only if at least"
+                onChange={(e) => setMinSeverity(e.target.value)}
+                className={selectClass}
+              >
+                <option value="">Any severity</option>
+                <option value="WARNING">Warning</option>
+                <option value="CRITICAL">Critical</option>
+              </select>
+              <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                Uses the severity your monitoring tool set on the alert, not
+                AutoOps&rsquo;s opinion of it.
+              </p>
+            </div>
+          )}
 
           {error && (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700">

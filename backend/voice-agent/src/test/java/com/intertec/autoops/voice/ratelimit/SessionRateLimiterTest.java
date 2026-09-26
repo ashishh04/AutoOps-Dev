@@ -107,6 +107,59 @@ class SessionRateLimiterTest {
     }
 
     @Test
+    void aSessionThatWasNeverMintedDoesNotCostTheVisitorASlot() {
+        // The limiter protects a bill. An upstream failure bought nothing, so
+        // charging the visitor for it turns one outage at the vendor into a
+        // full-window lockout — and the visitor is told they have "started
+        // several conversations already" having started none.
+        TickingClock clock = new TickingClock();
+        SessionRateLimiter limiter = new SessionRateLimiter(
+                props(2, 100, Duration.ofMinutes(10)), clock);
+
+        for (int i = 0; i < 20; i++) {
+            assertThat(limiter.tryAcquire("1.2.3.4")).isEqualTo(SessionRateLimiter.Decision.ALLOWED);
+            limiter.release("1.2.3.4");
+        }
+
+        // Two real sessions are still available afterwards, and the second is
+        // still the last one.
+        assertThat(limiter.tryAcquire("1.2.3.4")).isEqualTo(SessionRateLimiter.Decision.ALLOWED);
+        assertThat(limiter.tryAcquire("1.2.3.4")).isEqualTo(SessionRateLimiter.Decision.ALLOWED);
+        assertThat(limiter.tryAcquire("1.2.3.4")).isEqualTo(SessionRateLimiter.Decision.PER_IP_EXCEEDED);
+    }
+
+    @Test
+    void releasingGivesTheGlobalBudgetBackToo() {
+        // Otherwise a vendor outage drains the deployment-wide cap and takes
+        // every other visitor down with it, long after the vendor recovers.
+        TickingClock clock = new TickingClock();
+        SessionRateLimiter limiter = new SessionRateLimiter(
+                props(50, 2, Duration.ofMinutes(10)), clock);
+
+        assertThat(limiter.tryAcquire("1.1.1.1")).isEqualTo(SessionRateLimiter.Decision.ALLOWED);
+        limiter.release("1.1.1.1");
+        assertThat(limiter.tryAcquire("2.2.2.2")).isEqualTo(SessionRateLimiter.Decision.ALLOWED);
+        assertThat(limiter.tryAcquire("3.3.3.3")).isEqualTo(SessionRateLimiter.Decision.ALLOWED);
+        assertThat(limiter.tryAcquire("4.4.4.4")).isEqualTo(SessionRateLimiter.Decision.GLOBAL_EXCEEDED);
+    }
+
+    @Test
+    void releasingASlotThatWasNeverTakenChangesNothing() {
+        // A refused attempt never acquired anything, so the release that
+        // follows a failure must not hand back somebody else's slot.
+        TickingClock clock = new TickingClock();
+        SessionRateLimiter limiter = new SessionRateLimiter(
+                props(1, 10, Duration.ofMinutes(10)), clock);
+
+        limiter.release("9.9.9.9");
+        assertThat(limiter.trackedIpCount()).isZero();
+
+        assertThat(limiter.tryAcquire("1.2.3.4")).isEqualTo(SessionRateLimiter.Decision.ALLOWED);
+        limiter.release("9.9.9.9");
+        assertThat(limiter.tryAcquire("1.2.3.4")).isEqualTo(SessionRateLimiter.Decision.PER_IP_EXCEEDED);
+    }
+
+    @Test
     void idleIpsAreForgottenSoTheMapTracksLiveTrafficOnly() {
         TickingClock clock = new TickingClock();
         SessionRateLimiter limiter = new SessionRateLimiter(

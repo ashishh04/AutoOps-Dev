@@ -205,6 +205,21 @@ public class ExecutionEngine {
     }
 
     /** "2m 59s" reads better in a run log than "179322". */
+    /**
+     * Steps this definition declares that nothing can reach.
+     *
+     * <p>An unparseable definition yields none: the runtime is entitled to
+     * reject it with its own message, and failing the run here with "cannot be
+     * walked" would misattribute a JSON problem as a graph problem.
+     */
+    private List<String> unreachableNodes(String definition) {
+        try {
+            return WorkflowGraph.unreachable(objectMapper.readTree(definition));
+        } catch (Exception ex) {
+            return List.of();
+        }
+    }
+
     private static String humanDuration(long millis) {
         long seconds = Math.max(0, millis / 1000);
         return seconds < 60 ? seconds + "s" : (seconds / 60) + "m " + (seconds % 60) + "s";
@@ -236,6 +251,24 @@ public class ExecutionEngine {
         try {
             java.util.concurrent.atomic.AtomicInteger done =
                     new java.util.concurrent.atomic.AtomicInteger();
+
+            // Checked HERE as well as at save, because a definition can reach
+            // the runtime without ever passing through the save path —
+            // publish.py writes catalog rows directly, which is exactly how the
+            // unrunnable ones got in. A run that cannot do anything should say
+            // so in the one place a customer is looking.
+            List<String> orphans = unreachableNodes(run.getDefinition());
+            if (!orphans.isEmpty()) {
+                String why = WorkflowGraph.describe(orphans);
+                log.error("Workflow run {} refused: {}", run.getId(), why);
+                logText.append(why).append('\n');
+                Run broken = runRepository.findById(run.getId()).orElse(run);
+                broken.setLog(logText.toString());
+                broken.setStepTotal(1);
+                broken.setStepCompleted(0);
+                finish(broken, RunStatus.FAILED, why, null);
+                return;
+            }
 
             com.intertec.autoops.core.client.WorkflowRuntimeClient.RunOutcome outcome =
                     nativeWorkflows.run(run.getId(), run.getTenantId(), run.getProjectId(),

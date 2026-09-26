@@ -6,7 +6,7 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 /**
- * One RestClient, pointed at the engine, with BOUNDED connect/read timeouts.
+ * One RestClient per peer, each with BOUNDED connect/read timeouts.
  *
  * <p>The engine runs on the compose network and is normally fast, which is
  * exactly why the timeouts matter: a console page that lists alerts is on the
@@ -15,6 +15,18 @@ import org.springframework.web.client.RestClient;
  */
 @Configuration
 public class RestClientConfig {
+
+    @Bean("pluginRestClient")
+    public RestClient pluginRestClient(AlertProperties properties) {
+        AlertProperties.Plugin plugin = properties.getPlugin();
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout((int) plugin.getConnectTimeout().toMillis());
+        factory.setReadTimeout((int) plugin.getReadTimeout().toMillis());
+        return RestClient.builder()
+                .baseUrl(plugin.getUrl())
+                .requestFactory(factory)
+                .build();
+    }
 
     @Bean("engineRestClient")
     public RestClient engineRestClient(AlertProperties properties) {

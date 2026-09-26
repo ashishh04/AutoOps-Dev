@@ -44,6 +44,11 @@ public class RestClientConfig {
      * executor, never on a request thread, so a long call here holds nothing
      * a user is waiting on.
      */
+    @Bean("pluginRestClient")
+    public RestClient pluginRestClient(AgentProperties properties) {
+        return peerClient(properties.getPlugin());
+    }
+
     @Bean("runtimeRestClient")
     public RestClient runtimeRestClient(AgentProperties properties) {
         return peerClient(properties.getRuntime());

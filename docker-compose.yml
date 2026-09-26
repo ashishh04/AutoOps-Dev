@@ -20,6 +20,7 @@ name: autoops
 
 services:
   mysql:
+    restart: unless-stopped
     image: mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
@@ -39,10 +40,12 @@ services:
       retries: 12
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
     # Internal only — no host port, so the dev redis on 6379 never clashes.
 
   auth-service:
+    restart: unless-stopped
     build: ./backend/auth-service
     environment:
       # dev profile: auto-generated JWT keys; OTP codes are ALSO logged to the
@@ -53,11 +56,14 @@ services:
       REDIS_HOST: redis
       # Entitlement checks (/authorize, enterprise-SSO config gating).
       SUBSCRIPTION_SERVICE_URL: http://subscription-service:8082
-      # Real email: put SENDGRID_API_KEY + SENDGRID_FROM_EMAIL in ./.env
+      # Real email: put RESEND_API_KEY + RESEND_FROM_EMAIL in ./.env.
+      # RESEND_FROM_EMAIL must be on a domain verified in Resend — the default
+      # shared sender only delivers to the Resend account owner.
       # (see .env.example). Without a template id, plain-text emails are sent.
-      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-REPLACE_ME}
-      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-no-reply@autoops.io}
-      SENDGRID_OTP_TEMPLATE_ID: ${SENDGRID_OTP_TEMPLATE_ID:-REPLACE_ME}
+      RESEND_API_KEY: ${RESEND_API_KEY:-REPLACE_ME}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-onboarding@resend.dev}
+      RESEND_FROM_NAME: ${RESEND_FROM_NAME:-AutoOps}
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
       # Social login (Google/Microsoft) — put credentials in ./.env; a blank
       # client-id leaves that provider disabled (503 sso_not_configured).
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -78,6 +84,7 @@ services:
       start_period: 30s
 
   subscription-service:
+    restart: unless-stopped
     build: ./backend/subscription-service
     environment:
       DB_HOST: mysql
@@ -112,6 +119,7 @@ services:
   # the shared internal token. ssh steps need a key volume mounted at
   # /home/autoops/.ssh, which this stack does not provide yet.
   job-service:
+    restart: unless-stopped
     build: ./backend/job-service
     # A timed-out step's grandchildren are reparented to PID 1. The JVM does
     # not reap processes it never spawned, so without an init they pile up as
@@ -126,6 +134,7 @@ services:
       start_period: 20s
 
   core-service:
+    restart: unless-stopped
     build: ./backend/core-service
     environment:
       DB_HOST: mysql
@@ -204,6 +213,7 @@ services:
   # ready — the two call each other, so a hard ordering would deadlock;
   # each degrades gracefully while the other comes up.
   workflow-service:
+    restart: unless-stopped
     build: ./backend/workflow-service
     environment:
       DB_HOST: mysql
@@ -235,6 +245,7 @@ services:
   # against core-service (jobs) and workflow-service (workflows) on every
   # write, and its audit events are posted back to core-service.
   agent-service:
+    restart: unless-stopped
     build: ./backend/agent-service
     environment:
       DB_HOST: mysql
@@ -255,8 +266,17 @@ services:
       AGENT_TOOL_TIMEOUT: ${AGENT_TOOL_TIMEOUT:-25m}
       # Must outlast the slowest single reduce, not the slowest tool.
       AGENT_RUNTIME_READ_TIMEOUT: ${AGENT_RUNTIME_READ_TIMEOUT:-15m}
+      # Where agent run lifecycle events go, including the one only agents
+      # have: AWAITING_APPROVAL, which reports work that has STOPPED and stays
+      # stopped until a human acts. Best-effort - plugin-service being down
+      # costs a notification and never a run.
+      PLUGIN_SERVICE_URL: http://plugin-service:8088
+      PLUGIN_INTERNAL_TOKEN: ${PLUGIN_INTERNAL_TOKEN:-dev-internal-token}
+      PLUGIN_NOTIFICATIONS_ENABLED: ${PLUGIN_NOTIFICATIONS_ENABLED:-true}
     ports:
-      - "8087:8087"
+      # Host side configurable — see agent-runtime for why. Inside the compose
+      # network this is always agent-service:8087.
+      - "${AGENT_SERVICE_PORT:-8087}:8087"
     depends_on:
       mysql:
         condition: service_healthy
@@ -286,6 +306,7 @@ services:
   # network, holding the shared secret. The published port is for local
   # debugging (GET /health reports which agents and prompt version are loaded).
   agent-runtime:
+    restart: unless-stopped
     build: ./backend/agent-runtime
     environment:
       # The ONE call agent-runtime makes back into the control plane: a
@@ -317,7 +338,13 @@ services:
       AGENT_RUNTIME_LANGSMITH_HIDE_IO: ${LANGSMITH_HIDE_IO:-false}
     ports:
       # 8089, not 8088 — plugin-service already publishes 8088.
-      - "8089:8089"
+      #
+      # The HOST side is configurable because it is only for reaching the
+      # runtime directly from this machine; everything inside the compose
+      # network talks to agent-runtime:8089 regardless. A developer with
+      # another project already bound to 8089 can set AGENT_RUNTIME_PORT in
+      # .env rather than having the whole stack refuse to start.
+      - "${AGENT_RUNTIME_PORT:-8089}:8089"
 
   # Notification channels (autoops_plugin). Owns the Slack/Teams/Outlook/
   # Gmail/GitHub/webhook plugins, each tenant's encrypted credentials for
@@ -327,6 +354,7 @@ services:
   # never hold up a run. Deliberately NOT a depends_on of core-service:
   # notification delivery is best-effort and must not gate the run engine.
   plugin-service:
+    restart: unless-stopped
     build: ./backend/plugin-service
     environment:
       DB_HOST: mysql
@@ -367,6 +395,7 @@ services:
   # fine for a single-instance engine and is NOT fine for two — see the service
   # README's Known gaps before scaling this to a second replica.
   rundeck:
+    restart: unless-stopped
     build: ./backend/rundeck-runtime
     environment:
       # The URL Rundeck believes it is reachable at. It only ever serves
@@ -400,6 +429,7 @@ services:
   # core-service over X-Internal-Token. That is what keeps the engine's URL and
   # admin token in one service no tenant-facing request can reach.
   rundeck-service:
+    restart: unless-stopped
     build: ./backend/rundeck-service
     environment:
       DB_HOST: mysql
@@ -448,6 +478,7 @@ services:
   # ELEVENLABS_API_KEY + ELEVENLABS_AGENT_ID in ./.env it reports itself
   # disabled and the landing page simply omits the talk button.
   voice-agent:
+    restart: unless-stopped
     build: ./backend/voice-agent
     environment:
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-REPLACE_ME}
@@ -462,6 +493,7 @@ services:
       start_period: 20s
 
   api-gateway:
+    restart: unless-stopped
     build: ./backend/api-gateway
     environment:
       AUTH_SERVICE_URL: http://auth-service:8081
@@ -524,7 +556,12 @@ services:
       start_period: 20s
 
   frontend:
-    build: ./frontend
+    restart: unless-stopped
+    # Root context: the build needs frontend/ AND docs/ (the console renders the
+    # repository's own markdown). .dockerignore keeps the context small.
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     ports:
       - "5173:80"
     depends_on:

@@ -60,6 +60,7 @@ public class InternalAgentDispatchController {
     private final ApprovalService approvalService;
     private final ApprovalSettingsService approvalSettings;
     private final WorkflowClient workflowClient;
+    private final com.intertec.autoops.core.service.AgentReadinessService readiness;
     private final ObjectMapper objectMapper;
 
     public InternalAgentDispatchController(JobRepository jobRepository,
@@ -68,6 +69,7 @@ public class InternalAgentDispatchController {
                                            ApprovalService approvalService,
                                            ApprovalSettingsService approvalSettings,
                                            WorkflowClient workflowClient,
+                                           com.intertec.autoops.core.service.AgentReadinessService readiness,
                                            ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.runRepository = runRepository;
@@ -75,6 +77,7 @@ public class InternalAgentDispatchController {
         this.approvalService = approvalService;
         this.approvalSettings = approvalSettings;
         this.workflowClient = workflowClient;
+        this.readiness = readiness;
         this.objectMapper = objectMapper;
     }
 
@@ -128,6 +131,36 @@ public class InternalAgentDispatchController {
      * <p>An empty list is a real answer: a workflow that declares no inputs
      * genuinely has no form.
      */
+    /**
+     * Whether an agent's tools can reach anything, asked before the run starts.
+     *
+     * <p>Lives here rather than in agent-service because cloud connections are
+     * core-service's, and the visibility rule — global serves every project, a
+     * scoped one serves only its own — is enforced next to the code that binds
+     * them. A copy in another service would drift from the resolver and become
+     * its own bug: too strict blocks runs that would work, too loose waves
+     * through the failure this exists to catch.
+     *
+     * <p>{@code workflowIds} rather than an agent id: core-service has no
+     * agents table, and passing the ids keeps this a pure question about tools
+     * rather than a second place that has to know what an agent is.
+     */
+    @GetMapping("/internal/agent/readiness")
+    public Map<String, Object> readiness(@RequestParam String tenantId,
+                                         @RequestParam(required = false) Long projectId,
+                                         @RequestParam(required = false) List<Long> workflowIds) {
+        com.intertec.autoops.core.service.AgentReadinessService.Readiness result =
+                readiness.check(tenantId, projectId,
+                        workflowIds == null ? List.of() : workflowIds);
+        Map<String, Object> out = new HashMap<>();
+        out.put("ready", result.ready());
+        out.put("missing", result.missing());
+        // Named, never folded into "ready". A tool nobody could read is not a
+        // tool that needs nothing.
+        out.put("unverifiable", result.unverifiable());
+        return out;
+    }
+
     @GetMapping("/internal/agent/workflow-inputs")
     public Map<String, Object> workflowInputs(@RequestParam String tenantId,
                                               @RequestParam Long workflowId) {

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { PageHeader, Card, SmallButton, Chip } from "../../components/app/appui";
 import Icon from "../../components/Icon";
@@ -6,6 +6,7 @@ import { api } from "../../lib/api";
 import WorkflowCanvas from "./WorkflowCanvas";
 import { importWorkflow } from "./workflowImport";
 import { useStore } from "../../store/store";
+import { chatModels } from "../../components/app/ModelPicker";
 
 /**
  * The workflow designer, built against the runtime's own models.
@@ -181,17 +182,40 @@ function parseDraft(definition, schema) {
 }
 
 /**
+ * A worked example per structured field, shown as the placeholder.
+ *
+ * The box used to say "JSON", which tells an author the encoding and nothing
+ * about the shape — so the only way to learn what a prompt looks like was to
+ * save, be refused, and read the runtime's type error.
+ */
+const STRUCTURED_HINT = {
+  prompt:
+    '[{"role": "system", "text": "You write concise reports."},\n' +
+    ' {"role": "user", "text": "Summarise: {{#start.notes#}}"}]',
+  args: '{"Region": "{{#start.region#}}"}',
+  outputs: '[{"variable": "report", "from": "{{#writer.text#}}"}]',
+};
+
+/**
  * One node's fields, rendered from the runtime's published schema.
  *
  * Shared by the list view and the canvas inspector, and that sharing is the
  * point: two implementations of the same form would drift, and the one that
  * drifted would be the one silently writing the wrong wire name.
  */
-function NodeFields({ node, type, onChange }) {
+function NodeFields({ node, type, onChange, models }) {
   return (
     <div className="grid gap-2 sm:grid-cols-2">
-      {(type?.fields || []).map((field) => (
-        <div key={field.name}>
+      {(type?.fields || []).map((field) => {
+        // A field's choices come from the runtime's schema where it has them
+        // (`job.target` is JOB | WORKFLOW), and from THIS deployment's own
+        // model connections where it does not. The runtime cannot publish the
+        // second: it has no idea which vendors a workspace has connected.
+        const options = field.name === "model" ? models : field.options;
+        const isNumber = field.type === "number";
+        const isStructured = field.type === "map" || field.type === "list";
+        return (
+        <div key={field.name} className={isStructured ? "sm:col-span-2" : undefined}>
           <label className={labelCls} htmlFor={`${node.id}-${field.name}`}>
             {field.name}
             {/* The asterisk comes from the runtime's own validator, probed
@@ -199,34 +223,73 @@ function NodeFields({ node, type, onChange }) {
                 will refuse. */}
             {field.required && <span className="ml-0.5 text-rose-500">*</span>}
           </label>
-          {field.options ? (
+          {options ? (
             <select
               id={`${node.id}-${field.name}`}
               className={inputCls}
               value={node.values[field.name] ?? ""}
               onChange={(e) => onChange(node.id, field.name, e.target.value)}
             >
-              <option value="">—</option>
-              {field.options.map((o) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
+              {/* For `model`, blank is not "unset" — it is the deliberate and
+                  correct choice for a catalog workflow, so it says so. */}
+              <option value="">
+                {field.name === "model" ? "Each workspace's own default" : "—"}
+              </option>
+              {options.map((o) =>
+                typeof o === "string" ? (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ) : (
+                  <optgroup key={o.group} label={o.group}>
+                    {o.items.map((m) => (
+                      <option key={`${o.group}:${m}`} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </optgroup>
+                ),
+              )}
             </select>
+          ) : isStructured ? (
+            <textarea
+              id={`${node.id}-${field.name}`}
+              rows={field.name === "prompt" ? 4 : 2}
+              className={`${inputCls} font-mono text-[12px]`}
+              value={node.values[field.name] ?? ""}
+              // A shape, not the word "JSON". Being told the format without
+              // being shown it is the same as not being told.
+              placeholder={STRUCTURED_HINT[field.name] || '{ }'}
+              onChange={(e) => onChange(node.id, field.name, e.target.value)}
+            />
           ) : (
             <input
               id={`${node.id}-${field.name}`}
               className={inputCls}
+              // A number field gets a number control: spinners, and a keypad on
+              // a phone. `number_or_reference` deliberately does NOT — it also
+              // accepts {{#start.Days#}}, which a number input would refuse to
+              // let anyone type.
+              type={isNumber ? "number" : "text"}
+              step={field.name === "temperature" ? "0.1" : undefined}
+              min={field.name === "temperature" ? "0" : undefined}
+              max={field.name === "temperature" ? "2" : undefined}
               value={node.values[field.name] ?? ""}
-              placeholder={field.type === "map" || field.type === "list" ? "JSON" : ""}
               onChange={(e) => onChange(node.id, field.name, e.target.value)}
             />
+          )}
+          {field.name === "model" && !node.values[field.name] && (
+            <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+              Portable: each workspace runs this on the model it has chosen.
+              Naming one here pins every workspace to it.
+            </p>
           )}
           {field.why && (
             <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{field.why}</p>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -266,6 +329,41 @@ export default function ProviderWorkflowDesigner() {
   // the bottom of the screen — so the canvas appeared not to open at all.
   const stepsRef = useRef(null);
   const [selected, setSelected] = useState(null);
+  /**
+   * Chat models this deployment can actually reach, grouped by connection.
+   *
+   * The runtime's schema cannot supply these — it has no idea which vendors a
+   * workspace has connected — so the palette for `model` is assembled here and
+   * merged in. Failure is quiet and the field falls back to free text: an
+   * unreachable model list is a reason to type a name, not a reason to be
+   * unable to author a workflow at all.
+   */
+  const [models, setModels] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listWorkspaceModels()
+      .then((rows) => {
+        if (cancelled) return;
+        const groups = (rows || [])
+          .map((row) => ({
+            group: row.providerName || row.kind,
+            // CHAT only, through the SAME helper the agent model picker uses.
+            // A second copy of "can this model hold a conversation" would
+            // drift the moment a vendor named something unexpectedly — and
+            // that helper had already drifted once, reading a lowercase key
+            // the server never sends.
+            items: chatModels(row),
+          }))
+          .filter((g) => g.items.length > 0);
+        setModels(groups.length ? groups : null);
+      })
+      .catch(() => setModels(null));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -360,14 +458,23 @@ export default function ProviderWorkflowDesigner() {
     }));
 
   /** A line drawn on the canvas is an edge, and nothing else. */
-  const connect = (source, target) =>
+  /**
+   * @param branch which arm of a condition this line leaves from. It comes
+   *   from the handle that was dragged, so on a condition node the branch is
+   *   chosen by WHERE you start the drag rather than typed in afterwards.
+   */
+  const connect = (source, target, branch = "") =>
     setDraft((d) =>
       // Dragging the same connection twice is easy and means nothing new. The
       // runtime would accept the duplicate and walk it once, so the only thing
-      // a second copy changes is what the canvas draws.
+      // a second copy changes is what the canvas draws. Two lines from the SAME
+      // source to the same target on DIFFERENT branches are not duplicates
+      // though — that is a condition whose arms happen to rejoin.
       source && target &&
-      !d.edges.some((e) => e.source === source && e.target === target)
-        ? { ...d, edges: [...d.edges, { source, target, branch: "" }] }
+      !d.edges.some(
+        (e) => e.source === source && e.target === target && (e.branch || "") === branch,
+      )
+        ? { ...d, edges: [...d.edges, { source, target, branch }] }
         : d,
     );
 
@@ -799,7 +906,12 @@ export default function ProviderWorkflowDesigner() {
                 <p className="mb-2 text-[11px] leading-relaxed text-slate-500">
                   {type?.summary}
                 </p>
-                <NodeFields node={node} type={type} onChange={setNodeValue} />
+                <NodeFields
+                  node={node}
+                  type={type}
+                  onChange={setNodeValue}
+                  models={models}
+                />
                 {type?.contributes?.length > 0 && (
                   // Offered so an author writes references that resolve. One
                   // that does not fails at run time with a message nobody reads
@@ -828,6 +940,13 @@ export default function ProviderWorkflowDesigner() {
               onMove={moveNode}
               onConnect={connect}
               onDisconnect={disconnect}
+              onDelete={(nodeId) => {
+                removeNode(nodeId);
+                // The panel below the canvas edits the selected node. Leaving
+                // the id selected after deleting it opens that panel on a node
+                // that no longer exists.
+                setSelected((cur) => (cur === nodeId ? null : cur));
+              }}
             />
             {selectedNode ? (
               <div className="border-t border-slate-100 p-4">
@@ -854,6 +973,7 @@ export default function ProviderWorkflowDesigner() {
                   node={selectedNode}
                   type={schema.node_types.find((t) => t.type === selectedNode.type)}
                   onChange={setNodeValue}
+                  models={models}
                 />
               </div>
             ) : (

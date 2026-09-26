@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   PageHeader,
   Table,
@@ -13,15 +13,24 @@ import {
   SeverityChip,
   severityRank,
 } from "../../components/app/AlertSeverity";
+import ProjectScopePicker from "../../components/app/ProjectScopePicker";
 import { listAlerts } from "../../lib/alerts";
+import { useAlertScope } from "../../lib/alertScope";
 
 /**
- * What is currently wrong, from every monitoring source wired into this
- * project. Read-only: acknowledging and resolving live in the tool that raised
- * the alert, and the platform holds a read-only credential so that stays true.
+ * What is currently wrong, across every monitoring source this workspace has
+ * connected. Read-only: acknowledging and resolving live in the tool that
+ * raised the alert, and the platform holds a read-only credential so that
+ * stays true.
+ *
+ * Workspace-level, with the project as an optional filter. An alert arrives
+ * from a monitoring tool that has never heard of an AutoOps project, so
+ * requiring one before anything could be read meant connecting the same Datadog
+ * account in every project and then guessing which one to look in.
  */
 export default function Alerts() {
-  const { pid } = useParams();
+  const scope = useAlertScope();
+  const pid = scope.projectId;
   const navigate = useNavigate();
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -65,7 +74,7 @@ export default function Alerts() {
             <SmallButton
               icon="plus"
               variant="primary"
-              onClick={() => navigate(`/app/projects/${pid}/alerts/sources`)}
+              onClick={() => navigate(scope.link("/alerts/sources"))}
             >
               Connect a source
             </SmallButton>
@@ -103,6 +112,7 @@ export default function Alerts() {
             </option>
           ))}
         </select>
+        <ProjectScopePicker value={pid} onChange={scope.setProject} />
       </Card>
 
       <Table
@@ -111,9 +121,7 @@ export default function Alerts() {
         onRetry={load}
         rows={alerts}
         onRowClick={(r) =>
-          navigate(
-            `/app/projects/${pid}/alerts/${encodeURIComponent(r.fingerprint)}`,
-          )
+          navigate(scope.link(`/alerts/${encodeURIComponent(r.fingerprint)}`))
         }
         /*
          * Deliberately NOT "You're all clear" or a green tick. An empty alerts
@@ -122,7 +130,11 @@ export default function Alerts() {
          * someone their estate is healthy on the strength of silence is the one
          * lie this screen must never tell.
          */
-        empty="No alerts are matched to this project. Connect a monitoring source and its alerts will appear here."
+        empty={
+          pid
+            ? "No alerts are matched to this project. Clear the project filter to see the whole workspace."
+            : "No alerts have arrived yet. Connect a monitoring source and its alerts will appear here."
+        }
         columns={[
           {
             key: "severity",

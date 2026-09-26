@@ -83,6 +83,51 @@ public class IncidentEngineClient {
         }
     }
 
+    /**
+     * Creates a correlation rule and returns it as the engine stored it.
+     *
+     * <p>Uses the WRITE key: the platform's read key is provisioned without
+     * {@code write:rules} and answers 403, which is the right shape — rules are
+     * the one thing in this engine that decides what becomes an incident, so
+     * the credential that can create one is not the credential every page read
+     * travels on.
+     *
+     * <p>The body's {@code celQuery} is what the engine actually matches on;
+     * {@code sqlQuery} is required by the API and recorded, not evaluated.
+     * Verified against a running engine — a rule whose SQL was {@code 1 = 0}
+     * still correlated.
+     */
+    public Map<String, Object> createRule(Map<String, Object> rule) {
+        try {
+            return client.post().uri("/rules")
+                    .header("x-api-key", write())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(rule)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (rq, rs) -> {
+                        throw translate(rs.getStatusCode());
+                    })
+                    .body(MAP);
+        } catch (ResourceAccessException ex) {
+            throw unreachable(ex);
+        }
+    }
+
+    /** Removes one. Ownership is proved by the caller BEFORE this is reached. */
+    public void deleteRule(String id) {
+        try {
+            client.delete().uri("/rules/" + enc(id))
+                    .header("x-api-key", write())
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (rq, rs) -> {
+                        throw translate(rs.getStatusCode());
+                    })
+                    .toBodilessEntity();
+        } catch (ResourceAccessException ex) {
+            throw unreachable(ex);
+        }
+    }
+
     public void setStatus(String id, String status, String comment) {
         post(write(), "/incidents/" + enc(id) + "/status",
                 comment == null || comment.isBlank()

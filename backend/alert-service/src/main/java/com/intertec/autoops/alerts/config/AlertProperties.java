@@ -27,6 +27,75 @@ public class AlertProperties {
     private String issuer = "autoops-auth-service";
     private Engine engine = new Engine();
     private Ingest ingest = new Ingest();
+    private Plugin plugin = new Plugin();
+
+    /**
+     * plugin-service, where an arriving alert is reported so a tenant's own
+     * channels can carry it.
+     *
+     * <p>Tight timeouts on purpose. This sits on the public ingest path, which
+     * answers a customer's monitoring tool; a source that gets a slow or failed
+     * response will retry, and duplicate alerts are a worse outcome than a
+     * missed Slack message.
+     */
+    public static class Plugin {
+
+        private String url = "http://localhost:8088";
+        private String internalToken = "dev-internal-token";
+        private Duration connectTimeout = Duration.ofSeconds(1);
+        private Duration readTimeout = Duration.ofSeconds(2);
+
+        /** Kill switch: false stops alert-service emitting events at all. */
+        private boolean enabled = true;
+
+        public String getUrl() {
+            return url;
+        }
+
+        public void setUrl(String url) {
+            this.url = url;
+        }
+
+        public String getInternalToken() {
+            return internalToken;
+        }
+
+        public void setInternalToken(String internalToken) {
+            this.internalToken = internalToken;
+        }
+
+        public Duration getConnectTimeout() {
+            return connectTimeout;
+        }
+
+        public void setConnectTimeout(Duration connectTimeout) {
+            this.connectTimeout = connectTimeout;
+        }
+
+        public Duration getReadTimeout() {
+            return readTimeout;
+        }
+
+        public void setReadTimeout(Duration readTimeout) {
+            this.readTimeout = readTimeout;
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+    }
+
+    public Plugin getPlugin() {
+        return plugin;
+    }
+
+    public void setPlugin(Plugin plugin) {
+        this.plugin = plugin;
+    }
 
     /** The public door a customer's monitoring tool posts alerts through. */
     public static class Ingest {

@@ -170,6 +170,13 @@ services:
       # the console has to be reflected in AWS_RCA_AGENT_NAME.
       AGENT_SERVICE_URL: ${AGENT_SERVICE_URL:-http://agent-service:8087}
       AWS_RCA_AGENT_NAME: ${AWS_RCA_AGENT_NAME:-AWS Incident RCA Analyst}
+      # Alerts arriving through the PUBLIC ingest door are reported here, so a
+      # customer's Slack or Teams can carry them under the same rules as their
+      # jobs. Not every alert: ones the engine pulls for itself never pass
+      # through AutoOps code as they arrive, so there is nothing to report.
+      PLUGIN_SERVICE_URL: ${PLUGIN_SERVICE_URL:-http://plugin-service:8088}
+      PLUGIN_INTERNAL_TOKEN: ${PLUGIN_INTERNAL_TOKEN:-dev-internal-token}
+      PLUGIN_NOTIFICATIONS_ENABLED: ${PLUGIN_NOTIFICATIONS_ENABLED:-true}
     # No host port, deliberately. Everything reaches it through the gateway;
     # publishing one would be the surface docker-compose.aws.yml exists to
     # remove. Curl it with `docker exec` if you need to.

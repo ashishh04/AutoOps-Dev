@@ -46,7 +46,7 @@ public class SecurityConfig {
             "/api/auth/enterprise-sso/resolve",
             "/api/auth/enterprise-sso/initiate",
             "/api/auth/enterprise-sso/callback",
-            "/api/auth/webhooks/sendgrid",
+            "/api/auth/webhooks/resend",
             "/api/auth/dev/**",
             "/swagger-ui.html",
             "/swagger-ui/**",

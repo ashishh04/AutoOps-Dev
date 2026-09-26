@@ -52,7 +52,7 @@ autoops:
       # true  => /otp/generate 404s on an unregistered email so the visitor is
       #          told to sign up (accepts user enumeration, rate-limit bounded)
       # false => neutral 200 either way (anti-enumeration)
-      # Email spend is unaffected: unknown addresses never reach SendGrid.
+      # Email spend is unaffected: unknown addresses never reach Resend.
       reveal-unknown-account: true
     rate-limit:
       otp-requests: 5
@@ -75,11 +75,18 @@ autoops:
       microsoft:
         client-id: ${MS_CLIENT_ID:}
         client-secret: ${MS_CLIENT_SECRET:}
-    sendgrid:
-      api-key: ${SENDGRID_API_KEY:REPLACE_ME}
-      otp-template-id: ${SENDGRID_OTP_TEMPLATE_ID:REPLACE_ME}
-      from-email: ${SENDGRID_FROM_EMAIL:no-reply@autoops.io}
-      webhook-public-key: ${SENDGRID_WEBHOOK_PUBLIC_KEY:}
+    app-base-url: ${APP_BASE_URL:http://localhost:5173}
+    resend:
+      api-key: ${RESEND_API_KEY:REPLACE_ME}
+      # Resend only sends from a domain you have verified. The default is
+      # Resend's shared test sender, which delivers ONLY to the address that
+      # owns the Resend account — enough to prove the integration, useless for
+      # real sign-ups. ProdSafetyGuard refuses to boot prod while it is set.
+      from-email: ${RESEND_FROM_EMAIL:onboarding@resend.dev}
+      from-name: ${RESEND_FROM_NAME:AutoOps}
+      # Svix signing secret (whsec_...). Empty disables the delivery webhook.
+      webhook-secret: ${RESEND_WEBHOOK_SECRET:}
+      base-url: ${RESEND_BASE_URL:https://api.resend.com}
     gateway-client:
       client-id: ${GATEWAY_CLIENT_ID:gateway}
       client-secret: ${GATEWAY_CLIENT_SECRET:gateway-secret}

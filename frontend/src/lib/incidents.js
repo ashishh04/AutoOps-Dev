@@ -8,9 +8,15 @@ import { realFetch } from "./api";
  * thing someone owns and works. Both use `realFetch` directly rather than
  * `api.js`'s resource chain, whose fallthrough deliberately throws 501.
  *
- * `projectId` never widens what comes back. It is how the server resolves which
- * monitoring sources this project owns, which is how an alert with no labels is
- * recognised at all — and therefore which incidents are yours.
+ * `projectId` never widens what comes back; it only narrows. Omitting it is the
+ * WORKSPACE view, which is how these screens are read by default: the server
+ * resolves every monitoring source the TENANT connected, across all its
+ * projects, and that is how an incident built from alerts carrying no AutoOps
+ * labels is recognised as yours at all.
+ *
+ * Pass the same value to a list call and the call that opens one of its rows.
+ * Listing and opening resolve ownership the same way, so a mismatch is how you
+ * get an incident that appears in the list and then 404s when clicked.
  */
 
 const qs = (params) => {
@@ -83,5 +89,44 @@ export function investigateIncident(id, projectId, { model, question } = {}) {
   return realFetch(
     `/incidents/${encodeURIComponent(id)}/investigate${qs({ projectId })}`,
     { method: "POST", auth: true, body: { model, question } },
+  );
+}
+
+/**
+ * Correlation rules — what decides that several alerts are one incident.
+ *
+ * Nothing correlates without one. An engine with no rules produces no
+ * incidents at all, however many alerts arrive, which is why this is a
+ * customer's own screen rather than something they ask their provider for.
+ *
+ * No expression crosses this boundary in either direction as something to
+ * execute. The request carries VALUES — a severity, a service, what to group
+ * by — and the server writes the matcher with the caller's own tenant ANDed
+ * in. `expression` comes back read-only, because "why are these grouped?" is
+ * the first question anyone asks of a correlated view.
+ */
+export function listCorrelationRules(projectId) {
+  return realFetch(`/correlation-rules${qs({ projectId })}`, {
+    auth: true,
+  }).then((rows) => (Array.isArray(rows) ? rows : []));
+}
+
+/** What a rule may be built from. Read from the server, never a copy of it. */
+export function getCorrelationVocabulary() {
+  return realFetch("/correlation-rules/vocabulary", { auth: true });
+}
+
+export function createCorrelationRule(projectId, body) {
+  return realFetch(`/correlation-rules${qs({ projectId })}`, {
+    method: "POST",
+    auth: true,
+    body,
+  });
+}
+
+export function deleteCorrelationRule(id, projectId) {
+  return realFetch(
+    `/correlation-rules/${encodeURIComponent(id)}${qs({ projectId })}`,
+    { method: "DELETE", auth: true },
   );
 }

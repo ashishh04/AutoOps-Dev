@@ -17,7 +17,13 @@ import { api } from "../../lib/api";
  * something unexpectedly.
  */
 export function chatModels(provider) {
-  const byPurpose = provider?.modelsByPurpose?.chat;
+  // UPPERCASE. The server builds this map from `ModelPurpose.name()`, so the
+  // key is `CHAT` — the Models screen has always read it that way
+  // (`PURPOSE_ORDER` in AiProviders.jsx). This read `.chat`, which is never
+  // present, so the lookup silently missed and the fallback below returned
+  // EVERY model — embedding and image endpoints included, which is exactly
+  // what this function exists to exclude.
+  const byPurpose = provider?.modelsByPurpose?.CHAT;
   if (Array.isArray(byPurpose) && byPurpose.length) return byPurpose;
   // Older rows predate the classification; better every model than none.
   return provider?.models || [];

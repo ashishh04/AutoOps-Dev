@@ -23,7 +23,7 @@ const ITEMS = [
 
 export default function Enterprise() {
   return (
-    <section className="relative mx-auto max-w-7xl px-6 py-24">
+    <section id="solutions" className="relative mx-auto max-w-7xl scroll-mt-24 px-6 py-24">
       <Reveal>
         <div className="overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-slate-200 via-transparent to-slate-200 p-10 sm:p-14">
           <div className="max-w-2xl">

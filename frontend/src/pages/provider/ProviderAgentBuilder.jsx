@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { PageHeader, Card, SmallButton, Chip } from "../../components/app/appui";
+import {
+  PageHeader,
+  Card,
+  SmallButton,
+  Chip,
+} from "../../components/app/appui";
 import Icon from "../../components/Icon";
 import { api } from "../../lib/api";
 import { useStore } from "../../store/store";
@@ -137,7 +142,9 @@ export default function ProviderAgentBuilder() {
   const [category, setCategory] = useState("");
   const [model, setModel] = useState("");
   const [premium, setPremium] = useState(false);
-  const [instructions, setInstructions] = useState(editing ? "" : STARTER_PERSONA);
+  const [instructions, setInstructions] = useState(
+    editing ? "" : STARTER_PERSONA,
+  );
   const [guardrails, setGuardrails] = useState("");
   const [scope, setScope] = useState("NOC");
   const [riskLevel, setRiskLevel] = useState("Low");
@@ -205,7 +212,9 @@ export default function ProviderAgentBuilder() {
         );
         setCategories(
           [
-            ...new Set(list.map((r) => (r.category || "").trim()).filter(Boolean)),
+            ...new Set(
+              list.map((r) => (r.category || "").trim()).filter(Boolean),
+            ),
           ].sort((a, b) => a.localeCompare(b)),
         );
         setModels(
@@ -222,7 +231,10 @@ export default function ProviderAgentBuilder() {
         // definition in the catalog.
         setCatalogModels([
           ...new Set(
-            list.filter((r) => r.type === "agent").map((r) => r.model).filter(Boolean),
+            list
+              .filter((r) => r.type === "agent")
+              .map((r) => r.model)
+              .filter(Boolean),
           ),
         ]);
 
@@ -274,7 +286,10 @@ export default function ProviderAgentBuilder() {
         setAutomationType(spec.automationType);
         setApprovalRequired(spec.approvalRequired);
       })
-      .catch((err) => !cancelled && setError(err.message || "Could not load the catalog"))
+      .catch(
+        (err) =>
+          !cancelled && setError(err.message || "Could not load the catalog"),
+      )
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
@@ -296,7 +311,11 @@ export default function ProviderAgentBuilder() {
     // Split on a regex rather than a newline literal, so a guardrail list
     // pasted from a Windows editor does not arrive with a trailing \r on every
     // line and get published that way.
-    () => guardrails.split(/\r?\n/).map((g) => g.trim()).filter(Boolean),
+    () =>
+      guardrails
+        .split(/\r?\n/)
+        .map((g) => g.trim())
+        .filter(Boolean),
     [guardrails],
   );
 
@@ -313,10 +332,10 @@ export default function ProviderAgentBuilder() {
     setTools((current) =>
       current.some((t) => t.ref === ref)
         ? current.filter((t) => t.ref !== ref)
-        // Mutating by default, matching the schema and RolloutService. An
-        // unmarked read-only tool goes unused and is noticed; an unmarked
-        // destructive one would reach the phase that must not see it.
-        : [...current, { ref, mutating: true, subjects: [] }],
+        : // Mutating by default, matching the schema and RolloutService. An
+          // unmarked read-only tool goes unused and is noticed; an unmarked
+          // destructive one would reach the phase that must not see it.
+          [...current, { ref, mutating: true, subjects: [] }],
     );
   };
 
@@ -354,11 +373,11 @@ export default function ProviderAgentBuilder() {
     setPhases((current) =>
       current.includes(value)
         ? current.filter((p) => p !== value)
-        // Appended, not inserted in palette order. The graph is built from this
-        // list, so the order the author picks IS the order the agent runs — and
-        // sorting it back into the canonical order would silently rewrite their
-        // agent into a different one.
-        : [...current, value],
+        : // Appended, not inserted in palette order. The graph is built from this
+          // list, so the order the author picks IS the order the agent runs — and
+          // sorting it back into the canonical order would silently rewrite their
+          // agent into a different one.
+          [...current, value],
     );
 
   // Named so the person is told WHICH field, not just that something is wrong.
@@ -366,7 +385,9 @@ export default function ProviderAgentBuilder() {
     const found = [];
     if (title.trim().length < 3) found.push("Give the agent a name.");
     if (description.trim().length < 10)
-      found.push("Write a description — it is what a customer reads in the catalog.");
+      found.push(
+        "Write a description — it is what a customer reads in the catalog.",
+      );
     if (description.trim().length > MAX_DESCRIPTION)
       found.push(`The description is over ${MAX_DESCRIPTION} characters.`);
     // Still required — but "the customer's default" is now one of the answers,
@@ -378,13 +399,23 @@ export default function ProviderAgentBuilder() {
         `The operating instructions are the product — write at least ${MIN_INSTRUCTIONS} characters.`,
       );
     if (tools.length === 0)
-      found.push("Pick at least one workflow. An agent with no tool can only talk.");
+      found.push(
+        "Pick at least one workflow. An agent with no tool can only talk.",
+      );
     if (approvalRequired && !STATE_CHANGING.includes(automationType))
       found.push(
         "An approval gate belongs on a state-changing agent — set the automation type to Change / Write or Destructive.",
       );
     return found;
-  }, [title, description, model, instructions, tools, approvalRequired, automationType]);
+  }, [
+    title,
+    description,
+    model,
+    instructions,
+    tools,
+    approvalRequired,
+    automationType,
+  ]);
 
   const save = async ({ thenRollOut = false } = {}) => {
     if (problems.length) {
@@ -419,7 +450,8 @@ export default function ProviderAgentBuilder() {
             // omit it rather than point it at anything derived from the list:
             // a total that equals the list by construction agrees with it in
             // every case including the broken ones.
-            if (sub.total_field?.trim()) source.total_field = sub.total_field.trim();
+            if (sub.total_field?.trim())
+              source.total_field = sub.total_field.trim();
             if (sub.truncated_field?.trim())
               source.truncated_field = sub.truncated_field.trim();
             return source;
@@ -452,7 +484,10 @@ export default function ProviderAgentBuilder() {
         pushToast(`"${common.title}" saved`, "emerald");
         setSaved((s) => ({ ...s, ...common, id }));
       } else {
-        const created = await api.providerCreateLibrary({ ...common, type: "agent" });
+        const created = await api.providerCreateLibrary({
+          ...common,
+          type: "agent",
+        });
         pushToast(`"${common.title}" published to the catalog`, "emerald");
         setSaved({ ...common, id: created.id, type: "agent" });
       }
@@ -506,7 +541,11 @@ export default function ProviderAgentBuilder() {
               onClick={() => save()}
               disabled={saving || loading}
             >
-              {saving ? "Saving…" : editing ? "Save changes" : "Publish to catalog"}
+              {saving
+                ? "Saving…"
+                : editing
+                  ? "Save changes"
+                  : "Publish to catalog"}
             </SmallButton>
           </>
         }
@@ -522,7 +561,9 @@ export default function ProviderAgentBuilder() {
             two are form-shaped and read fine narrow, so they balance it. ── */}
         <div className="flex flex-col gap-6">
           <Card className="h-fit p-6">
-            <h3 className="mb-4 text-sm font-semibold text-slate-900">Agent details</h3>
+            <h3 className="mb-4 text-sm font-semibold text-slate-900">
+              Agent details
+            </h3>
             <div className="space-y-4">
               <div>
                 <label className={labelCls} htmlFor="agent-name">
@@ -650,7 +691,9 @@ export default function ProviderAgentBuilder() {
           </Card>
 
           <Card className="h-fit p-6">
-            <h3 className="mb-1 text-sm font-semibold text-slate-900">Blast radius</h3>
+            <h3 className="mb-1 text-sm font-semibold text-slate-900">
+              Blast radius
+            </h3>
             <p className="mb-4 text-[11px] leading-relaxed text-slate-500">
               What happens if this agent acts wrongly — not how hard it was to
               build. The approval gate is enforced by core-service.
@@ -744,21 +787,26 @@ export default function ProviderAgentBuilder() {
                     Clear
                   </button>
                 )}
-                <Chip>{phases.length ? `${phases.length} phases` : "single loop"}</Chip>
+                <Chip>
+                  {phases.length ? `${phases.length} phases` : "single loop"}
+                </Chip>
               </div>
             </div>
             <p className="mb-4 text-[11px] leading-relaxed text-slate-500">
-              Pick phases and the agent runs the phased runtime: each step sees only
-              the tools it should, and the report must cite the evidence it used.
-              Pick none and it runs one un-narrowed loop with every tool visible at
-              once — which is what agents built before this existed do, and the right
-              choice for a persona written for that.
+              Pick phases and the agent runs the phased runtime: each step sees
+              only the tools it should, and the report must cite the evidence it
+              used. Pick none and it runs one un-narrowed loop with every tool
+              visible at once — which is what agents built before this existed
+              do, and the right choice for a persona written for that.
             </p>
 
             {schemaError ? (
               // No fallback list. An author building against a remembered
               // palette would find out at run time, having been shown nothing.
-              <p role="alert" className="rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2.5 text-sm text-amber-700">
+              <p
+                role="alert"
+                className="rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2.5 text-sm text-amber-700"
+              >
                 {schemaError}
               </p>
             ) : !schema ? (
@@ -809,10 +857,33 @@ export default function ProviderAgentBuilder() {
                     </p>
                     {!phases.includes("REPORT") && (
                       <p className="mt-1 text-[10px] leading-relaxed text-amber-700">
-                        REPORT is added automatically — without it a run reaches the end
-                        of its graph with nothing to hand the operator.
+                        REPORT is added automatically — without it a run reaches
+                        the end of its graph with nothing to hand the operator.
                       </p>
                     )}
+                    {/*
+                      The cost of picking phases, stated where the choice is
+                      made. A phased agent requires the model to return a typed
+                      object at each phase; one that answers in prose instead
+                      fails the run outright, minutes and tokens after the
+                      click, with an error naming a class nobody recognises
+                      (StructuredOutputError / HypothesisOut).
+
+                      A single-loop agent has no such contract and runs on
+                      anything that can call a tool. That is a real trade and
+                      the author is the only person positioned to make it, so
+                      it belongs here rather than in a runbook.
+                    */}
+                    <p className="mt-2 border-t border-slate-200 pt-2 text-[10px] leading-relaxed text-slate-600">
+                      <span className="font-semibold text-slate-700">
+                        Needs a capable model.
+                      </span>{" "}
+                      Each phase requires the model to return a structured
+                      result, not prose. Smaller models often cannot, and the
+                      run fails partway through rather than at the click. Leave
+                      phases empty for a single loop, which runs on any model
+                      that can call a tool.
+                    </p>
                   </div>
                 )}
               </>
@@ -941,7 +1012,8 @@ export default function ProviderAgentBuilder() {
                               Read-only — safe while gathering evidence
                             </option>
                             <option value="mutating">
-                              Changes state — hidden until the evidence phase ends
+                              Changes state — hidden until the evidence phase
+                              ends
                             </option>
                           </select>
                         </div>
@@ -969,10 +1041,10 @@ export default function ProviderAgentBuilder() {
                             // persists — but it has a consequence the author
                             // should be choosing knowingly.
                             <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
-                              Nothing declared, so this tool contributes no coverage
-                              and findings from it can never be closed automatically.
-                              Correct for a tool that reads events; wrong for one that
-                              lists resources.
+                              Nothing declared, so this tool contributes no
+                              coverage and findings from it can never be closed
+                              automatically. Correct for a tool that reads
+                              events; wrong for one that lists resources.
                             </p>
                           ) : (
                             <div className="mt-1.5 space-y-2">
@@ -986,7 +1058,12 @@ export default function ProviderAgentBuilder() {
                                       aria-label={`Subject kind ${index + 1} for ${w.title}`}
                                       value={sub.subject_kind}
                                       onChange={(e) =>
-                                        setSubjectField(w.ref, index, "subject_kind", e.target.value)
+                                        setSubjectField(
+                                          w.ref,
+                                          index,
+                                          "subject_kind",
+                                          e.target.value,
+                                        )
                                       }
                                       className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-violet-400"
                                     >
@@ -1004,7 +1081,9 @@ export default function ProviderAgentBuilder() {
                                     <button
                                       type="button"
                                       aria-label={`Remove declaration ${index + 1} for ${w.title}`}
-                                      onClick={() => removeSubject(w.ref, index)}
+                                      onClick={() =>
+                                        removeSubject(w.ref, index)
+                                      }
                                       className="shrink-0 rounded-md px-1.5 text-[11px] text-slate-400 hover:text-rose-600"
                                     >
                                       ×
@@ -1014,7 +1093,12 @@ export default function ProviderAgentBuilder() {
                                     aria-label={`List path ${index + 1} for ${w.title}`}
                                     value={sub.items}
                                     onChange={(e) =>
-                                      setSubjectField(w.ref, index, "items", e.target.value)
+                                      setSubjectField(
+                                        w.ref,
+                                        index,
+                                        "items",
+                                        e.target.value,
+                                      )
                                     }
                                     placeholder="unattached_volumes — path to the list"
                                     className="mt-1.5 w-full rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-[11px] outline-none focus:border-violet-400"
@@ -1023,7 +1107,12 @@ export default function ProviderAgentBuilder() {
                                     aria-label={`Id template ${index + 1} for ${w.title}`}
                                     value={sub.id_template}
                                     onChange={(e) =>
-                                      setSubjectField(w.ref, index, "id_template", e.target.value)
+                                      setSubjectField(
+                                        w.ref,
+                                        index,
+                                        "id_template",
+                                        e.target.value,
+                                      )
                                     }
                                     placeholder="{region}/{volume_id}"
                                     className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-[11px] outline-none focus:border-violet-400"
@@ -1032,10 +1121,10 @@ export default function ProviderAgentBuilder() {
                                       is the field authors most often get wrong,
                                       and getting it wrong is silent. */}
                                   <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-                                    A template, not a field name — a volume id is
-                                    region-scoped and an IAM user is account-scoped, so a
-                                    bare id merges two different resources into one
-                                    subject.
+                                    A template, not a field name — a volume id
+                                    is region-scoped and an IAM user is
+                                    account-scoped, so a bare id merges two
+                                    different resources into one subject.
                                   </p>
                                 </div>
                               ))}
@@ -1056,7 +1145,8 @@ export default function ProviderAgentBuilder() {
                         moves. */}
                     <span className="text-[11px] text-slate-500">
                       {(toolPage - 1) * TOOLS_PER_PAGE + 1}–
-                      {Math.min(toolPage * TOOLS_PER_PAGE, usable.length)} of {usable.length}
+                      {Math.min(toolPage * TOOLS_PER_PAGE, usable.length)} of{" "}
+                      {usable.length}
                     </span>
                     <div className="flex items-center gap-1.5">
                       <button
@@ -1099,12 +1189,12 @@ export default function ProviderAgentBuilder() {
                     : `${unusable.length} workflows are not selectable`}
                 </p>
                 <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
-                  {unusable.map((w) => w.title).join(", ")} — published without a
-                  stable <code className="font-mono">ref</code>, so a rollout
+                  {unusable.map((w) => w.title).join(", ")} — published without
+                  a stable <code className="font-mono">ref</code>, so a rollout
                   cannot match it to the customer&rsquo;s copy. Re-publish
                   through{" "}
-                  <code className="font-mono">agents/_schema/publish.py</code> to
-                  give it one.
+                  <code className="font-mono">agents/_schema/publish.py</code>{" "}
+                  to give it one.
                 </p>
               </div>
             )}

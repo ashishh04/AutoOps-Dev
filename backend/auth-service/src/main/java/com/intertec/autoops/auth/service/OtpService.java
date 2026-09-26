@@ -76,13 +76,13 @@ public class OtpService {
         entry.setExpiresAt(Instant.now().plus(properties.getOtp().getTtl()));
         otpRepository.save(entry);
 
-        // Dev convenience: SendGrid isn't wired locally, so print the code to the
+        // Dev convenience: Resend isn't wired locally, so print the code to the
         // console. Guarded by the dev profile — never active in prod.
         if (devMode) {
             log.warn("[DEV ONLY] OTP for {} (tenant {}) = {}", normalize(email), tenantId, otp);
         }
 
-        // Delivered by SendGridEmailService after this transaction commits.
+        // Delivered by ResendEmailService after this transaction commits.
         eventPublisher.publishEvent(new OtpEmailEvent(entry.getId(), normalize(email), otp,
                 tenantId, ipAddress));
     }

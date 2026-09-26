@@ -3,6 +3,7 @@ package com.intertec.autoops.plugin.service;
 import com.intertec.autoops.plugin.config.PluginProperties;
 import com.intertec.autoops.plugin.domain.NotificationRule;
 import com.intertec.autoops.plugin.domain.PluginInstallation;
+import com.intertec.autoops.plugin.domain.TargetType;
 import com.intertec.autoops.plugin.repo.NotificationRuleRepository;
 import com.intertec.autoops.plugin.repo.PluginInstallationRepository;
 import com.intertec.autoops.plugin.spi.DeliveryResult;
@@ -73,7 +74,7 @@ public class DispatchService {
                 .findByTenantIdAndTargetTypeAndEnabledTrue(event.tenantId(), event.targetType())
                 .stream()
                 .filter(rule -> rule.matches(event.targetType(), event.targetId(),
-                        event.projectId(), event.event()))
+                        event.projectId(), event.event(), event.severity()))
                 .toList();
         if (matching.isEmpty()) {
             return 0;
@@ -146,22 +147,38 @@ public class DispatchService {
                 event.detail(),
                 event.occurredAt(),
                 event.duration(),
-                consoleUrl(event));
+                consoleUrl(event),
+                event.severity());
     }
 
     /**
-     * Deep link into the console. Matches the path the in-app notification
-     * already uses, so both land the reader in the same place.
+     * Deep link into the console — the screen that answers the question the
+     * message just raised, which is a different screen per target type.
+     *
+     * <p>A notification whose link lands somewhere plausible but wrong is worse
+     * than one with no link: the reader follows it, finds nothing, and concludes
+     * the notification was spurious. An agent parked on an approval has to lead
+     * to the agent, not to a list of job executions it does not appear in.
      */
     private String consoleUrl(RunEvent event) {
-        if (event.projectId() == null) {
-            return null;
-        }
         String base = properties.getConsoleBaseUrl();
         if (base == null || base.isBlank()) {
             return null;
         }
         String trimmed = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
+
+        // Workspace-level, and deliberately not project-scoped: the alert plane
+        // moved out from under projects precisely because a monitoring tool has
+        // never heard of one.
+        if (event.targetType() == TargetType.ALERT) {
+            return trimmed + "/app/alerts";
+        }
+        if (event.projectId() == null) {
+            return null;
+        }
+        if (event.targetType() == TargetType.AGENT) {
+            return trimmed + "/app/projects/" + event.projectId() + "/agents";
+        }
         return trimmed + "/app/projects/" + event.projectId() + "/executions";
     }
 }

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>{{title}}</title>
+</head>
+<!--
+  Email HTML, not web HTML. The constraints are real and the reasons are:
+  tables for layout (Outlook's Word rendering engine has no flexbox or grid),
+  every style inline (several clients strip <style> blocks entirely), no
+  external images (most clients block them by default, so an image-based logo
+  arrives as a broken box), and a 600px ceiling because that is what the
+  narrowest common preview pane shows without horizontal scroll.
+-->
+<body style="margin:0;padding:0;background-color:#f1f5f9;-webkit-font-smoothing:antialiased;">
+
+<!-- Preview text: what the inbox list shows next to the subject. Without it
+     clients scrape the first visible words, which would be the wordmark. -->
+<div style="display:none;font-size:1px;color:#f1f5f9;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">
+  {{preheader}}
+  &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847; &#8199;&#65279;&#847;
+</div>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f1f5f9;">
+  <tr>
+    <td align="center" style="padding:32px 16px;">
+
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;">
+
+        <!-- wordmark -->
+        <tr>
+          <td align="left" style="padding:0 8px 20px 8px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:20px;font-weight:700;letter-spacing:-0.4px;color:#0f172a;">
+            Auto<span style="color:#2563eb;">Ops</span>
+          </td>
+        </tr>
+
+        <!-- card -->
+        <tr>
+          <td style="background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:40px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+            {{content}}
+          </td>
+        </tr>
+
+        <!-- footer -->
+        <tr>
+          <td align="left" style="padding:24px 8px 0 8px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">
+            {{footer}}
+          </td>
+        </tr>
+
+      </table>
+
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

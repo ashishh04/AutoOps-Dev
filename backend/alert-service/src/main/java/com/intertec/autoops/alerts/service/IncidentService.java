@@ -11,6 +11,8 @@ import com.intertec.autoops.alerts.web.dto.IncidentSummaryView;
 import com.intertec.autoops.alerts.web.dto.InvestigationStatusView;
 import com.intertec.autoops.alerts.web.dto.InvestigationView;
 import com.intertec.autoops.alerts.web.dto.ToolCallView;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -36,6 +38,15 @@ public class IncidentService {
 
     /** The enrichment key an investigation is stored under on the engine. */
     static final String INVESTIGATION_KEY = "autoops_investigation";
+
+    /**
+     * WARN, not DEBUG. Every message this logger carries is the same finding:
+     * correlation has grouped alerts across a tenant boundary. That is an
+     * operator's problem to fix in the engine's rules, and nobody goes looking
+     * for it — a tenant only sees a short evidence list or a refused
+     * investigation, neither of which points anywhere.
+     */
+    private static final Logger log = LoggerFactory.getLogger(IncidentService.class);
 
     private static final int EVIDENCE_LIMIT = 200;
 
@@ -146,12 +157,13 @@ public class IncidentService {
     }
 
     private TenantScope enrich(TenantScope scope) {
-        if (scope.isProvider() || scope.tenantId() == null || scope.projectId() == null) {
+        if (scope.isProvider() || scope.tenantId() == null) {
             return scope;
         }
         try {
-            return scope.owning(providers.connectedIds(
-                    scope.tenantId(), String.valueOf(scope.projectId())));
+            // No project means the whole tenant. See AlertQueryService.enrich.
+            return scope.owning(providers.connectedIds(scope.tenantId(),
+                    scope.projectId() == null ? null : String.valueOf(scope.projectId())));
         } catch (RuntimeException ex) {
             return scope;
         }
@@ -183,10 +195,30 @@ public class IncidentService {
         if (raw == null) {
             throw AlertException.notFound("incident_not_found", "No such incident");
         }
-        List<AlertView> evidence = incidents.incidentAlerts(id, EVIDENCE_LIMIT).stream()
-                .map(AlertMapper::alert)
-                .toList();
-        return new IncidentDetailView(summary(raw, ruleNames()), evidence, investigationOf(raw));
+        // FILTERED, and this is the reason the filter exists at all.
+        //
+        // An incident carries no tenant label — it is a correlation over alerts
+        // — so visibility is INFERRED: it is yours if at least one of its alerts
+        // is. That inference is all-or-nothing, and without this line it let the
+        // whole group through once any single alert qualified. If correlation
+        // ever grouped two tenants' alerts together, each tenant read the
+        // other's alert names, descriptions, services and timings.
+        //
+        // Ownership of one alert is not ownership of the group.
+        List<Map<String, Object>> all = incidents.incidentAlerts(id, EVIDENCE_LIMIT);
+        List<Map<String, Object>> mine = admitted(scope, all);
+        int withheld = all.size() - mine.size();
+        if (withheld > 0) {
+            // The operator's signal. A tenant seeing a short list is the
+            // symptom; correlation crossing a tenant boundary is the cause, and
+            // it is fixed in the engine's rules rather than here.
+            log.warn("Incident {} groups {} alert(s) outside tenant {} — correlation is "
+                    + "crossing a tenant boundary", id, withheld, scope.tenantId());
+        }
+        return new IncidentDetailView(summary(raw, ruleNames()),
+                mine.stream().map(AlertMapper::alert).toList(),
+                withheld,
+                investigationOf(raw));
     }
 
     private Map<String, String> ruleNames() {
@@ -237,6 +269,50 @@ public class IncidentService {
         incidents.assign(id, user);
     }
 
+    /**
+     * The alerts under an incident that this scope may actually see.
+     *
+     * <p>A provider scope admits everything, which is the same rule the rest of
+     * this service applies: it is the operator role and the alert plane is
+     * infrastructure it runs.
+     */
+    private static List<Map<String, Object>> admitted(TenantScope scope,
+                                                      List<Map<String, Object>> alerts) {
+        if (scope.isProvider()) {
+            return alerts;
+        }
+        return alerts.stream().filter(scope::admits).toList();
+    }
+
+    /**
+     * The evidence, or a refusal — never a redaction.
+     *
+     * <p>Investigating is not reading. A filtered detail page shows a tenant
+     * less than the whole truth, which is the safe direction. Quietly dropping
+     * the same alerts from an investigation PROMPT is not the safe direction at
+     * all: the engine would then reason about a production incident from
+     * deliberately incomplete evidence and present the conclusion with no hint
+     * that half the signal was removed. An RCA built on a redacted timeline is
+     * worse than no RCA, because somebody acts on it.
+     *
+     * <p>So a mixed incident is refused. The message says what is wrong and who
+     * can fix it, without naming the other workspace — the caller is entitled
+     * to know the answer would be unsound, not to know whose data made it so.
+     */
+    private List<Map<String, Object>> requireOwnEvidence(TenantScope scope, String id,
+                                                         List<Map<String, Object>> alerts) {
+        List<Map<String, Object>> mine = admitted(scope, alerts);
+        if (mine.size() == alerts.size()) {
+            return mine;
+        }
+        log.warn("Refused to investigate incident {}: {} of {} alert(s) are outside tenant {}",
+                id, alerts.size() - mine.size(), alerts.size(), scope.tenantId());
+        throw AlertException.forbidden("incident_not_isolated",
+                "This incident groups alerts this workspace cannot see, so an investigation "
+                        + "would be built on evidence that is not yours to use. Ask your "
+                        + "provider to review how these alerts were grouped.");
+    }
+
     private void requireVisible(TenantScope rawScope, String id) {
         TenantScope scope = enrich(rawScope);
         if (!scope.isProvider() && !visibleIds(scope).contains(id)) {
@@ -262,16 +338,72 @@ public class IncidentService {
         if (raw == null) {
             throw AlertException.notFound("incident_not_found", "No such incident");
         }
-        List<Map<String, Object>> evidence = incidents.incidentAlerts(id, EVIDENCE_LIMIT);
+        List<Map<String, Object>> evidence = requireOwnEvidence(scope, id,
+                incidents.incidentAlerts(id, EVIDENCE_LIMIT));
         String ask = prompt(raw, evidence, question);
 
         InvestigationRouter.Engine engine = InvestigationRouter.route(
                 InvestigationRouter.sourcesOf(raw), holmes.isEnabled());
 
         if (engine == InvestigationRouter.Engine.AWS_AGENT) {
-            return startAgentInvestigation(id, ask, bearer, projectId);
+            // An investigation RUNS somewhere, so unlike every read on this
+            // service it cannot be answered workspace-wide. When the caller
+            // named no project — the workspace-level incident screen never can
+            // — the incident's own evidence is asked instead. That is not a
+            // guess: the alert was stamped with a project at ingest, or it
+            // arrived through a source exactly one project connected.
+            return startAgentInvestigation(id, ask, bearer,
+                    projectId != null ? projectId : projectFrom(scope, evidence));
         }
         return runHolmes(id, ask, model);
+    }
+
+    /**
+     * The project an incident belongs to, read off the alerts under it.
+     *
+     * <p>Two routes, in the order they can be trusted. The label was written by
+     * this platform at ingest from a signed token, so it is authoritative. The
+     * source is next best: it was connected by one project, under a name only
+     * that project's scope produces. Anything else returns null, and the caller
+     * says so plainly rather than running somewhere arbitrary.
+     */
+    private Long projectFrom(TenantScope scope, List<Map<String, Object>> evidence) {
+        for (Map<String, Object> alert : evidence) {
+            Long labelled = asId(TenantScope.label(alert, TenantScope.PROJECT_LABEL));
+            if (labelled != null) {
+                return labelled;
+            }
+        }
+        for (Map<String, Object> alert : evidence) {
+            Object source = alert.get("providerId");
+            if (source == null) {
+                continue;
+            }
+            try {
+                Long owner = asId(providers.projectOfSource(
+                        scope.tenantId(), String.valueOf(source)));
+                if (owner != null) {
+                    return owner;
+                }
+            } catch (RuntimeException ex) {
+                // The engine being unreadable costs the shortcut, not the
+                // request — the caller gets the same honest "no analyst here"
+                // message as a project that genuinely has none.
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static Long asId(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.valueOf(raw.trim());
+        } catch (NumberFormatException ex) {
+            return null;
+        }
     }
 
     private InvestigationStatusView runHolmes(String id, String ask, String model) {
@@ -294,11 +426,15 @@ public class IncidentService {
                                                             String bearer, Long projectId) {
         Long agentId = agents.findRcaAgentId(bearer, projectId);
         if (agentId == null) {
-            // Named plainly. The alternative is falling through to an engine
-            // with no AWS tools, which produces a confident page of "possible
-            // causes" with nothing behind it.
-            return InvestigationStatusView.failed("agent",
-                    "This project has no AWS incident analyst. Ask your provider to roll it out.");
+            // Named plainly, and the two reasons are told apart. The
+            // alternative is falling through to an engine with no AWS tools,
+            // which produces a confident page of "possible causes" with nothing
+            // behind it.
+            return InvestigationStatusView.failed("agent", projectId == null
+                    ? "This incident could not be traced back to a project, so there is no "
+                            + "estate to investigate it against. Open it from its project."
+                    : "This project has no AWS incident analyst. "
+                            + "Ask your provider to roll it out.");
         }
         Long runId = agents.startRun(bearer, agentId, ask);
         if (runId == null) {

@@ -40,6 +40,23 @@ autoops:
       # The BROWSER-facing origin. A compose service name is useless in a
       # webhook field on someone else's SaaS.
       public-base-url: ${PUBLIC_BASE_URL:http://localhost:5173}
+    # plugin-service: the tenant's outbound notification channels. Alerts that
+    # arrive through the public ingest door are reported here so a customer's
+    # Slack or Teams can carry them under the same rules as their jobs.
+    #
+    # NOT every alert: ones the engine pulls for itself never pass through
+    # AutoOps code at the moment they arrive, so there is nothing to report.
+    #
+    # Best-effort and tightly bounded - this sits on the public ingest path,
+    # and a monitoring tool that gets a slow response will retry, which costs
+    # duplicate alerts.
+    plugin:
+      url: ${PLUGIN_SERVICE_URL:http://localhost:8088}
+      internal-token: ${PLUGIN_INTERNAL_TOKEN:dev-internal-token}
+      connect-timeout: ${PLUGIN_CONNECT_TIMEOUT:1s}
+      read-timeout: ${PLUGIN_READ_TIMEOUT:2s}
+      # Kill switch: false stops alert-service emitting events at all.
+      enabled: ${PLUGIN_NOTIFICATIONS_ENABLED:true}
     engine:
       url: ${KEEP_URL:http://keep-backend:8080}
       api-key: ${KEEP_API_KEY:}

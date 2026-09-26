@@ -49,8 +49,15 @@ public class ProdSafetyGuard {
         if (keystorePath == null || keystorePath.isBlank()) {
             problems.add("JWT_KEYSTORE_PATH must point to a persistent PKCS#12 keystore in prod");
         }
-        if ("REPLACE_ME".equals(properties.getSendgrid().getApiKey())) {
-            problems.add("SENDGRID_API_KEY is not configured");
+        if ("REPLACE_ME".equals(properties.getResend().getApiKey())
+                || properties.getResend().getApiKey().isBlank()) {
+            problems.add("RESEND_API_KEY is not configured");
+        }
+        // onboarding@resend.dev only delivers to the Resend account owner, so
+        // in prod it is indistinguishable from email being switched off.
+        if ("onboarding@resend.dev".equals(properties.getResend().getFromEmail())) {
+            problems.add("RESEND_FROM_EMAIL is still the shared test sender, which only "
+                    + "delivers to the Resend account owner — set an address on a verified domain");
         }
 
         if (!problems.isEmpty()) {

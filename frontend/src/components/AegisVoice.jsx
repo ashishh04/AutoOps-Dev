@@ -44,9 +44,29 @@ export default function AegisVoice() {
   );
 }
 
+/** "9:58" for a long wait, "45s" for a short one. */
+function waitLabel(seconds) {
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+  return `${seconds}s`;
+}
+
 function VoicePill({ agentName, configured }) {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState("");
+  /**
+   * Seconds left on a refusal the server made on purpose, or null.
+   *
+   * Kept apart from `error` because the two ask for opposite things. An error
+   * is worth another tap; a 429 is not — retrying inside the window cannot
+   * succeed, so painting it red under "Tap to try again" invites exactly the
+   * behaviour that cannot work, and a deliberate limit reads as a broken
+   * product. The server's wording goes to `notice` and outlives the countdown;
+   * this holds only the clock.
+   */
+  const [cooldown, setCooldown] = useState(null);
   const [caption, setCaption] = useState("");
   // Tracks the click→connected gap: startSession() is fire-and-forget, so the
   // pill would otherwise sit on "Tap to speak" while the socket opens.
@@ -95,6 +115,10 @@ function VoicePill({ agentName, configured }) {
     // Double-tap while the socket is opening would mint a second session and
     // burn a second slice of the rate limit.
     if (startingRef.current) return;
+    // Inside a server-declared cooldown the request is refused before it
+    // reaches ElevenLabs, so sending it only confirms what we were already
+    // told. The countdown on the pill is the answer.
+    if (cooldown) return;
 
     startingRef.current = true;
     setStarting(true);
@@ -108,9 +132,31 @@ function VoicePill({ agentName, configured }) {
     } catch (e) {
       startingRef.current = false;
       setStarting(false);
-      setError(e?.message || "Could not reach Aegis-01 right now.");
+      if (e?.status === 429) {
+        // The server's own sentence, in the informational slot rather than the
+        // red one. No Retry-After is not a reason to leave the pill dead:
+        // without a number there is nothing to count down to, so the tap stays
+        // live and the server gets to answer again.
+        setNotice(e.message);
+        setCooldown(e.retryAfterSeconds ?? null);
+      } else {
+        setError(e?.message || "Could not reach Aegis-01 right now.");
+      }
     }
-  }, [agentName, configured, connected, endSession, startSession]);
+  }, [agentName, configured, connected, cooldown, endSession, startSession]);
+
+  // The cooldown counts itself down and then lets go. Nothing else clears it:
+  // a pill that stays disabled after the window has passed is the same outage
+  // the window was meant to prevent.
+  useEffect(() => {
+    if (cooldown === null) return undefined;
+    if (cooldown <= 0) {
+      setCooldown(null);
+      return undefined;
+    }
+    const timer = setTimeout(() => setCooldown((s) => (s === null ? s : s - 1)), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
 
   // Hang up if the visitor navigates away mid-sentence.
   useEffect(() => () => endSession(), [endSession]);
@@ -132,7 +178,14 @@ function VoicePill({ agentName, configured }) {
   let tone = "bg-slate-900 text-white hover:bg-blue-600";
   let dot = "bg-green-500";
 
-  if (error) {
+  if (cooldown > 0) {
+    // Amber, not red, and it names the wait. "Tap to try again" over a limit
+    // that refuses every tap is the product telling the visitor to do the one
+    // thing that cannot work.
+    label = `Back in ${waitLabel(cooldown)}`;
+    tone = "bg-amber-500 text-white";
+    dot = "bg-white/70";
+  } else if (error) {
     label = "Tap to try again";
     tone = "bg-rose-600 text-white hover:bg-rose-700";
     dot = "bg-white/70";
@@ -158,7 +211,7 @@ function VoicePill({ agentName, configured }) {
       <button
         type="button"
         onClick={toggle}
-        disabled={connecting}
+        disabled={connecting || cooldown > 0}
         aria-live="polite"
         aria-label={label}
         className={`flex w-full transform-gpu cursor-pointer items-center justify-center gap-3 rounded-full py-3.5 text-[15px] font-bold shadow-2xl transition-transform hover:-translate-y-1 disabled:cursor-wait disabled:hover:translate-y-0 ${tone}`}
@@ -187,7 +240,8 @@ function VoicePill({ agentName, configured }) {
         </div>
       )}
 
-      {/* A failed call is red; "no credentials here" is just information. */}
+      {/* A failed call is red; a deliberate limit and "no credentials here"
+          are information, so neither is. */}
       {(error || notice) && (
         <p
           className={`text-center text-[12px] font-medium ${

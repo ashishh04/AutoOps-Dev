@@ -66,7 +66,7 @@ const CAPS = [
 
 export default function Capabilities() {
   return (
-    <section id="features" className="mx-auto max-w-7xl px-6 py-24">
+    <section id="features" className="mx-auto max-w-7xl scroll-mt-24 px-6 py-24">
       <Reveal>
         <SectionHeading
           eyebrow="Capabilities"

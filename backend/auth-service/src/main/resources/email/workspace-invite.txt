@@ -1,0 +1,7 @@
+You've been added to the "{{workspace}}" workspace on AutoOps.
+
+Sign in with this email address using a one-time code - there is no password
+to set up. Choose "Email me a code" on the sign-in screen.
+
+--
+AutoOps

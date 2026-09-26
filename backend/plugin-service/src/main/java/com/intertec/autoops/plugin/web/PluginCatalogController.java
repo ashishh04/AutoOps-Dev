@@ -45,7 +45,15 @@ public class PluginCatalogController {
                 .toList();
     }
 
-    /** The event vocabulary a rule can subscribe to, with its severity. */
+    /**
+     * The event vocabulary a rule can subscribe to, with its severity and the
+     * target types it can happen to.
+     *
+     * <p>{@code appliesTo} is the part the console cannot infer. An alert never
+     * stalls and a job never parks on an approval; without this the form offers
+     * every event for every target, a customer picks one that cannot fire, and
+     * the rule they end up with is indistinguishable from a broken channel.
+     */
     @GetMapping("/api/plugins/events")
     public List<EventOption> events() {
         return Arrays.stream(LifecycleEvent.values())
@@ -54,14 +62,36 @@ public class PluginCatalogController {
                         label(event),
                         describe(event),
                         event.severity().name(),
-                        event.isTerminal()))
+                        event.isTerminal(),
+                        Arrays.stream(TargetType.values())
+                                .filter(event::appliesTo)
+                                .map(Enum::name)
+                                .toList()))
                 .toList();
     }
 
-    /** The target kinds a rule can watch. */
+    /**
+     * The target kinds a rule can watch.
+     *
+     * <p>{@code identifiesTargets} is false for ALERT alone: an alert has no
+     * numeric id, so a rule for one is always project-wide or workspace-wide.
+     * The console needs that to know whether to render a target picker at all.
+     */
     @GetMapping("/api/plugins/target-types")
-    public List<String> targetTypes() {
-        return Arrays.stream(TargetType.values()).map(Enum::name).toList();
+    public List<TargetOption> targetTypes() {
+        return Arrays.stream(TargetType.values())
+                .map(type -> new TargetOption(type.name(), targetLabel(type),
+                        type.identifiesTargets()))
+                .toList();
+    }
+
+    private static String targetLabel(TargetType type) {
+        return switch (type) {
+            case JOB -> "Jobs";
+            case WORKFLOW -> "Workflows";
+            case AGENT -> "AI Agents";
+            case ALERT -> "Alerts";
+        };
     }
 
     private static String label(LifecycleEvent event) {
@@ -74,6 +104,10 @@ public class PluginCatalogController {
             case MISSED -> "Did not run";
             case STALLED -> "Running too long";
             case RECOVERED -> "Recovered";
+            case AWAITING_APPROVAL -> "Waiting for approval";
+            case TRIGGERED -> "Firing";
+            case RESOLVED -> "Resolved";
+            case ACKNOWLEDGED -> "Acknowledged";
         };
     }
 
@@ -87,6 +121,13 @@ public class PluginCatalogController {
             case MISSED -> "A scheduled window passed and nothing ran at all.";
             case STALLED -> "Still running well past how long it normally takes.";
             case RECOVERED -> "Succeeded for the first time after one or more failures.";
+            case AWAITING_APPROVAL ->
+                    "An agent has stopped and is waiting for someone to approve an action. "
+                            + "It stays stopped until they do.";
+            case TRIGGERED -> "An alert arrived from your monitoring and is firing.";
+            case RESOLVED -> "An alert that was firing has cleared.";
+            case ACKNOWLEDGED ->
+                    "Someone took ownership of an alert in the tool that raised it.";
         };
     }
 
@@ -120,7 +161,18 @@ public class PluginCatalogController {
         }
     }
 
+    /**
+     * @param appliesTo the target types this event can happen to. Never empty —
+     *                  an event nothing can raise would be dead vocabulary.
+     */
     public record EventOption(String value, String label, String description, String severity,
-                              boolean terminal) {
+                              boolean terminal, List<String> appliesTo) {
+    }
+
+    /**
+     * @param identifiesTargets whether a rule of this kind can name one specific
+     *                          target, or only a project and the workspace
+     */
+    public record TargetOption(String value, String label, boolean identifiesTargets) {
     }
 }

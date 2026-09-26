@@ -114,7 +114,9 @@ describe("AegisVoice", () => {
     expect(sdk.startSession).not.toHaveBeenCalled();
   });
 
-  it("shows the server's rate-limit message and offers a retry", async () => {
+  it("shows the server's rate-limit message without painting it as a failure", async () => {
+    // A 429 is the server working, not breaking. Red plus "tap to try again"
+    // tells the visitor to do the one thing the limit guarantees will fail.
     fetchSequence(
       enabled(),
       response(429, { error: "rate_limited", message: "Aegis-01 is at capacity right now" }),
@@ -123,8 +125,74 @@ describe("AegisVoice", () => {
     render(<AegisVoice />);
     await userEvent.click(await screen.findByRole("button"));
 
-    expect(await screen.findByText("Aegis-01 is at capacity right now")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /tap to try again/i })).toBeInTheDocument();
+    const message = await screen.findByText("Aegis-01 is at capacity right now");
+    expect(message).toBeInTheDocument();
+    expect(message.className).toContain("text-slate-500");
+    expect(message.className).not.toContain("rose");
+    expect(screen.queryByRole("button", { name: /tap to try again/i })).not.toBeInTheDocument();
+  });
+
+  it("counts down the wait the server asked for, then takes the tap again", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fetchSequence(
+        enabled(),
+        response(
+          429,
+          { error: "rate_limited", message: "Please try again shortly" },
+          { "Retry-After": "3" },
+        ),
+      );
+
+      render(<AegisVoice />);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(await screen.findByRole("button"));
+
+      // Named, not "shortly": three seconds and ten minutes are different
+      // answers to "should I wait?".
+      const pill = await screen.findByRole("button", { name: /back in 3s/i });
+      expect(pill).toBeDisabled();
+
+      // One second at a time: each tick schedules the next only after React
+      // has re-rendered, so a single 3000ms jump fires one timer and stops.
+      for (let i = 0; i < 4; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+      }
+
+      // And it lets go by itself — a pill still dead after the window is the
+      // outage the window existed to prevent.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /tap to speak with aegis-01/i }))
+          .toBeEnabled(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not spend a call while the cooldown is still running", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      // Two queued responses, so a third fetch would throw and fail the test.
+      const fetchMock = fetchSequence(
+        enabled(),
+        response(429, { message: "Please try again shortly" }, { "Retry-After": "600" }),
+      );
+
+      render(<AegisVoice />);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(await screen.findByRole("button"));
+      await screen.findByRole("button", { name: /back in 10:00/i });
+
+      await user.click(screen.getByRole("button", { name: /back in 10:00/i }));
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("says it is listening while connected, and speaking while the agent talks", async () => {

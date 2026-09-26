@@ -304,9 +304,19 @@ public class LibraryService {
                     "Template definition must be a JSON object");
         }
         switch (type) {
-            case WORKFLOW -> require(node.path("nodes").isArray(),
-                    "A workflow definition needs a nodes[] array — the graph the runtime "
-                            + "executes.");
+            case WORKFLOW -> {
+                require(node.path("nodes").isArray(),
+                        "A workflow definition needs a nodes[] array — the graph the runtime "
+                                + "executes.");
+                // And the graph has to be walkable. A nodes[] array alone
+                // satisfied this check for a definition whose steps nothing
+                // could reach, which is how three unrunnable workflows shipped
+                // and then reported Success.
+                List<String> orphans =
+                        com.intertec.autoops.core.execution.WorkflowGraph.unreachable(node);
+                require(orphans.isEmpty(),
+                        com.intertec.autoops.core.execution.WorkflowGraph.describe(orphans));
+            }
             case AGENT -> require(
                     // A JSON agent carries its allow-list; a PYTHON agent
                     // carries only a reference to a module in the runtime's

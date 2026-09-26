@@ -49,9 +49,9 @@ public class OtpEntry {
             columnDefinition = "ENUM('PENDING','SENT','DELIVERED','BOUNCED','FAILED')")
     private OtpDeliveryStatus deliveryStatus = OtpDeliveryStatus.PENDING;
 
-    /** X-Message-Id from SendGrid v3 Mail Send; correlates Event Webhook callbacks. */
-    @Column(name = "sendgrid_message_id", length = 128)
-    private String sendgridMessageId;
+    /** The email provider's own id for the send, for webhook correlation. */
+    @Column(name = "provider_message_id", length = 128)
+    private String providerMessageId;
 
     @Column(name = "created_at", insertable = false, updatable = false)
     private Instant createdAt;
@@ -139,12 +139,12 @@ public class OtpEntry {
         this.deliveryStatus = deliveryStatus;
     }
 
-    public String getSendgridMessageId() {
-        return sendgridMessageId;
+    public String getProviderMessageId() {
+        return providerMessageId;
     }
 
-    public void setSendgridMessageId(String sendgridMessageId) {
-        this.sendgridMessageId = sendgridMessageId;
+    public void setProviderMessageId(String providerMessageId) {
+        this.providerMessageId = providerMessageId;
     }
 
     public Instant getCreatedAt() {

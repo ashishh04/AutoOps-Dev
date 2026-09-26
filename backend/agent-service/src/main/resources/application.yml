@@ -40,6 +40,22 @@ autoops:
       internal-token: ${WORKFLOW_INTERNAL_TOKEN:dev-internal-token}
       connect-timeout: ${WORKFLOW_CONNECT_TIMEOUT:2s}
       read-timeout: ${WORKFLOW_READ_TIMEOUT:5s}
+    # plugin-service: the tenant's outbound notification channels. Every agent
+    # run status transition posts one event here, plus the one that only agents
+    # have - AWAITING_APPROVAL, which reports work that has STOPPED and stays
+    # stopped until a human acts.
+    #
+    # Best-effort by design: PluginClient never throws and never retries, so a
+    # plugin-service that is down or absent costs a notification and never a
+    # run. Tightest timeouts of any peer for that reason - this sits on the
+    # agent loop's thread, and the far side only queues the fan-out.
+    plugin:
+      base-url: ${PLUGIN_SERVICE_URL:http://localhost:8088}
+      internal-token: ${PLUGIN_INTERNAL_TOKEN:dev-internal-token}
+      connect-timeout: ${PLUGIN_CONNECT_TIMEOUT:1s}
+      read-timeout: ${PLUGIN_READ_TIMEOUT:2s}
+      # Kill switch: false stops agent-service emitting events at all.
+      enabled: ${PLUGIN_NOTIFICATIONS_ENABLED:true}
     # The Python reasoning runtime. Its read timeout is minutes rather than
     # seconds because one call can span several model calls before the run
     # reaches a boundary — and it always runs on the loop's own executor, never

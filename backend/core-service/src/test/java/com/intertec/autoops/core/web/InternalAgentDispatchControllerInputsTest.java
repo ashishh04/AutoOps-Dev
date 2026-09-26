@@ -59,7 +59,9 @@ class InternalAgentDispatchControllerInputsTest {
         controller = new InternalAgentDispatchController(
                 mock(JobRepository.class), mock(RunRepository.class), mock(RunService.class),
                 mock(ApprovalService.class), mock(ApprovalSettingsService.class),
-                workflowClient, MAPPER);
+                workflowClient,
+                mock(com.intertec.autoops.core.service.AgentReadinessService.class),
+                MAPPER);
     }
 
     private void givenDefinition(String definition) {

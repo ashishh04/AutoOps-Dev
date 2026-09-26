@@ -2,24 +2,29 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The alerts list. Two things about this page are load-bearing and easy to
-// regress: it must sort by how bad the alert is rather than when it arrived,
-// and its empty state must never be read as "everything is fine".
+// The alerts list. Three things about this page are load-bearing and easy to
+// regress: it reads the WHOLE workspace unless asked to narrow, it must sort by
+// how bad the alert is rather than when it arrived, and its empty state must
+// never be read as "everything is fine".
 
 const navigate = vi.fn();
 vi.mock("react-router-dom", async () => {
   const actual = await vi.importActual("react-router-dom");
-  return { ...actual, useNavigate: () => navigate, useParams: () => ({ pid: "7" }) };
+  return { ...actual, useNavigate: () => navigate };
 });
 
 const listAlerts = vi.fn();
 vi.mock("../../lib/alerts", () => ({ listAlerts: (...a) => listAlerts(...a) }));
 
+// The project picker loads the workspace's projects. Irrelevant to every
+// assertion here, and left unmocked it reaches the real client.
+vi.mock("../../lib/api", () => ({ api: { listProjects: () => Promise.resolve([]) } }));
+
 const { default: Alerts } = await import("./Alerts");
 
-const renderPage = () =>
+const renderPage = (url = "/app/alerts") =>
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[url]}>
       <Alerts />
     </MemoryRouter>,
   );
@@ -40,9 +45,23 @@ describe("Alerts", () => {
     navigate.mockReset();
   });
 
-  it("scopes the request to the open project", async () => {
+  it("asks for the whole workspace by default", async () => {
+    // The change this pins. Alerts arrive from a monitoring tool that has never
+    // heard of an AutoOps project, so requiring one before anything could be
+    // read meant connecting the same Datadog account in every project and then
+    // guessing which one to look in.
     listAlerts.mockResolvedValue([]);
     renderPage();
+    await waitFor(() =>
+      expect(listAlerts).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: undefined }),
+      ),
+    );
+  });
+
+  it("narrows to a project when the URL asks for one", async () => {
+    listAlerts.mockResolvedValue([]);
+    renderPage("/app/alerts?project=7");
     await waitFor(() =>
       expect(listAlerts).toHaveBeenCalledWith(
         expect.objectContaining({ projectId: "7" }),
@@ -81,12 +100,24 @@ describe("Alerts", () => {
     listAlerts.mockResolvedValue([]);
     renderPage();
 
-    const empty = await screen.findByText(/No alerts are matched to this project/i);
+    const empty = await screen.findByText(/No alerts have arrived yet/i);
     expect(empty).toBeTruthy();
     // An empty alert plane and an unconnected one look identical from here.
     // Copy that reads as reassurance is the failure being guarded against, so
     // the empty state must point at the next action instead.
     expect(empty.textContent).toMatch(/connect a monitoring source/i);
+    expect(empty.textContent).not.toMatch(/all clear|healthy|no issues|you're good/i);
+  });
+
+  it("a FILTERED empty state offers to widen rather than to connect", async () => {
+    // Different question, different answer. Telling someone to connect a source
+    // when they have several and have simply filtered to the wrong project
+    // sends them to buy something they already own.
+    listAlerts.mockResolvedValue([]);
+    renderPage("/app/alerts?project=7");
+
+    const empty = await screen.findByText(/No alerts are matched to this project/i);
+    expect(empty.textContent).toMatch(/clear the project filter/i);
     expect(empty.textContent).not.toMatch(/all clear|healthy|no issues|you're good/i);
   });
 

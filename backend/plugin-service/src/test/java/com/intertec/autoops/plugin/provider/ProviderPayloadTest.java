@@ -106,7 +106,8 @@ class ProviderPayloadTest {
                 "exit code 1",
                 Instant.parse("2026-08-08T09:00:00Z"),
                 Duration.ofSeconds(95),
-                "https://console.example.com/app/runs/1234");
+                "https://console.example.com/app/runs/1234",
+                null);
     }
 
     // ---------------- Slack ----------------

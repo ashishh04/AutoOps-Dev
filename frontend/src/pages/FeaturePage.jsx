@@ -31,7 +31,7 @@ export default function FeaturePage() {
           <div className="mx-auto max-w-5xl px-6 pb-16 pt-20">
             <Reveal>
               <Link
-                to="/#solutions"
+                to="/#features"
                 className="text-sm text-slate-500 transition hover:text-slate-900"
               >
                 ← All capabilities

@@ -17,6 +17,8 @@ public record RuleResponse(
         /** ALL_TARGETS | PROJECT | TARGET — what the rule actually covers. */
         String scope,
         Set<LifecycleEvent> events,
+        /** Null when the rule takes every severity, which is most of them. */
+        LifecycleEvent.Severity minSeverity,
         boolean enabled,
         String createdBy,
         Instant createdAt) {
@@ -33,6 +35,7 @@ public record RuleResponse(
                 rule.getProjectId(),
                 scopeOf(rule),
                 rule.eventSet(),
+                rule.getMinSeverity(),
                 rule.isEnabled(),
                 rule.getCreatedBy(),
                 rule.getCreatedAt());

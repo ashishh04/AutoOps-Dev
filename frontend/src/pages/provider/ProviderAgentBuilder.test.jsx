@@ -87,7 +87,12 @@ beforeEach(() => {
       providerName: "Bedrock",
       kind: "bedrock",
       verified: true,
-      modelsByPurpose: { chat: ["anthropic.claude-sonnet-5"] },
+      // UPPERCASE, as the server sends it: the map is built from
+      // `ModelPurpose.name()`. This fixture said `chat`, which no response
+      // ever contains — so `chatModels()` missed, fell back to every model,
+      // and the test passed while the "chat only" filter did nothing.
+      modelsByPurpose: { CHAT: ["anthropic.claude-sonnet-5"] },
+      models: ["anthropic.claude-sonnet-5", "amazon.titan-embed-text-v2"],
     },
   ]);
   apiMock.providerCreateLibrary.mockResolvedValue({ id: 99 });
@@ -136,6 +141,20 @@ describe("ProviderAgentBuilder", () => {
     expect(spec.tools).toEqual([
       { type: "WORKFLOW", ref: "RD-142-unused-resource-cleanup", mutating: true },
     ]);
+  });
+
+  it("offers no model you cannot hold a conversation with", async () => {
+    // The embedding id is in `models` but not in `modelsByPurpose.CHAT`.
+    // Offering it produces a run that fails at the first call with a vendor
+    // error explaining nothing. This passed for a while because the helper
+    // read a lowercase key the server never sends, missed, and fell back to
+    // every model — so the filter it exists to apply was not applying.
+    renderPage();
+
+    await screen.findByRole("option", { name: "anthropic.claude-sonnet-5" });
+    expect(
+      screen.queryByRole("option", { name: "amazon.titan-embed-text-v2" }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers the model as a dropdown, and still lets an unlisted id be typed", async () => {
@@ -526,5 +545,20 @@ describe("ProviderAgentBuilder", () => {
     expect(
       await screen.findByText(/authored in code \(agent-runtime\)/),
     ).toBeTruthy();
+  });
+
+  it("says phases need a capable model, where the choice is made", async () => {
+    // The unguarded failure mode. A phased agent requires the model to return
+    // a typed object at each phase; one that answers in prose fails the run
+    // minutes and tokens after the click, naming a class nobody recognises.
+    // A single-loop agent has no such contract. That trade belongs next to the
+    // picker, not in a runbook.
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /GATHER/ }));
+
+    // .parentElement because the lead-in is a <span> inside the paragraph.
+    const note = (await screen.findByText(/Needs a capable model/i)).parentElement;
+    expect(note.textContent).toMatch(/structured result, not prose/i);
+    expect(note.textContent).toMatch(/single loop/i);
   });
 });

@@ -49,6 +49,28 @@ describe("createVoiceSession", () => {
     });
   });
 
+  it("keeps the Retry-After the server sent", async () => {
+    // Without it the caller can only say "shortly", which is the same sentence
+    // for a ten-second pause and a ten-minute lockout.
+    fetchSequence(
+      response(429, { message: "Please try again shortly" }, { "Retry-After": "600" }),
+    );
+
+    await expect(createVoiceSession()).rejects.toMatchObject({
+      status: 429,
+      retryAfterSeconds: 600,
+    });
+  });
+
+  it("leaves the wait undefined when the server did not name one", async () => {
+    fetchSequence(response(503, { message: "The voice agent is not available right now" }));
+
+    await expect(createVoiceSession()).rejects.toMatchObject({
+      status: 503,
+      retryAfterSeconds: undefined,
+    });
+  });
+
   it("still fails cleanly when the error body is not JSON", async () => {
     global.fetch = vi.fn(async () => ({
       ok: false,

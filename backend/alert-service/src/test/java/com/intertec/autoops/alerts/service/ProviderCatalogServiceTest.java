@@ -145,4 +145,50 @@ class ProviderCatalogServiceTest {
                 .extracting(e -> ((AlertException) e).getError())
                 .isEqualTo("provider_not_found");
     }
+
+    // ---- ingest attribution ---------------------------------------------
+
+    /**
+     * Naming the connection an alert arrived through is what makes it
+     * recognisable after the engine's own parser has discarded the labels
+     * AutoOps stamped. Alertmanager nests its labels under alerts[].labels, so
+     * the prometheus parser rebuilds the alert and the autoops_tenant stamp
+     * does not survive — verified against a running engine. Without this the
+     * alert belongs to nobody and the customer who sent it cannot see it.
+     */
+    @Test
+    @DisplayName("an arriving alert is attributed to the connection this scope owns")
+    void connectionIsResolvedForIngest() {
+        when(engine.providers()).thenReturn(Map.of("installed_providers", List.of(
+                Map.of("id", "prov-1", "type", "prometheus",
+                        "name", ProviderNaming.qualify("acme", "7", "Prod Prometheus")))));
+
+        assertThat(service.connectedIdFor("acme", "7", "prometheus")).isEqualTo("prov-1");
+    }
+
+    @Test
+    @DisplayName("and never to another tenant's connection of the same type")
+    void connectionIsNotBorrowedFromAnotherTenant() {
+        // The failure that would matter: attributing acme's alert to globex's
+        // Prometheus would put it in globex's feed.
+        when(engine.providers()).thenReturn(Map.of("installed_providers", List.of(
+                Map.of("id", "prov-globex", "type", "prometheus",
+                        "name", ProviderNaming.qualify("globex", "7", "Their Prometheus")))));
+
+        assertThat(service.connectedIdFor("acme", "7", "prometheus")).isNull();
+    }
+
+    @Test
+    @DisplayName("nothing connected of that type resolves to null rather than a guess")
+    void noConnectionResolvesToNull() {
+        // A customer who took an ingest token from the setup panel without
+        // connecting. The alert still arrives; it is simply attributed by
+        // whatever labels survived instead.
+        when(engine.providers()).thenReturn(Map.of("installed_providers", List.of(
+                Map.of("id", "prov-1", "type", "datadog",
+                        "name", ProviderNaming.qualify("acme", "7", "Prod Datadog")))));
+
+        assertThat(service.connectedIdFor("acme", "7", "prometheus")).isNull();
+        assertThat(service.connectedIdFor("acme", "7", null)).isNull();
+    }
 }

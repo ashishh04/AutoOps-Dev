@@ -1,0 +1,9 @@
+Your AutoOps verification code is {{code}}
+
+It expires in {{ttl}}.
+
+Didn't ask for this? You can ignore this email - the code is useless without
+your email address, and nothing changes until it is used.
+
+--
+AutoOps

@@ -1,8 +1,9 @@
-
 // Base URL for the AutoOps backend. In dev this is "/api" and the Vite proxy
 // (vite.config.js) forwards it to the API GATEWAY on http://localhost:8080,
 // which validates tokens and routes to auth-service / subscription-service /
 // core-service (projects + workflows).
+import { cachedGet, invalidateAll } from "./httpCache";
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const ACCESS_KEY = "autoops_access_token";
@@ -38,8 +39,13 @@ export const tokenStore = {
   set(access, refresh) {
     if (access) sessionStorage.setItem(ACCESS_KEY, access);
     if (refresh) sessionStorage.setItem(REFRESH_KEY, refresh);
+    // Cached responses belong to whoever asked for them. A sign-in, or a
+    // refresh that rotated into a token carrying a different role, means the
+    // cache now answers for the wrong identity.
+    invalidateAll();
   },
   clear() {
+    invalidateAll();
     sessionStorage.removeItem(ACCESS_KEY);
     sessionStorage.removeItem(REFRESH_KEY);
     // Tokens written by a build that used localStorage. Without this a stale
@@ -64,7 +70,10 @@ export const tokenStore = {
     const access = localStorage.getItem(ACCESS_KEY);
     const refresh = localStorage.getItem(REFRESH_KEY);
     if (!access && !refresh) return;
-    if (!sessionStorage.getItem(ACCESS_KEY) && !sessionStorage.getItem(REFRESH_KEY)) {
+    if (
+      !sessionStorage.getItem(ACCESS_KEY) &&
+      !sessionStorage.getItem(REFRESH_KEY)
+    ) {
       if (access) sessionStorage.setItem(ACCESS_KEY, access);
       if (refresh) sessionStorage.setItem(REFRESH_KEY, refresh);
     }
@@ -97,9 +106,73 @@ const safeJson = (text) => {
 // goes through the offline mock below so the rest of the app keeps rendering.
 // ---------------------------------------------------------------------------
 
-// Exported so other API layers reuse one transport —
-// single-flight token refresh and the upgrade-required event live here.
-export async function realFetch(path, { method = "GET", body, auth = false, _retry = false } = {}) {
+// How long a response to an allowlisted path may be reused. Short on purpose:
+// long enough that walking back to a screen is instant, short enough that a
+// change made in another tab (or by another operator) shows up on its own.
+const GET_MAX_AGE_MS = 30_000;
+
+/**
+ * GET paths that may be served from a recent response.
+ *
+ * <p>An ALLOWLIST rather than "cache every GET", because the cost of a wrong
+ * entry here is a screen that confidently shows the past. Everything absent
+ * still gets concurrent-call deduplication, which is free of that risk.
+ *
+ * <p><strong>A path that any screen POLLS must never appear here</strong> —
+ * polling exists to observe change, and a cache would hide it for up to
+ * GET_MAX_AGE_MS. That is why the workflow and run lists are missing: Workflows
+ * re-reads them every 3s while something is in flight. Also deliberately
+ * absent: /auth/me and /subscriptions/current (identity and entitlement, where
+ * stale is dangerous rather than merely old), secrets, keys, approvals,
+ * notifications and audit.
+ */
+const CACHEABLE_GETS = [
+  /^\/library(\/[^/]+)?$/,
+  /^\/projects$/,
+  /^\/projects\/[^/]+\/(jobs|nodes|agents)$/,
+  /^\/auth\/(users|roles)$/,
+  /^\/cloud\/connections$/,
+  /^\/model-providers(\/catalog)?$/,
+  /^\/plugins\/(catalog|events|target-types|installations)$/,
+  /^\/plans$/,
+  /^\/commands$/,
+];
+
+function getMaxAge(path) {
+  const route = path.split("?")[0];
+  return CACHEABLE_GETS.some((re) => re.test(route)) ? GET_MAX_AGE_MS : 0;
+}
+
+/**
+ * The transport every caller uses. Reads go through the cache; writes empty it.
+ *
+ * <p>Writes invalidate EVERYTHING rather than guessing which lists they touched.
+ * Creating a job POSTs to /projects/{id}/jobs but also moves a plan quota, a
+ * dashboard count and an audit trail, and a rule clever enough to know that is
+ * a rule that will eventually be wrong. A full drop costs a few refetches; a
+ * missed one shows the customer a list without the row they just created.
+ *
+ * <p>Invalidated in `finally`, not on success: a write that returned 500 may
+ * still have changed server state.
+ */
+export function realFetch(path, options = {}) {
+  const method = options.method || "GET";
+  if (method !== "GET") {
+    return doFetch(path, options).finally(invalidateAll);
+  }
+  // Keyed on the path WITH its query string: two reads of the same route with
+  // different parameters are different responses, and sharing one entry between
+  // them would answer a narrowed request with the whole list.
+  return cachedGet(path, () => doFetch(path, options), {
+    maxAge: getMaxAge(path),
+  });
+}
+
+// Single-flight token refresh and the upgrade-required event live here.
+async function doFetch(
+  path,
+  { method = "GET", body, auth = false, _retry = false } = {},
+) {
   const headers = { "Content-Type": "application/json" };
   if (auth && tokenStore.access) {
     headers["Authorization"] = `Bearer ${tokenStore.access}`;
@@ -114,7 +187,9 @@ export async function realFetch(path, { method = "GET", body, auth = false, _ret
   // One transparent refresh attempt on an expired access token.
   if (res.status === 401 && auth && !_retry && tokenStore.refresh) {
     if (await tryRefresh()) {
-      return realFetch(path, { method, body, auth, _retry: true });
+      // doFetch, not realFetch: the retry is the SAME request, already past the
+      // cache. Re-entering it would dedupe onto the 401 that sent us here.
+      return doFetch(path, { method, body, auth, _retry: true });
     }
   }
 
@@ -122,7 +197,8 @@ export async function realFetch(path, { method = "GET", body, auth = false, _ret
   const data = text ? safeJson(text) : null;
   if (!res.ok) {
     const message =
-      (data && (data.message || data.error)) || `Request failed (${res.status})`;
+      (data && (data.message || data.error)) ||
+      `Request failed (${res.status})`;
     // Subscription-gate denials get a dedicated upgrade prompt (AppLayout
     // listens) instead of only a raw error toast.
     if (data && UPGRADE_ERROR_CODES.has(data.error)) {
@@ -188,7 +264,12 @@ async function doRefresh() {
 // onto the shape the Billing page expects ({plan, subscription, entitlements}).
 function mapSubscription(s) {
   if (!s || s.status === "NONE" || !s.plan) {
-    return { plan: null, subscription: { status: "NONE" }, entitlements: {}, limits: {} };
+    return {
+      plan: null,
+      subscription: { status: "NONE" },
+      entitlements: {},
+      limits: {},
+    };
   }
   return {
     plan: s.plan.code,
@@ -200,7 +281,9 @@ function mapSubscription(s) {
       currentPeriodEnd: s.currentPeriodEnd,
       cancelAtPeriodEnd: s.cancelAtPeriodEnd,
     },
-    entitlements: Object.fromEntries((s.plan.features || []).map((f) => [f, true])),
+    entitlements: Object.fromEntries(
+      (s.plan.features || []).map((f) => [f, true]),
+    ),
     limits: {
       projects: s.plan.maxProjects ?? "Unlimited",
       nodes: s.plan.maxNodes ?? "Unlimited",
@@ -239,7 +322,9 @@ function mapProfile(p) {
   // Real display name from /me (stored at sign-up); prettified slug otherwise.
   const workspaceName =
     p.workspaceName ||
-    (p.tenantId && p.tenantId !== "default" ? prettySlug(p.tenantId) : "My Workspace");
+    (p.tenantId && p.tenantId !== "default"
+      ? prettySlug(p.tenantId)
+      : "My Workspace");
   // Plan is a placeholder until getWorkspace() merges the live subscription.
   const workspace = { name: workspaceName, plan: "Free" };
   // The signed-in member's REAL role drives the client-side RBAC. Defaulting
@@ -259,7 +344,9 @@ function mapProfile(p) {
     workspace,
     activeRole,
     context: isProvider ? "provider" : "client",
-    memberships: [{ tenantId: p.tenantId, role: activeRole, tenant: workspace }],
+    memberships: [
+      { tenantId: p.tenantId, role: activeRole, tenant: workspace },
+    ],
     activeTenantId: p.tenantId,
   };
 }
@@ -356,7 +443,9 @@ const workflowDefinition = (body) =>
 
 async function listWorkflowsReal(projectId) {
   if (projectId) {
-    const rows = await realFetch(`/projects/${projectId}/workflows`, { auth: true });
+    const rows = await realFetch(`/projects/${projectId}/workflows`, {
+      auth: true,
+    });
     return (rows || []).map(mapWorkflow);
   }
   // No project scope (read-only viewer): aggregate across active projects.
@@ -365,7 +454,9 @@ async function listWorkflowsReal(projectId) {
     projects
       .filter((p) => p.status === "ACTIVE")
       .map((p) =>
-        realFetch(`/projects/${p.id}/workflows`, { auth: true }).catch(() => []),
+        realFetch(`/projects/${p.id}/workflows`, { auth: true }).catch(
+          () => [],
+        ),
       ),
   );
   return lists.flat().map(mapWorkflow);
@@ -382,7 +473,10 @@ async function createWorkflowReal(body) {
   });
   if (body.active === false) {
     return mapWorkflow(
-      await realFetch(`/workflows/${created.id}/disable`, { method: "POST", auth: true }),
+      await realFetch(`/workflows/${created.id}/disable`, {
+        method: "POST",
+        auth: true,
+      }),
     );
   }
   return mapWorkflow(created);
@@ -399,10 +493,13 @@ async function updateWorkflowReal(id, body) {
     body: payload,
   });
   if (body.active !== undefined && body.active !== updated.enabled) {
-    updated = await realFetch(`/workflows/${id}/${body.active ? "enable" : "disable"}`, {
-      method: "POST",
-      auth: true,
-    });
+    updated = await realFetch(
+      `/workflows/${id}/${body.active ? "enable" : "disable"}`,
+      {
+        method: "POST",
+        auth: true,
+      },
+    );
   }
   return mapWorkflow(updated);
 }
@@ -429,7 +526,11 @@ function mapJob(j) {
     // defaults rather than coming back undefined, so a job saved before these
     // existed opens in the editor with sane values instead of blank controls.
     options: def.options || [],
-    workflow: { strategy: "node-first", keepgoing: false, ...(def.workflow || {}) },
+    workflow: {
+      strategy: "node-first",
+      keepgoing: false,
+      ...(def.workflow || {}),
+    },
     nodes: {
       dispatch: false,
       filter: "",
@@ -494,7 +595,9 @@ async function listJobsReal(projectId) {
   const lists = await Promise.all(
     projects
       .filter((p) => p.status === "ACTIVE")
-      .map((p) => realFetch(`/projects/${p.id}/jobs`, { auth: true }).catch(() => [])),
+      .map((p) =>
+        realFetch(`/projects/${p.id}/jobs`, { auth: true }).catch(() => []),
+      ),
   );
   return lists.flat().map(mapJob);
 }
@@ -530,7 +633,11 @@ async function updateJobReal(id, body) {
     payload.definition = jobDefinition(body);
   }
   return mapJob(
-    await realFetch(`/jobs/${id}`, { method: "PUT", auth: true, body: payload }),
+    await realFetch(`/jobs/${id}`, {
+      method: "PUT",
+      auth: true,
+      body: payload,
+    }),
   );
 }
 
@@ -577,7 +684,10 @@ function mapAgent(a) {
 const agentTools = (tools) =>
   JSON.stringify(
     (tools || []).map((t) => {
-      const entry = { type: String(t.type || "").toUpperCase(), id: Number(t.id) };
+      const entry = {
+        type: String(t.type || "").toUpperCase(),
+        id: Number(t.id),
+      };
       // Only when known. Saving an agent must not invent a value the grant
       // never had, and must not drop one it did — resending {type, id} alone
       // is what wiped the flag on every rolled-out agent someone edited.
@@ -590,7 +700,9 @@ const agentTools = (tools) =>
 
 async function listAgentsReal(projectId) {
   if (projectId) {
-    const rows = await realFetch(`/projects/${projectId}/agents`, { auth: true });
+    const rows = await realFetch(`/projects/${projectId}/agents`, {
+      auth: true,
+    });
     return (rows || []).map(mapAgent);
   }
   // No project scope: aggregate across active projects.
@@ -598,7 +710,9 @@ async function listAgentsReal(projectId) {
   const lists = await Promise.all(
     projects
       .filter((p) => p.status === "ACTIVE")
-      .map((p) => realFetch(`/projects/${p.id}/agents`, { auth: true }).catch(() => [])),
+      .map((p) =>
+        realFetch(`/projects/${p.id}/agents`, { auth: true }).catch(() => []),
+      ),
   );
   return lists.flat().map(mapAgent);
 }
@@ -634,7 +748,11 @@ async function updateAgentReal(id, body) {
     payload.tools = agentTools(body.tools);
   }
   return mapAgent(
-    await realFetch(`/agents/${id}`, { method: "PUT", auth: true, body: payload }),
+    await realFetch(`/agents/${id}`, {
+      method: "PUT",
+      auth: true,
+      body: payload,
+    }),
   );
 }
 
@@ -722,10 +840,14 @@ export const agentRuns = {
       (rows || []).map(mapAgentRun),
     ),
 
-  get: (runId) => realFetch(`/agent-runs/${runId}`, { auth: true }).then(mapAgentRun),
+  get: (runId) =>
+    realFetch(`/agent-runs/${runId}`, { auth: true }).then(mapAgentRun),
 
   cancel: (runId) =>
-    realFetch(`/agent-runs/${runId}/cancel`, { method: "POST", auth: true }).then(mapAgentRun),
+    realFetch(`/agent-runs/${runId}/cancel`, {
+      method: "POST",
+      auth: true,
+    }).then(mapAgentRun),
 };
 
 // ---- approvals (real: core-service) ----
@@ -861,7 +983,9 @@ async function listRunsReal(projectId, filter) {
         `&targetId=${encodeURIComponent(filter.targetId)}`
       : "";
   if (projectId) {
-    const rows = await realFetch(`/projects/${projectId}/runs${scope}`, { auth: true });
+    const rows = await realFetch(`/projects/${projectId}/runs${scope}`, {
+      auth: true,
+    });
     return (rows || []).map(mapRun);
   }
   // No project scope: aggregate across active projects.
@@ -869,7 +993,9 @@ async function listRunsReal(projectId, filter) {
   const lists = await Promise.all(
     projects
       .filter((p) => p.status === "ACTIVE")
-      .map((p) => realFetch(`/projects/${p.id}/runs`, { auth: true }).catch(() => [])),
+      .map((p) =>
+        realFetch(`/projects/${p.id}/runs`, { auth: true }).catch(() => []),
+      ),
   );
   return lists
     .flat()
@@ -957,12 +1083,11 @@ async function updateMemberRoleReal(id, body) {
 const mapSecret = (s) => ({
   id: s.id,
   path: s.path,
-  type: s.type
-    ? s.type.charAt(0) + s.type.slice(1).toLowerCase()
-    : "Opaque",
-  updated: s.updatedAt || s.createdAt
-    ? new Date(s.updatedAt || s.createdAt).toLocaleString()
-    : "—",
+  type: s.type ? s.type.charAt(0) + s.type.slice(1).toLowerCase() : "Opaque",
+  updated:
+    s.updatedAt || s.createdAt
+      ? new Date(s.updatedAt || s.createdAt).toLocaleString()
+      : "—",
   createdBy: s.createdBy || "",
 });
 
@@ -1077,7 +1202,8 @@ const qs = (projectId) =>
 
 export const api = {
   // ---- auth (real backend: auth-service) ----
-  login: (email, password) => authWithTokens("/auth/login", { email, password }),
+  login: (email, password) =>
+    authWithTokens("/auth/login", { email, password }),
   // Two-step sign-up: register emails a verification code (202, no tokens);
   // verifyRegistration confirms it, activates the account, and signs in.
   register: async (payload) => {
@@ -1090,7 +1216,10 @@ export const api = {
         workspaceName: payload.workspaceName,
       },
     });
-    return { verificationRequired: true, email: (res && res.email) || payload.email };
+    return {
+      verificationRequired: true,
+      email: (res && res.email) || payload.email,
+    };
   },
   verifyRegistration: (email, code) =>
     authWithTokens("/auth/register/verify", { email, otp: code }),
@@ -1131,6 +1260,8 @@ export const api = {
 
   // selectTenant is not backed by the auth-service yet; return the current session.
   selectTenant: async () => {
+    // Nothing cached under the previous tenant may survive the switch.
+    invalidateAll();
     const profile = await realFetch("/auth/me", { auth: true });
     return mapProfile(profile);
   },
@@ -1141,7 +1272,8 @@ export const api = {
     // Archived projects free their plan slot and drop out of the workspace.
     return rows.filter((p) => p.status === "ACTIVE").map(mapProject);
   },
-  getProject: async (id) => mapProject(await realFetch(`/projects/${id}`, { auth: true })),
+  getProject: async (id) =>
+    mapProject(await realFetch(`/projects/${id}`, { auth: true })),
   createProject: async (body) =>
     mapProject(
       await realFetch("/projects", {
@@ -1161,7 +1293,11 @@ export const api = {
       };
     }
     return mapProject(
-      await realFetch(`/projects/${id}`, { method: "PUT", auth: true, body: payload }),
+      await realFetch(`/projects/${id}`, {
+        method: "PUT",
+        auth: true,
+        body: payload,
+      }),
     );
   },
   // "Delete" archives: the data survives, the MAX_PROJECTS slot is freed.
@@ -1218,9 +1354,17 @@ export const api = {
             : resource === "nodes"
               ? createNodeReal(body)
               : resource === "secrets"
-                ? realFetch("/secrets", { method: "POST", auth: true, body }).then(mapSecret)
+                ? realFetch("/secrets", {
+                    method: "POST",
+                    auth: true,
+                    body,
+                  }).then(mapSecret)
                 : resource === "webhooks"
-                  ? realFetch("/webhooks", { method: "POST", auth: true, body }).then(mapWebhook)
+                  ? realFetch("/webhooks", {
+                      method: "POST",
+                      auth: true,
+                      body,
+                    }).then(mapWebhook)
                   : resource === "agents"
                     ? createAgentReal(body)
                     : apiFetch(`/${resource}`, { method: "POST", body }),
@@ -1236,9 +1380,17 @@ export const api = {
             : resource === "nodes"
               ? updateNodeReal(id, body)
               : resource === "secrets"
-                ? realFetch(`/secrets/${id}`, { method: "PUT", auth: true, body }).then(mapSecret)
+                ? realFetch(`/secrets/${id}`, {
+                    method: "PUT",
+                    auth: true,
+                    body,
+                  }).then(mapSecret)
                 : resource === "webhooks"
-                  ? realFetch(`/webhooks/${id}`, { method: "PUT", auth: true, body }).then(mapWebhook)
+                  ? realFetch(`/webhooks/${id}`, {
+                      method: "PUT",
+                      auth: true,
+                      body,
+                    }).then(mapWebhook)
                   : resource === "agents"
                     ? updateAgentReal(id, body)
                     : apiFetch(`/${resource}/${id}`, { method: "PATCH", body }),
@@ -1256,9 +1408,15 @@ export const api = {
               : resource === "secrets"
                 ? realFetch(`/secrets/${id}`, { method: "DELETE", auth: true })
                 : resource === "webhooks"
-                  ? realFetch(`/webhooks/${id}`, { method: "DELETE", auth: true })
+                  ? realFetch(`/webhooks/${id}`, {
+                      method: "DELETE",
+                      auth: true,
+                    })
                   : resource === "agents"
-                    ? realFetch(`/agents/${id}`, { method: "DELETE", auth: true })
+                    ? realFetch(`/agents/${id}`, {
+                        method: "DELETE",
+                        auth: true,
+                      })
                     : apiFetch(`/${resource}/${id}`, { method: "DELETE" }),
 
   // Kill switch for an agent — a disabled agent may not act at all.
@@ -1266,10 +1424,13 @@ export const api = {
   // dedicated call rather than a field on update() — update is refused on
   // provider-managed rows, enable/disable is not.
   setWorkflowEnabled: async (id, enabled) => {
-    const updated = await realFetch(`/workflows/${id}/${enabled ? "enable" : "disable"}`, {
-      method: "POST",
-      auth: true,
-    });
+    const updated = await realFetch(
+      `/workflows/${id}/${enabled ? "enable" : "disable"}`,
+      {
+        method: "POST",
+        auth: true,
+      },
+    );
     return mapWorkflow(updated);
   },
   setAgentEnabled: (id, enabled) =>
@@ -1289,9 +1450,13 @@ export const api = {
         : mapRun(res),
     ),
   approveApproval: (id) =>
-    realFetch(`/approvals/${id}/approve`, { method: "POST", auth: true }).then(mapApproval),
+    realFetch(`/approvals/${id}/approve`, { method: "POST", auth: true }).then(
+      mapApproval,
+    ),
   rejectApproval: (id) =>
-    realFetch(`/approvals/${id}/reject`, { method: "POST", auth: true }).then(mapApproval),
+    realFetch(`/approvals/${id}/reject`, { method: "POST", auth: true }).then(
+      mapApproval,
+    ),
   // ---- scm (real: core-service, per-project git sync via JGit) ----
   // Config PUT is admin-only; token omitted on update keeps the stored one,
   // clearToken:true drops it (for a repo that needs no credentials).
@@ -1328,8 +1493,11 @@ export const api = {
   // Generation evaluates the framework's controls against live project data;
   // a 403 carries the upgrade reason. Reads/downloads are never gated.
   listComplianceReports: async (pid) =>
-    ((await realFetch(`/projects/${pid}/compliance/reports`, { auth: true })) || [])
-      .map(mapComplianceReport),
+    (
+      (await realFetch(`/projects/${pid}/compliance/reports`, {
+        auth: true,
+      })) || []
+    ).map(mapComplianceReport),
   generateComplianceReport: async (pid, framework) => {
     const res = await realFetch(`/projects/${pid}/compliance/reports`, {
       method: "POST",
@@ -1350,10 +1518,16 @@ export const api = {
         ? { Authorization: `Bearer ${tokenStore.access}` }
         : {},
     });
-    if (res.status === 401 && !_retry && tokenStore.refresh && (await tryRefresh())) {
+    if (
+      res.status === 401 &&
+      !_retry &&
+      tokenStore.refresh &&
+      (await tryRefresh())
+    ) {
       return api.downloadComplianceReport(id, filename, true);
     }
-    if (!res.ok) throw new ApiError(`Download failed (${res.status})`, res.status, null);
+    if (!res.ok)
+      throw new ApiError(`Download failed (${res.status})`, res.status, null);
     const url = URL.createObjectURL(await res.blob());
     const a = document.createElement("a");
     a.href = url;
@@ -1407,7 +1581,9 @@ export const api = {
         : mapRun(res),
     ),
   cancelExecution: (id) =>
-    realFetch(`/runs/${id}/cancel`, { method: "POST", auth: true }).then(mapRun),
+    realFetch(`/runs/${id}/cancel`, { method: "POST", auth: true }).then(
+      mapRun,
+    ),
 
   // ---- notifications (real: core-service inbox, per-member read state) ----
   listNotifications: () => realFetch("/notifications", { auth: true }),
@@ -1482,12 +1658,16 @@ export const api = {
     return mapSubscription(s);
   },
   cancelSubscription: async () => {
-    const s = await realFetch("/subscriptions/cancel", { method: "POST", auth: true });
+    const s = await realFetch("/subscriptions/cancel", {
+      method: "POST",
+      auth: true,
+    });
     return mapSubscription(s);
   },
   // Payment history + PAST_DUE recovery (real backend: payment module).
   listPayments: () => realFetch("/payments", { auth: true }),
-  retryPayment: () => realFetch("/payments/retry", { method: "POST", auth: true }),
+  retryPayment: () =>
+    realFetch("/payments/retry", { method: "POST", auth: true }),
 
   // ---- library (real: core-service template catalog) ----
   listLibrary: async () => {
@@ -1544,7 +1724,10 @@ export const api = {
   // Entra ID / Google OAuth / cluster /version). Returns
   // {supported, verified, message, checkedAt}.
   verifyCloudConnection: (id) =>
-    realFetch(`/cloud/connections/${id}/verify`, { method: "POST", auth: true }),
+    realFetch(`/cloud/connections/${id}/verify`, {
+      method: "POST",
+      auth: true,
+    }),
   // Preflight: check credentials with the provider BEFORE anything is stored,
   // so the connection is only created once the user confirms the result.
   verifyCloudCredentials: (platform, credentials) =>
@@ -1608,7 +1791,8 @@ export const api = {
   // has quietly stopped sending anything. The second is answered by absence, so
   // these return per-tenant rollups the console joins against the directory —
   // a tenant missing from a rollup is the finding.
-  providerFleetAlerts: () => realFetch("/provider/fleet/alerts", { auth: true }),
+  providerFleetAlerts: () =>
+    realFetch("/provider/fleet/alerts", { auth: true }),
   providerFleetIncidents: () =>
     realFetch("/provider/fleet/incidents", { auth: true }),
   providerFleetAgents: (days = 7) =>
@@ -1629,7 +1813,10 @@ export const api = {
   // Deliver a catalog item into the provider's OWN sandbox project so it can
   // be run before a customer ever sees it. A real delivery, not a simulation.
   providerTestRollout: (catalogId) =>
-    realFetch(`/provider/rollout/${catalogId}/test`, { method: "POST", auth: true }),
+    realFetch(`/provider/rollout/${catalogId}/test`, {
+      method: "POST",
+      auth: true,
+    }),
 
   providerDeliveries: (catalogId) =>
     realFetch(`/provider/rollout/${catalogId}/deliveries`, { auth: true }),
@@ -1668,7 +1855,9 @@ export const api = {
   // ---- rollout: delivering a catalog item to chosen customers ----
   // Which projects a customer has, so the provider can say WHERE it lands.
   providerTenantProjects: (tenantId) =>
-    realFetch(`/provider/tenants/${encodeURIComponent(tenantId)}/projects`, { auth: true }),
+    realFetch(`/provider/tenants/${encodeURIComponent(tenantId)}/projects`, {
+      auth: true,
+    }),
 
   // targets: [{ tenantId, projectId }]. Per-target outcomes come back in
   // `deliveries` — a rollout can partly succeed, and the UI must say so
@@ -1694,7 +1883,8 @@ export const api = {
   // What a customer must grant before this item can run: the connections, the
   // exact permissions, and a pasteable IAM policy. For an AGENT this is the
   // union across its tools, which is the only place it can be computed.
-  libraryRequirements: (id) => realFetch(`/library/${id}/requirements`, { auth: true }),
+  libraryRequirements: (id) =>
+    realFetch(`/library/${id}/requirements`, { auth: true }),
 
   // One item, with its definition. What the drawer and the designer want.
   libraryItem: (id) => realFetch(`/library/${id}`, { auth: true }),
@@ -1720,20 +1910,41 @@ export const api = {
   pluginCatalog: () => realFetch("/plugins/catalog", { auth: true }),
   /** Lifecycle events a rule can subscribe to, with severity + description. */
   pluginEvents: () => realFetch("/plugins/events", { auth: true }),
+  /**
+   * What a rule can watch, and whether each kind can name ONE target.
+   *
+   * Read from the server rather than listed here. An alert has no id a
+   * customer could pick, so its rules are project- or workspace-wide only, and
+   * a hard-coded copy of that fact in the console is how the two drift apart.
+   */
+  pluginTargetTypes: () => realFetch("/plugins/target-types", { auth: true }),
   listInstallations: () => realFetch("/plugins/installations", { auth: true }),
   installPlugin: (body) =>
     realFetch("/plugins/installations", { method: "POST", auth: true, body }),
   updateInstallation: (id, body) =>
-    realFetch(`/plugins/installations/${id}`, { method: "PUT", auth: true, body }),
+    realFetch(`/plugins/installations/${id}`, {
+      method: "PUT",
+      auth: true,
+      body,
+    }),
   removeInstallation: (id) =>
     realFetch(`/plugins/installations/${id}`, { method: "DELETE", auth: true }),
   /** Real call to the third party. Answers 200 even when it fails. */
   testInstallation: (id) =>
-    realFetch(`/plugins/installations/${id}/test`, { method: "POST", auth: true }),
+    realFetch(`/plugins/installations/${id}/test`, {
+      method: "POST",
+      auth: true,
+    }),
   enableInstallation: (id) =>
-    realFetch(`/plugins/installations/${id}/enable`, { method: "POST", auth: true }),
+    realFetch(`/plugins/installations/${id}/enable`, {
+      method: "POST",
+      auth: true,
+    }),
   disableInstallation: (id) =>
-    realFetch(`/plugins/installations/${id}/disable`, { method: "POST", auth: true }),
+    realFetch(`/plugins/installations/${id}/disable`, {
+      method: "POST",
+      auth: true,
+    }),
   /** Delivery log — what was sent and what came back. */
   pluginDeliveries: (limit = 100) =>
     realFetch(`/plugins/deliveries?limit=${limit}`, { auth: true }),
@@ -1752,7 +1963,8 @@ export const api = {
   modelProviderCatalog: () =>
     realFetch("/model-providers/catalog", { auth: true }),
   /** Models this workspace can actually reach, for the agent model picker. */
-  listWorkspaceModels: () => realFetch("/model-providers/models", { auth: true }),
+  listWorkspaceModels: () =>
+    realFetch("/model-providers/models", { auth: true }),
   /** Switch an agent's model — allowed even on a provider-managed agent. */
   setAgentModel,
   saveModelProvider: (body) =>
@@ -1814,7 +2026,6 @@ export const api = {
   listCommands: () => realFetch("/commands", { auth: true }),
   dispatchCommand: (command) =>
     realFetch("/commands", { method: "POST", auth: true, body: { command } }),
-
 };
 
 // Social/SSO login. "google" and "microsoft" hit the direct OIDC flows in

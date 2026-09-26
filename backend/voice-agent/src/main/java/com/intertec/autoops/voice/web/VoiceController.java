@@ -76,7 +76,18 @@ public class VoiceController {
                     .body(new VoiceError("rate_limited", message));
         }
 
-        String signedUrl = elevenLabs.signedUrl();
+        String signedUrl;
+        try {
+            signedUrl = elevenLabs.signedUrl();
+        } catch (RuntimeException e) {
+            // Nothing was minted, so nothing was spent, so the visitor keeps
+            // the slot. Counting a failure against them turns one upstream
+            // fault into a ten-minute lockout whose message — "you have
+            // started several conversations already" — is simply untrue: they
+            // started none, and it hides the error that actually happened.
+            rateLimiter.release(clientIp);
+            throw e;
+        }
         return ResponseEntity.ok(new VoiceSession(signedUrl, ElevenLabsClient.SIGNED_URL_TTL_SECONDS));
     }
 

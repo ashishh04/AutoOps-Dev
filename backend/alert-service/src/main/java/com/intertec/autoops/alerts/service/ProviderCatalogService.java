@@ -90,16 +90,29 @@ public class ProviderCatalogService {
                 .toList();
     }
 
-    /** What THIS project has connected. Scoped by computed name, never by input. */
+    /**
+     * What this scope has connected. Scoped by computed name, never by input.
+     *
+     * <p>{@code projectId} null lists every source the TENANT connected, which
+     * is what the workspace-level screen shows. Each row then reports its own
+     * project, read back out of the source's name rather than echoing the
+     * question — at workspace level the rows genuinely come from different
+     * projects, and a row that lied about which one would send a customer to
+     * the wrong place to change it.
+     */
     public List<ConnectedProviderView> connected(String tenantId, String projectId) {
         return connectedRaw(tenantId, projectId).stream()
-                .map(p -> new ConnectedProviderView(
-                        str(p.get("id")),
-                        str(p.get("type")),
-                        ProviderNaming.label(str(p.get("details") instanceof Map<?, ?> d
-                                ? d.get("name") : p.get("name")), tenantId, projectId),
-                        projectId,
-                        str(p.get("last_alert_received"))))
+                .map(p -> {
+                    String name = str(p.get("details") instanceof Map<?, ?> d
+                            ? d.get("name") : p.get("name"));
+                    String owner = ProviderNaming.projectOf(name, tenantId);
+                    return new ConnectedProviderView(
+                            str(p.get("id")),
+                            str(p.get("type")),
+                            ProviderNaming.label(name, tenantId, projectId),
+                            owner == null ? projectId : owner,
+                            str(p.get("last_alert_received")));
+                })
                 .toList();
     }
 
@@ -109,12 +122,66 @@ public class ProviderCatalogService {
      * <p>This is what lets an alert be recognised as a tenant's own even though
      * nothing stamped a label on it: it arrived through a provider only that
      * tenant connected. See {@code TenantScope}.
+     *
+     * <p>{@code projectId} null answers for the whole tenant. That is what lets
+     * an unlabelled alert — a Datadog alert has never heard of an AutoOps
+     * project — be recognised at workspace level at all. Without it the
+     * workspace view would show only the alerts something had stamped a label
+     * on, and quietly hide the rest.
      */
     public Set<String> connectedIds(String tenantId, String projectId) {
         return connectedRaw(tenantId, projectId).stream()
                 .map(p -> str(p.get("id")))
                 .filter(id -> id != null && !id.isBlank())
                 .collect(java.util.stream.Collectors.toSet());
+    }
+
+    /**
+     * Which project connected the source an alert arrived through.
+     *
+     * <p>Only needed at workspace level, where the caller named no project and
+     * something downstream still needs one — launching an investigation runs an
+     * agent, and an agent runs somewhere. Reading it back off the source is the
+     * honest answer: that source belongs to exactly one project, and it is the
+     * project whose credentials can actually see the estate the alert came from.
+     *
+     * @return null when the id is not a source this tenant connected
+     */
+    public String projectOfSource(String tenantId, String providerId) {
+        if (providerId == null || providerId.isBlank()) {
+            return null;
+        }
+        return connectedRaw(tenantId, null).stream()
+                .filter(p -> providerId.equals(str(p.get("id"))))
+                .findFirst()
+                .map(p -> ProviderNaming.projectOf(nameOf(p), tenantId))
+                .orElse(null);
+    }
+
+    /**
+     * The id of the source this scope connected for that type, if any.
+     *
+     * <p>Used at ingest, to tell the engine which connection an arriving alert
+     * came through. That is what lets the alert be recognised as this tenant's
+     * own after the source type's own parser has discarded the labels AutoOps
+     * stamped — see {@code KeepApiClient.ingest}.
+     *
+     * <p>First match wins. A scope with two connections of one type has two
+     * that are equally correct: both belong to it, and the ownership check
+     * downstream is a set membership test that either satisfies.
+     *
+     * @return null when nothing of that type is connected here
+     */
+    public String connectedIdFor(String tenantId, String projectId, String type) {
+        if (type == null || type.isBlank()) {
+            return null;
+        }
+        return connectedRaw(tenantId, projectId).stream()
+                .filter(p -> type.equalsIgnoreCase(str(p.get("type"))))
+                .map(p -> str(p.get("id")))
+                .filter(id -> id != null && !id.isBlank())
+                .findFirst()
+                .orElse(null);
     }
 
     private List<Map<String, Object>> connectedRaw(String tenantId, String projectId) {

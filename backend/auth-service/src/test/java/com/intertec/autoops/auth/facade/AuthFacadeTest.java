@@ -14,7 +14,7 @@ import com.intertec.autoops.auth.service.OtpService;
 import com.intertec.autoops.auth.service.RateLimitService;
 import com.intertec.autoops.auth.service.EnterpriseSsoService;
 import com.intertec.autoops.auth.service.RefreshTokenService;
-import com.intertec.autoops.auth.service.SendGridEmailService;
+import com.intertec.autoops.auth.service.ResendEmailService;
 import com.intertec.autoops.auth.service.SocialOidcService;
 import com.intertec.autoops.auth.service.UserService;
 import com.intertec.autoops.auth.service.WorkspaceService;
@@ -66,7 +66,7 @@ class AuthFacadeTest {
     @Mock
     private WorkspaceService workspaceService;
     @Mock
-    private SendGridEmailService sendGridEmailService;
+    private ResendEmailService resendEmailService;
     @Mock
     private SocialOidcService socialOidcService;
     @Mock
@@ -83,7 +83,7 @@ class AuthFacadeTest {
         properties = new AuthProperties();
         facade = new AuthFacade(rateLimitService, otpService, userService, jwtService,
                 refreshTokenService, keycloakAdminService, subscriptionServiceClient,
-                auditService, workspaceService, sendGridEmailService, socialOidcService,
+                auditService, workspaceService, resendEmailService, socialOidcService,
                 enterpriseSsoService, passwordEncoder, properties);
     }
 

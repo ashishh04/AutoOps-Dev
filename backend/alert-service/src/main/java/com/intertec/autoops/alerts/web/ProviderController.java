@@ -51,11 +51,18 @@ public class ProviderController {
         return providers.catalog();
     }
 
-    /** What THIS project has already connected. */
+    /**
+     * What has already been connected.
+     *
+     * <p>{@code projectId} is optional and NARROWS. Omitted, this answers for
+     * the whole workspace, which is how the alert plane is read at tenant level
+     * — a customer connects Datadog once rather than repeating it in every
+     * project. Each row still reports the project that owns it.
+     */
     @GetMapping("/api/alert-providers/connected")
-    public List<ConnectedProviderView> connected(@RequestParam Long projectId,
+    public List<ConnectedProviderView> connected(@RequestParam(required = false) Long projectId,
                                                  @AuthenticationPrincipal Jwt jwt) {
-        return providers.connected(tenant(jwt), String.valueOf(projectId));
+        return providers.connected(tenant(jwt), scope(projectId));
     }
 
     /** How to make this source send alerts here. Scoped to the caller's project. */
@@ -81,12 +88,30 @@ public class ProviderController {
                 request.config() == null ? Map.of() : request.config());
     }
 
+    /**
+     * {@code projectId} optional for the same reason as {@link #connected}: a
+     * source removed from the workspace screen is one the customer found there,
+     * and they should not have to name the project it happens to live in.
+     *
+     * <p>This does not weaken the check. Ownership is still proved by finding
+     * the id among the sources this TENANT connected; an id belonging to
+     * another workspace is still a 404.
+     */
     @DeleteMapping("/api/alert-providers/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void disconnect(@PathVariable String id,
-                           @RequestParam Long projectId,
+                           @RequestParam(required = false) Long projectId,
                            @AuthenticationPrincipal Jwt jwt) {
-        providers.disconnect(tenant(jwt), String.valueOf(projectId), id);
+        providers.disconnect(tenant(jwt), scope(projectId), id);
+    }
+
+    /**
+     * Null rather than {@code "null"}. {@code String.valueOf} on an absent Long
+     * produces the four-character string, which would build a prefix matching
+     * nothing and read as "this workspace has connected nothing".
+     */
+    private static String scope(Long projectId) {
+        return projectId == null ? null : String.valueOf(projectId);
     }
 
     private static String tenant(Jwt jwt) {

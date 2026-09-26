@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.intertec.autoops.agent.client.AutomationClient;
 import com.intertec.autoops.agent.client.ModelCredentialsClient;
+import com.intertec.autoops.agent.client.PluginClient;
 import com.intertec.autoops.agent.client.RuntimeClient;
 import com.intertec.autoops.agent.config.AgentProperties;
 import com.intertec.autoops.agent.domain.Agent;
@@ -141,7 +142,9 @@ public class AgentRunService {
     private final ObjectMapper objectMapper;
     private final RunScopeService scopes;
     private final FindingIngestService findingIngest;
+    private final PluginClient notifications;
     private final TaskExecutor loopExecutor;
+    private final com.intertec.autoops.agent.client.ToolTargetClient toolTargets;
     private final AgentProperties.Loop config;
 
     public AgentRunService(AgentRepository agentRepository,
@@ -157,8 +160,11 @@ public class AgentRunService {
                            ObjectMapper objectMapper,
                            RunScopeService scopes,
                            FindingIngestService findingIngest,
+                           PluginClient notifications,
                            @Qualifier("agentLoopExecutor") TaskExecutor loopExecutor,
+                           com.intertec.autoops.agent.client.ToolTargetClient toolTargets,
                            AgentProperties properties) {
+        this.toolTargets = toolTargets;
         this.agentRepository = agentRepository;
         this.runRepository = runRepository;
         this.stepRepository = stepRepository;
@@ -172,6 +178,7 @@ public class AgentRunService {
         this.objectMapper = objectMapper;
         this.scopes = scopes;
         this.findingIngest = findingIngest;
+        this.notifications = notifications;
         this.loopExecutor = loopExecutor;
         this.config = properties.getLoop();
     }
@@ -211,6 +218,23 @@ public class AgentRunService {
                     "Agents cannot run on " + resolved.vendor() + " yet.");
         }
 
+        // The other half of the same idea, and the half that was missing. The
+        // model was already resolved at the click so a workspace with no usable
+        // AI connection is told now rather than by a run that appears and
+        // immediately fails — but an agent also needs its TOOLS to be able to
+        // reach something, and nothing checked that. A FinOps agent in a
+        // project with no AWS account started, planned, called its first tool
+        // and only then failed.
+        List<String> missing = toolTargets.missingConnections(
+                tenantId, agent.getProjectId(), toolWorkflowIds(agent));
+        if (!missing.isEmpty()) {
+            throw AgentException.badRequest("connection_required",
+                    "This agent reads your " + String.join(" and ", missing)
+                            + " account, and this project has no connected "
+                            + String.join(" or ", missing) + " account to read. "
+                            + "Connect one under Cloud, then run it again.");
+        }
+
         AgentRun run = new AgentRun();
         run.setTenantId(tenantId);
         run.setAgentId(agent.getId());
@@ -226,8 +250,41 @@ public class AgentRunService {
         log.info("Tenant {} queued agent run {} (agent {}, model {})",
                 tenantId, saved.getId(), agent.getId(), resolved.model());
 
+        announce(saved, agent.getName(), "QUEUED", null);
         submitAfterCommit(saved.getId());
         return saved;
+    }
+
+
+    /**
+     * The workflow ids this agent's tools point at.
+     *
+     * <p>Reads {@code id} rather than {@code ref}: agents delivered before
+     * rollout learned to carry a ref have only an id, and keying on ref alone
+     * would examine nothing for them and quietly report them ready.
+     */
+    private List<Long> toolWorkflowIds(Agent agent) {
+        List<Long> ids = new ArrayList<>();
+        try {
+            String raw = agent.getTools();
+            JsonNode tools = objectMapper.readTree(
+                    raw == null || raw.isBlank() ? "[]" : raw);
+            for (JsonNode tool : tools) {
+                if (!"WORKFLOW".equalsIgnoreCase(tool.path("type").asText(""))) {
+                    continue;
+                }
+                JsonNode id = tool.path("id");
+                if (id.isNumber()) {
+                    ids.add(id.asLong());
+                }
+            }
+        } catch (Exception ex) {
+            // An unreadable allow-list is not this check's problem to report;
+            // the run fails on it far more clearly than a readiness message
+            // about cloud connections would.
+            return List.of();
+        }
+        return ids;
     }
 
     /**
@@ -282,6 +339,7 @@ public class AgentRunService {
                 run.setStatus(AgentRun.Status.RUNNING);
                 run.setStartedAt(Instant.now());
                 run = save(run);
+                announce(run, agent.getName(), "STARTED", null);
             }
 
             AgentToolbox.Toolbox tools = toolbox.build(agent);
@@ -554,7 +612,7 @@ public class AgentRunService {
                 run.setPendingResults(writeJson(results));
                 log.info("Agent run {} parked on approval {} for {}",
                         run.getId(), outcome.approvalId(), call.name());
-                return Turn.halted(save(run));
+                return Turn.halted(parked(run, agent, call));
             }
             results.add(resultOf(call.id(), outcome));
             // Saved after each one, so a crash costs at most the tool that was
@@ -617,7 +675,7 @@ public class AgentRunService {
                 run.setApprovalReference(String.valueOf(outcome.approvalId()));
                 run.setPendingToolId(call.id());
                 run.setPendingResults(writeJson(results));
-                return Turn.halted(save(run));
+                return Turn.halted(parked(run, agent, call));
             }
             results.add(resultOf(call.id(), outcome));
             run.setPendingResults(writeJson(results));
@@ -912,6 +970,7 @@ public class AgentRunService {
                 stash(run, messages, results);
                 log.info("Agent run {} parked on approval {} for {}",
                         run.getId(), outcome.approvalId(), call.name());
+                announce(run, agent.getName(), "AWAITING_APPROVAL", approvalDetail(call));
                 return run;
             }
             results.add(outcome.result());
@@ -1249,7 +1308,14 @@ public class AgentRunService {
         // reboot was stopped when it was not.
         run.setError("Cancelled. Any automation already started keeps running — "
                 + "stop it from the Runs view.");
-        return runRepository.save(run);
+        AgentRun saved = runRepository.save(run);
+
+        // Cancelling does not go through finish(), so without this a run a
+        // person stopped is the one lifecycle moment nobody is told about —
+        // and it is the one most likely to matter to whoever was waiting on it.
+        announce(saved, agentName(saved),
+                PluginClient.eventFor(AgentRun.Status.CANCELLED), null);
+        return saved;
     }
 
     @Transactional(readOnly = true)
@@ -1292,6 +1358,11 @@ public class AgentRunService {
     }
 
     private void finish(AgentRun run, AgentRun.Status status, String output, String error) {
+        // Read BEFORE the status moves. "Did the last run fail?" has to mean
+        // the run before this one, and once this row is saved it is itself the
+        // most recent — which would make every success look like a recovery.
+        boolean recovering = status == AgentRun.Status.SUCCEEDED && previousRunFailed(run);
+
         run.setStatus(status);
         run.setOutput(output);
         run.setError(error);
@@ -1299,6 +1370,82 @@ public class AgentRunService {
         save(run);
         log.info("Agent run {} finished {} after {} step(s)", run.getId(), status,
                 run.getStepCount());
+
+        announce(run, agentName(run), recovering ? "RECOVERED" : PluginClient.eventFor(status), error);
+    }
+
+    // ------------------------------------------------------- notifications ---
+    //
+    // Reported to plugin-service, which decides whose Slack or Teams hears
+    // about it. Every call here is best-effort: PluginClient never throws, and
+    // the two lookups these helpers make are wrapped, because a notification
+    // must never be able to fail the run that caused it.
+
+    /**
+     * Saves a parked run and says so.
+     *
+     * <p>Ordered save-then-announce deliberately. A notification that arrives
+     * before the row is committed sends someone to a console that still shows
+     * the run as RUNNING, which reads as a false alarm.
+     */
+    private AgentRun parked(AgentRun run, Agent agent, ToolCall call) {
+        AgentRun saved = save(run);
+        announce(saved, agent.getName(), "AWAITING_APPROVAL", approvalDetail(call));
+        return saved;
+    }
+
+    /** What the human is being asked to allow — useless without it. */
+    private static String approvalDetail(ToolCall call) {
+        return call == null ? null : "Waiting for approval to run " + call.name() + ".";
+    }
+
+    private void announce(AgentRun run, String agentName, String event, String detail) {
+        try {
+            notifications.publish(run, agentName, event, detail);
+        } catch (RuntimeException ex) {
+            // PluginClient already swallows its own failures; this catches the
+            // unexpected ones so the loop cannot die reporting on itself.
+            log.debug("Could not announce {} for run {}", event, run.getId(), ex);
+        }
+    }
+
+    /**
+     * The agent's name, for the channels that render it. A message reading
+     * "Agent 41 failed" is one the reader has to go and decode first.
+     */
+    private String agentName(AgentRun run) {
+        try {
+            return agentRepository.findById(run.getAgentId())
+                    .map(Agent::getName)
+                    .orElse(null);
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether the run before this one failed, which is what turns a success
+     * into a RECOVERED.
+     *
+     * <p>Worth the query: "it is working again" is the message people actually
+     * want after a failure, and without it a tenant watching only FAILED never
+     * learns the outage ended.
+     */
+    private boolean previousRunFailed(AgentRun run) {
+        try {
+            return runRepository
+                    .findTop100ByAgentIdAndTenantIdOrderByIdDesc(run.getAgentId(),
+                            run.getTenantId())
+                    .stream()
+                    .filter(other -> !other.getId().equals(run.getId()))
+                    .filter(other -> other.getStatus().isTerminal())
+                    .findFirst()
+                    .map(other -> other.getStatus() == AgentRun.Status.FAILED)
+                    .orElse(false);
+        } catch (RuntimeException ex) {
+            // Reported as a plain SUCCEEDED rather than not at all.
+            return false;
+        }
     }
 
     /** Last-resort failure write; never throws over the original problem. */

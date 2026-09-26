@@ -28,10 +28,18 @@ public class AuthProperties {
 
     private String keystoreAlias = "autoops-auth";
 
+    /**
+     * Where the console lives, for links inside emails. Not derivable from the
+     * request: mail is sent after the transaction commits, off the request
+     * thread, and a link built from a Host header is a link an attacker can
+     * choose.
+     */
+    private String appBaseUrl = "http://localhost:5173";
+
     private final Otp otp = new Otp();
     private final RateLimit rateLimit = new RateLimit();
     private final Subscription subscription = new Subscription();
-    private final Sendgrid sendgrid = new Sendgrid();
+    private final Resend resend = new Resend();
     private final GatewayClient gatewayClient = new GatewayClient();
     private final Keycloak keycloak = new Keycloak();
     private final Social social = new Social();
@@ -98,6 +106,14 @@ public class AuthProperties {
         this.keystoreAlias = keystoreAlias;
     }
 
+    public String getAppBaseUrl() {
+        return appBaseUrl;
+    }
+
+    public void setAppBaseUrl(String appBaseUrl) {
+        this.appBaseUrl = appBaseUrl;
+    }
+
     public Otp getOtp() {
         return otp;
     }
@@ -110,8 +126,8 @@ public class AuthProperties {
         return subscription;
     }
 
-    public Sendgrid getSendgrid() {
-        return sendgrid;
+    public Resend getResend() {
+        return resend;
     }
 
     public GatewayClient getGatewayClient() {
@@ -341,11 +357,24 @@ public class AuthProperties {
         }
     }
 
-    public static class Sendgrid {
+    /**
+     * Resend (https://resend.com). One API key and one verified sender; there
+     * is no template id, because Resend has no server-side dynamic templates —
+     * the OTP body lives in {@code ResendEmailService}.
+     */
+    public static class Resend {
         private String apiKey = "";
-        private String otpTemplateId = "";
-        private String fromEmail = "no-reply@autoops.io";
-        private String webhookPublicKey = "";
+        /**
+         * Must be an address on a domain verified in Resend. The default is
+         * Resend's shared test sender, which ONLY delivers to the address that
+         * owns the Resend account — it proves the integration and nothing else.
+         */
+        private String fromEmail = "onboarding@resend.dev";
+        private String fromName = "AutoOps";
+        /** Svix signing secret ({@code whsec_...}). Empty disables the webhook. */
+        private String webhookSecret = "";
+        /** Overridable so a test can point the client at a loopback stub. */
+        private String baseUrl = "https://api.resend.com";
 
         public String getApiKey() {
             return apiKey;
@@ -353,14 +382,6 @@ public class AuthProperties {
 
         public void setApiKey(String apiKey) {
             this.apiKey = apiKey;
-        }
-
-        public String getOtpTemplateId() {
-            return otpTemplateId;
-        }
-
-        public void setOtpTemplateId(String otpTemplateId) {
-            this.otpTemplateId = otpTemplateId;
         }
 
         public String getFromEmail() {
@@ -371,12 +392,34 @@ public class AuthProperties {
             this.fromEmail = fromEmail;
         }
 
-        public String getWebhookPublicKey() {
-            return webhookPublicKey;
+        public String getFromName() {
+            return fromName;
         }
 
-        public void setWebhookPublicKey(String webhookPublicKey) {
-            this.webhookPublicKey = webhookPublicKey;
+        public void setFromName(String fromName) {
+            this.fromName = fromName;
+        }
+
+        public String getWebhookSecret() {
+            return webhookSecret;
+        }
+
+        public void setWebhookSecret(String webhookSecret) {
+            this.webhookSecret = webhookSecret;
+        }
+
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String baseUrl) {
+            this.baseUrl = baseUrl;
+        }
+
+        /** {@code AutoOps <no-reply@example.com>} — what the Resend API wants. */
+        public String sender() {
+            return fromName == null || fromName.isBlank()
+                    ? fromEmail : fromName + " <" + fromEmail + ">";
         }
     }
 

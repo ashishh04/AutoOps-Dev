@@ -36,7 +36,23 @@ public class AgentProperties {
      */
     private final Peer runtime = new Peer("http://localhost:8089", Duration.ofMinutes(4));
 
+    /**
+     * plugin-service, where an agent run's lifecycle is reported so a tenant's
+     * Slack or Teams hears about it.
+     *
+     * <p>Tightest timeouts of any peer here, on purpose: this sits on the agent
+     * loop's own thread between turns, and the far side only queues the fan-out
+     * before answering. {@code PluginClient} never throws and never retries, so
+     * a plugin-service that is down or absent costs a notification and nothing
+     * else.
+     */
+    private final Plugin plugin = new Plugin();
+
     private final Loop loop = new Loop();
+
+    public Plugin getPlugin() {
+        return plugin;
+    }
 
     public Loop getLoop() {
         return loop;
@@ -216,6 +232,25 @@ public class AgentProperties {
     }
 
     /** Another AutoOps service reached over its shared-secret internal API. */
+    /** A peer with a kill switch, because notifications are optional. */
+    public static class Plugin extends Peer {
+
+        private boolean enabled = true;
+
+        public Plugin() {
+            super("http://localhost:8088", Duration.ofSeconds(2));
+            setConnectTimeout(Duration.ofSeconds(1));
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+    }
+
     public static class Peer {
 
         private String baseUrl;

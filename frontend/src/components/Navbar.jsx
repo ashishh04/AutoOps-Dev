@@ -1,11 +1,16 @@
 import React, { useEffect, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Logo, PrimaryButton } from "./ui";
 
+// `hash` entries are sections of the landing page; `to` entries are routes.
+//
+// Every hash here must match an `id` on a section in pages/Home.jsx. "Solutions"
+// used to point at the hero, which meant clicking it from the top of the page
+// did nothing visible at all.
 const LINKS = [
-  { label: "Product", href: "/#product" },
-  { label: "Capabilities", href: "/#features" },
-  { label: "Solutions", href: "/#solutions" },
+  { label: "Product", hash: "product" },
+  { label: "Capabilities", hash: "features" },
+  { label: "Solutions", hash: "solutions" },
   { label: "Pricing", to: "/pricing" },
   { label: "Docs", to: "/docs" },
 ];
@@ -14,6 +19,7 @@ export default function Navbar() {
   const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const { pathname } = useLocation();
+  const navigate = useNavigate();
 
   useEffect(() => setOpen(false), [pathname]);
   useEffect(() => {
@@ -22,6 +28,26 @@ export default function Navbar() {
     window.addEventListener("scroll", onScroll);
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+
+  // A plain <a href="/#x"> reloads the whole SPA from any route other than the
+  // landing page, and does nothing at all when the hash is already set. Both
+  // are handled here: scroll when the section is on screen, route when it is
+  // not, and keep the URL shareable either way.
+  const goToSection = (event, hash) => {
+    event.preventDefault();
+    setOpen(false);
+    if (pathname === "/") {
+      document
+        .getElementById(hash)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      window.history.replaceState(null, "", `/#${hash}`);
+      return;
+    }
+    navigate(`/#${hash}`);
+  };
+
+  const desktopLink =
+    "relative text-sm text-slate-600 transition hover:text-slate-900 after:absolute after:-bottom-1 after:left-0 after:h-px after:w-0 after:bg-slate-900 after:transition-all hover:after:w-full";
 
   return (
     <header
@@ -37,18 +63,15 @@ export default function Navbar() {
         <div className="hidden items-center gap-8 md:flex">
           {LINKS.map((l) =>
             l.to ? (
-              <Link
-                key={l.label}
-                to={l.to}
-                className="relative text-sm text-slate-600 transition hover:text-slate-900 after:absolute after:-bottom-1 after:left-0 after:h-px after:w-0 after:bg-slate-900 after:transition-all hover:after:w-full"
-              >
+              <Link key={l.label} to={l.to} className={desktopLink}>
                 {l.label}
               </Link>
             ) : (
               <a
                 key={l.label}
-                href={l.href}
-                className="relative text-sm text-slate-600 transition hover:text-slate-900 after:absolute after:-bottom-1 after:left-0 after:h-px after:w-0 after:bg-slate-900 after:transition-all hover:after:w-full"
+                href={`/#${l.hash}`}
+                onClick={(e) => goToSection(e, l.hash)}
+                className={desktopLink}
               >
                 {l.label}
               </a>
@@ -78,6 +101,7 @@ export default function Navbar() {
           onClick={() => setOpen((v) => !v)}
           className="text-slate-900 md:hidden"
           aria-label="Menu"
+          aria-expanded={open}
         >
           <svg
             width="24"
@@ -106,7 +130,8 @@ export default function Navbar() {
             ) : (
               <a
                 key={l.label}
-                href={l.href}
+                href={`/#${l.hash}`}
+                onClick={(e) => goToSection(e, l.hash)}
                 className="block py-2 text-slate-600"
               >
                 {l.label}

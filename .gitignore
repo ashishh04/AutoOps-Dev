@@ -102,3 +102,59 @@ docker-compose.override.yml
 # catalog. A backup in the repository is a breach waiting for the repository to
 # be shared.
 backups/
+
+# ---------------------------------------------------------------------------
+# Superseded and scratch files (2026-09-26)
+# ---------------------------------------------------------------------------
+# The code repo is backend/, frontend/, Scripts/ and .github/. Everything
+# below was working material that outlived its purpose. It stays in git
+# history — these rules only stop it coming back.
+#
+# Dead component, replaced by frontend/src/pages/AgentsHub.
+/agentshub-old.jsx
+# Dify workflow exports. Dify itself was removed on 2026-09-19; these are the
+# last two designs that were never ported to the native runtime.
+/Incident_Postmortem_Writer.yml
+/Meeting_Actions_and_Follow-up.yml
+# One-off debug queries. Flyway migrations under src/main/resources/db/migration
+# are code and stay tracked — these were run by hand against a live schema.
+/invariant.sql
+/witness.sql
+# Scratch harness for the ingest patch.
+/patch_ingest_test.py
+# Design notes for the first three agents, since built and shipped.
+/.specs.txt
+# Archived Dify definitions, kept only until the native runtime landed.
+/.dify-archive/
+
+# ---------------------------------------------------------------------------
+# Generated media / render output
+# ---------------------------------------------------------------------------
+# Release-video renders from the brag skill: ~99 MB of .mp4/.jpg plus the
+# HyperFrames composition that produced them. Regenerable output, and large
+# binaries bloat every clone permanently once committed.
+/brag-output/
+# Lockfile for locally installed Claude Code skills — local tooling, same as
+# .claude/ above.
+/skills-lock.json
+
+# ---------------------------------------------------------------------------
+# Demo stack and seed data (2026-09-26)
+# ---------------------------------------------------------------------------
+# The code repo is backend/, frontend/, Scripts/ and .github/. These two are
+# operational material for the demo host, not source, and they stay in git
+# history — the rules below only stop them coming back.
+#
+# Seed SQL and loader scripts for the demo tenant. Carries a stale tenant id
+# since the 2026-08-09 deletion, so it cannot be replayed as-is anyway.
+/demo-data/
+# The demo overlay: docker-compose.demo.yml, nginx.demo.conf, ngrok config and
+# the up/down/status scripts. nginx.demo.conf is what actually serves the demo
+# host (the root .env merges this overlay), so removing it from the repo means
+# the live demo config now exists ONLY on that host and in git history.
+/deploy-demo/
+
+# Downloaded binaries and local skill installs - never source.
+# .tools/ holds a 484 MB ffmpeg build; its .exe files exceed GitHub's 100 MB limit.
+/.tools/
+/.agents/

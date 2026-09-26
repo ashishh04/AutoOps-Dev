@@ -40,6 +40,16 @@ public final class TenantScope {
     public static final String TENANT_LABEL = "autoops_tenant";
     public static final String PROJECT_LABEL = "autoops_project";
 
+    /**
+     * How the tenant label is addressed in an engine CEL expression.
+     *
+     * <p>Derived from {@link #TENANT_LABEL} rather than written out, because
+     * the two drifting apart is silent: a correlation rule carrying a path the
+     * alerts do not have simply matches nothing, no incident is ever created,
+     * and nothing logs an error. See {@code CorrelationQuery}.
+     */
+    public static final String TENANT_LABEL_PATH = "labels." + TENANT_LABEL;
+
     private final String tenantId;
     private final boolean provider;
     private final Long projectId;
@@ -87,11 +97,13 @@ public final class TenantScope {
      * tenant would. The caller is trusted to state a tenant, not to widen what
      * the tenant can see.
      *
-     * <p>The project id is required rather than optional, because
-     * {@code IncidentService.enrich} can only resolve which monitoring sources
-     * a tenant owns when it has one — and with no owned sources the ownership
-     * filter matches nothing. Passing null here would return an empty list that
-     * reads like "no incidents" rather than "wrong question".
+     * <p>The project id is required rather than optional. A signed-in user may
+     * legitimately ask a workspace-wide question — that is what the alert plane
+     * shows at tenant level — but an internal caller is always an agent tool
+     * running inside one project, so a missing project id there is a caller
+     * that forgot to say which, not a request to widen. Answering it with the
+     * whole workspace would hand an agent subjects outside the scope it claims
+     * coverage of.
      */
     public static TenantScope internal(String tenantId, Long projectId) {
         if (tenantId == null || tenantId.isBlank()) {

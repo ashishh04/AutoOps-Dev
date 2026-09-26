@@ -93,6 +93,39 @@ public class SessionRateLimiter {
         }
     }
 
+    /**
+     * Hands back the slot a preceding {@link #tryAcquire} took, for a session
+     * that in the end was never minted.
+     *
+     * <p>This limiter exists to protect a bill. A call that failed upstream
+     * bought nothing and spent nothing, so charging the visitor for it is not
+     * caution — it is a wrong answer. Without this, an outage at the vendor
+     * reaches the visitor as <em>"you have started several conversations
+     * already"</em> after five attempts that all failed, which is both false
+     * and the opposite of a clue: it blames them for our fault and buries the
+     * real error for a full window.
+     *
+     * <p>The most recent hit is the one removed, because the slot being handed
+     * back is the one just taken. Releasing a slot that was never acquired is
+     * harmless and does nothing — the deque is simply empty.
+     */
+    public void release(String clientIp) {
+        if (!properties.getRateLimit().isEnabled()) {
+            return;
+        }
+        String key = clientIp == null || clientIp.isBlank() ? "unknown" : clientIp;
+        synchronized (this) {
+            Deque<Long> hits = hitsByIp.get(key);
+            if (hits != null) {
+                hits.pollLast();
+                if (hits.isEmpty()) {
+                    hitsByIp.remove(key);
+                }
+            }
+            globalHits.pollLast();
+        }
+    }
+
     /** Seconds until the caller's oldest hit falls out of the window. */
     public long retryAfterSeconds() {
         return Math.max(1, properties.getRateLimit().getWindow().toSeconds());

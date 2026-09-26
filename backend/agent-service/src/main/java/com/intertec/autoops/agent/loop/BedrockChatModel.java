@@ -8,6 +8,7 @@ import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient;
 import software.amazon.awssdk.services.bedrockruntime.model.ContentBlock;
 import software.amazon.awssdk.services.bedrockruntime.model.ConversationRole;
 import software.amazon.awssdk.services.bedrockruntime.model.ConverseRequest;
+import software.amazon.awssdk.services.bedrockruntime.model.ValidationException;
 import software.amazon.awssdk.services.bedrockruntime.model.ConverseResponse;
 import software.amazon.awssdk.services.bedrockruntime.model.InferenceConfiguration;
 import software.amazon.awssdk.services.bedrockruntime.model.Message;
@@ -46,6 +47,9 @@ import java.util.Map;
 @Component
 public class BedrockChatModel implements ChatModel {
 
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(BedrockChatModel.class);
+
     @Override
     public boolean supports(ModelVendor vendor) {
         return vendor == ModelVendor.BEDROCK;
@@ -54,9 +58,43 @@ public class BedrockChatModel implements ChatModel {
     @Override
     public ChatResponse chat(Request request) {
         BedrockRuntimeClient client = BedrockClientFactory.create(request.credentials());
+        String region = request.credentials().orElse("region", "");
+        try {
+            return toChatResponse(converse(client, request, request.model()));
+        } catch (ValidationException ex) {
+            // The newer Anthropic models cannot be invoked by their bare id at
+            // all. Bedrock answers "Invocation of model ID X with on-demand
+            // throughput isn't supported. Retry with an inference profile",
+            // which is a real instruction rather than a failure — the same
+            // model is reachable through a cross-region inference profile whose
+            // id is the bare one with a geography prefix.
+            //
+            // Retried rather than prefixed up front, because the two id forms
+            // are not interchangeable: the older models this platform also runs
+            // (deepseek, Claude 3 Haiku) have no profile and fail if given one.
+            // Asking Bedrock which it wants is cheaper than keeping a list of
+            // which models moved, and it stays correct when the next one does.
+            //
+            // Costs one rejected call, once, on a validation error that burns
+            // no tokens.
+            String profileId = inferenceProfileId(request.model(), region);
+            if (profileId == null) {
+                throw explain(ex, request.model(), region);
+            }
+            log.info("Bedrock refused the bare model id {}; retrying as inference profile {}",
+                    request.model(), profileId);
+            try {
+                return toChatResponse(converse(client, request, profileId));
+            } catch (ValidationException retry) {
+                throw explain(retry, request.model(), region);
+            }
+        }
+    }
 
+    private ConverseResponse converse(BedrockRuntimeClient client, Request request,
+                                      String modelId) {
         ConverseRequest.Builder converse = ConverseRequest.builder()
-                .modelId(request.model())
+                .modelId(modelId)
                 .messages(toMessages(request.messages()))
                 .inferenceConfig(InferenceConfiguration.builder()
                         .maxTokens(request.maxTokens())
@@ -71,9 +109,72 @@ public class BedrockChatModel implements ChatModel {
                     .tools(request.tools().stream().map(this::toTool).toList())
                     .build());
         }
+        return client.converse(converse.build());
+    }
 
-        ConverseResponse response = client.converse(converse.build());
-        return toChatResponse(response);
+    /**
+     * The cross-region inference profile id for a bare model id, or null.
+     *
+     * <p>Null means "do not retry": the id already carries a prefix, the region
+     * is unknown, or it sits in a geography AWS publishes no profile prefix for.
+     * Guessing one would turn a clear "this model needs a profile" into a
+     * confusing "that profile does not exist", which is further from the truth
+     * rather than closer to it.
+     */
+    static String inferenceProfileId(String modelId, String region) {
+        if (modelId == null || modelId.isBlank() || region == null || region.isBlank()) {
+            return null;
+        }
+        String prefix = profilePrefix(region);
+        if (prefix == null || modelId.startsWith(prefix + ".")) {
+            return null;
+        }
+        return prefix + "." + modelId;
+    }
+
+    /**
+     * The four geographies AWS actually publishes profile prefixes for.
+     *
+     * <p>An unrecognised region returns null rather than a guess derived from
+     * its first segment — {@code me-south-1} would become {@code me.}, which is
+     * not a thing, and the resulting error would send whoever reads it looking
+     * for a profile that was never going to exist.
+     */
+    private static String profilePrefix(String region) {
+        String r = region.toLowerCase(java.util.Locale.ROOT).trim();
+        if (r.startsWith("us-gov-")) {
+            return "us-gov";
+        }
+        if (r.startsWith("us-")) {
+            return "us";
+        }
+        if (r.startsWith("eu-")) {
+            return "eu";
+        }
+        if (r.startsWith("ap-")) {
+            return "apac";
+        }
+        return null;
+    }
+
+    /**
+     * Bedrock's own message, plus the part a reader needs and it omits: which
+     * region this was tried in, and that the id offered in the console may
+     * simply not be invocable there.
+     */
+    private static RuntimeException explain(ValidationException ex, String modelId,
+                                            String region) {
+        String detail = ex.getMessage() == null ? "" : ex.getMessage();
+        if (detail.toLowerCase(java.util.Locale.ROOT).contains("inference profile")) {
+            return new IllegalStateException(
+                    "Bedrock will not run \"" + modelId + "\" in "
+                            + (region.isBlank() ? "this region" : region)
+                            + " by its plain model id, and no cross-region inference profile "
+                            + "for it is available there. Choose a different model for this "
+                            + "agent, or enable the model in a region that offers one. "
+                            + "(Bedrock said: " + detail + ")", ex);
+        }
+        return ex;
     }
 
     // ----------------------------------------------------------- request ---

@@ -235,8 +235,124 @@ describe("transparent refresh", () => {
         : response(401, { error: "token_expired" });
     });
 
-    await Promise.all([api.listProjects(), api.listProjects()]);
+    // TWO DIFFERENT paths on purpose. The response cache joins concurrent reads
+    // of the SAME path into one request, which would satisfy this assertion
+    // without the single-flight refresh ever being exercised.
+    await Promise.all([api.listProjects(), api.listPayments()]);
 
     expect(refreshCalls).toBe(1);
+  });
+});
+
+/**
+ * The response cache. What it may serve is an allowlist in api.js, and the risk
+ * it carries is showing one session's data to the next — so the emptying rules
+ * matter more here than the hit rate.
+ */
+describe("response cache", () => {
+  it("serves an allowlisted path from the previous response", async () => {
+    tokenStore.set("access-1", "refresh-1");
+    const fetchMock = fetchSequence(
+      response(200, [{ id: 1, name: "Ops", status: "ACTIVE" }]),
+    );
+
+    const first = await api.listProjects();
+    const second = await api.listProjects();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+  });
+
+  /** Identity and entitlement are never served from a previous answer. */
+  it("re-fetches a path that is not on the allowlist", async () => {
+    tokenStore.set("access-1", "refresh-1");
+    const fetchMock = fetchSequence(response(200, []), response(200, []));
+
+    await api.listPayments();
+    await api.listPayments();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  /** Deduplication applies to every GET, allowlisted or not. */
+  it("joins concurrent reads of one path into a single request", async () => {
+    tokenStore.set("access-1", "refresh-1");
+    const fetchMock = fetchSequence(response(200, []));
+
+    await Promise.all([api.listPayments(), api.listPayments()]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("empties the cache after a write", async () => {
+    tokenStore.set("access-1", "refresh-1");
+    const fetchMock = fetchSequence(
+      response(200, [{ id: 1, name: "Ops", status: "ACTIVE" }]),
+      response(200, { id: 2, name: "New", status: "ACTIVE" }),
+      response(200, [
+        { id: 1, name: "Ops", status: "ACTIVE" },
+        { id: 2, name: "New", status: "ACTIVE" },
+      ]),
+    );
+
+    await api.listProjects();
+    await api.createProject({ name: "New" });
+    const after = await api.listProjects();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(after.map((p) => p.id)).toEqual([1, 2]);
+  });
+
+  /** A write that failed may still have changed server state. */
+  it("empties the cache even when the write fails", async () => {
+    tokenStore.set("access-1", "refresh-1");
+    const fetchMock = fetchSequence(
+      response(200, [{ id: 1, name: "Ops", status: "ACTIVE" }]),
+      response(500, { error: "internal_error" }),
+      response(200, [{ id: 1, name: "Ops", status: "ACTIVE" }]),
+    );
+
+    await api.listProjects();
+    await expect(api.createProject({ name: "New" })).rejects.toThrow(ApiError);
+    await api.listProjects();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  /**
+   * The cache has no tenant in its keys, so a session change has to drop all of
+   * it. Without this, signing into a second account in the same tab would read
+   * the first account's projects out of memory.
+   */
+  it("drops everything when the session ends", async () => {
+    tokenStore.set("access-1", "refresh-1");
+    const fetchMock = fetchSequence(
+      response(200, [{ id: 1, name: "Ops", status: "ACTIVE" }]),
+      response(200, [{ id: 9, name: "Other", status: "ACTIVE" }]),
+    );
+
+    await api.listProjects();
+    tokenStore.clear();
+    tokenStore.set("access-2", "refresh-2");
+    const after = await api.listProjects();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(after.map((p) => p.id)).toEqual([9]);
+  });
+
+  it("drops everything when a refresh rotates the token", async () => {
+    tokenStore.set("access-1", "refresh-1");
+    const fetchMock = fetchSequence(
+      response(200, [{ id: 1, name: "Ops", status: "ACTIVE" }]),
+      response(200, [{ id: 1, name: "Ops", status: "ACTIVE" }]),
+    );
+
+    await api.listProjects();
+    // What tryRefresh does on a 401: the new access token may carry a different
+    // role, so nothing read under the old one may be reused.
+    tokenStore.set("access-2", "refresh-2");
+    await api.listProjects();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

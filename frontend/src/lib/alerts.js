@@ -14,6 +14,11 @@ import { realFetch } from "./api";
  * scopes the answer to it. There is no tenant or project parameter that widens
  * what comes back — `projectId` can only narrow, and the server treats it that
  * way regardless of what is sent.
+ *
+ * Omitting `projectId` is therefore the WORKSPACE view, not a broken one. The
+ * server resolves every monitoring source the tenant connected, across all its
+ * projects, which is what lets an alert carrying no AutoOps labels be
+ * recognised at all — a Datadog alert has never heard of an AutoOps project.
  */
 
 const qs = (params) => {
@@ -32,10 +37,9 @@ export function listAlerts({ projectId, status, severity, limit } = {}) {
 }
 
 /**
- * `projectId` widens nothing. It is how the server learns which monitoring
- * sources this project owns, which is the only way an alert carrying no labels
- * is recognised at all — a Datadog alert has never heard of an AutoOps project.
- * Omit it and such an alert lists fine, then 404s when opened.
+ * Pass the SAME `projectId` the list was fetched with, or none if it had none.
+ * Listing and opening resolve ownership the same way, so a mismatch is how you
+ * get an alert that appears in the feed and then 404s when clicked.
  */
 export function getAlert(fingerprint, projectId) {
   return realFetch(
@@ -59,7 +63,7 @@ export function getProviderSetup(type, projectId) {
   );
 }
 
-/** What this project has already connected. */
+/** What has already been connected. No `projectId` means the whole workspace. */
 export function listConnectedProviders(projectId) {
   return realFetch(`/alert-providers/connected${qs({ projectId })}`, {
     auth: true,

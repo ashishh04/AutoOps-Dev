@@ -30,16 +30,17 @@ public class AlertQueryService {
      * here, where the cost is visible.
      */
     private TenantScope enrich(TenantScope scope) {
-        // A connected source is scoped to ONE project, so without a project in
-        // hand there is nothing to match against. Enriching with an empty
-        // project would build a prefix no real provider carries — dead weight,
-        // and misleading to read.
-        if (scope.isProvider() || scope.tenantId() == null || scope.projectId() == null) {
+        if (scope.isProvider() || scope.tenantId() == null) {
             return scope;
         }
         try {
-            return scope.owning(providers.connectedIds(
-                    scope.tenantId(), String.valueOf(scope.projectId())));
+            // No project means the whole tenant, not "no sources". Bailing out
+            // here is what used to make the workspace-level view dishonest: an
+            // alert nothing had stamped a label on — which is most of them,
+            // since Datadog has never heard of an AutoOps project — listed as
+            // absent rather than as somebody else's.
+            return scope.owning(providers.connectedIds(scope.tenantId(),
+                    scope.projectId() == null ? null : String.valueOf(scope.projectId())));
         } catch (RuntimeException ex) {
             // Never widen on failure. If the source list cannot be read, the
             // label rule alone still applies — showing too little beats showing

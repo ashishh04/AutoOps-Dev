@@ -20,14 +20,18 @@ import java.util.stream.Collectors;
  *
  * <p>Scope widens as the two id columns go null:
  * <ul>
- *   <li>{@code targetId} set — one specific job or workflow.</li>
- *   <li>{@code targetId} null, {@code projectId} set — every job (or every
- *       workflow) in that project, including ones created later.</li>
- *   <li>both null — every job or workflow in the workspace.</li>
+ *   <li>{@code targetId} set — one specific job, workflow or agent.</li>
+ *   <li>{@code targetId} null, {@code projectId} set — every target of that
+ *       type in that project, including ones created later.</li>
+ *   <li>both null — every target of that type in the workspace.</li>
  * </ul>
  * Wildcards matter operationally: a rule written per-job silently fails to
  * cover the job someone adds next week, which is exactly when a missed alert
  * hurts.
+ *
+ * <p>An {@code ALERT} rule is always one of the last two. An alert has no
+ * numeric id, so there is nothing for {@code targetId} to hold — see
+ * {@link TargetType#identifiesTargets}.
  */
 @Entity
 @Table(name = "notification_rules")
@@ -50,7 +54,8 @@ public class NotificationRule {
     private Long installationId;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "target_type", nullable = false, columnDefinition = "ENUM('JOB','WORKFLOW')")
+    @Column(name = "target_type", nullable = false,
+            columnDefinition = "ENUM('JOB','WORKFLOW','AGENT','ALERT')")
     private TargetType targetType;
 
     /** Null means every target of this type in scope. */
@@ -68,6 +73,23 @@ public class NotificationRule {
      */
     @Column(nullable = false, length = 255)
     private String events;
+
+    /**
+     * The floor an event's severity has to clear, or null for no opinion.
+     *
+     * <p>Exists for alerts. A job fires a handful of events a day; a workspace
+     * receives hundreds of alerts, most of them informational. A rule that
+     * cannot say "critical only" is a rule nobody can afford to leave on — and
+     * a channel people mute is worse than one they never had, because they stop
+     * reading the messages that mattered too.
+     *
+     * <p>Null rather than defaulted to INFO. The two are equivalent today and
+     * would stop being so the moment a severity below INFO existed; a rule that
+     * expressed no opinion must keep meaning exactly that.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "min_severity", length = 16)
+    private LifecycleEvent.Severity minSeverity;
 
     @Column(nullable = false)
     private boolean enabled = true;
@@ -106,7 +128,26 @@ public class NotificationRule {
 
     /** Does this rule cover that target? Assumes the tenant already matched. */
     public boolean matches(TargetType type, Long target, Long project, LifecycleEvent event) {
+        return matches(type, target, project, event, null);
+    }
+
+    /**
+     * Does this rule cover that target?  Assumes the tenant already matched.
+     *
+     * @param severity what actually happened, which for an alert is the
+     *                 alert's own severity and NOT the event's. A firing alert
+     *                 is always a TRIGGERED event; whether it is worth waking
+     *                 somebody for is the alert's business. Null falls back to
+     *                 the event's own severity, which is what every run-shaped
+     *                 event passes.
+     */
+    public boolean matches(TargetType type, Long target, Long project, LifecycleEvent event,
+                           LifecycleEvent.Severity severity) {
         if (!enabled || targetType != type || !eventSet().contains(event)) {
+            return false;
+        }
+        LifecycleEvent.Severity actual = severity != null ? severity : event.severity();
+        if (!actual.atLeast(minSeverity)) {
             return false;
         }
         if (targetId != null) {
@@ -158,6 +199,14 @@ public class NotificationRule {
 
     public void setProjectId(Long projectId) {
         this.projectId = projectId;
+    }
+
+    public LifecycleEvent.Severity getMinSeverity() {
+        return minSeverity;
+    }
+
+    public void setMinSeverity(LifecycleEvent.Severity minSeverity) {
+        this.minSeverity = minSeverity;
     }
 
     public String getEvents() {

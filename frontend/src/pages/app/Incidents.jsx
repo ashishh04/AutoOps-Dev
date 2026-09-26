@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   PageHeader,
   Table,
@@ -9,7 +9,9 @@ import {
 } from "../../components/app/appui";
 import Icon from "../../components/Icon";
 import { SeverityChip, severityRank } from "../../components/app/AlertSeverity";
+import ProjectScopePicker from "../../components/app/ProjectScopePicker";
 import { listIncidents } from "../../lib/incidents";
+import { useAlertScope } from "../../lib/alertScope";
 
 const STATUSES = [
   { key: "firing", label: "Firing" },
@@ -27,7 +29,8 @@ const STATUSES = [
  * correlated view is "why are these one thing?".
  */
 export default function Incidents() {
-  const { pid } = useParams();
+  const scope = useAlertScope();
+  const pid = scope.projectId;
   const navigate = useNavigate();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -68,7 +71,7 @@ export default function Incidents() {
             </SmallButton>
             <SmallButton
               icon="radar"
-              onClick={() => navigate(`/app/projects/${pid}/alerts`)}
+              onClick={() => navigate(scope.link("/alerts"))}
             >
               Alert feed
             </SmallButton>
@@ -90,6 +93,7 @@ export default function Incidents() {
             {s.label}
           </button>
         ))}
+        <ProjectScopePicker value={pid} onChange={scope.setProject} />
       </Card>
 
       <Table
@@ -98,7 +102,7 @@ export default function Incidents() {
         onRetry={load}
         rows={rows}
         onRowClick={(r) =>
-          navigate(`/app/projects/${pid}/incidents/${encodeURIComponent(r.id)}`)
+          navigate(scope.link(`/incidents/${encodeURIComponent(r.id)}`))
         }
         /*
          * Same rule as the alert feed: silence is not health. No incidents can
