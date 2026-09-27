@@ -1,8 +1,15 @@
 # Server overlay: run pre-built images from ECR instead of building on the host.
-# ECR_REGISTRY and IMAGE_TAG are appended to .env by scripts/fetch_env.sh.
+# ECR_REGISTRY and IMAGE_TAG are appended to .env by codedeploy/fetch_env.sh.
+# CORS_ALLOWED_ORIGINS comes from the server's .env (Secrets Manager); it falls
+# back to the local dev origins if unset.
 services:
   auth-service:
     image: ${ECR_REGISTRY}/autoops/auth-service:${IMAGE_TAG}
+    environment:
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      # The dev profile hardcodes autoops.auth.cors.allowed-origins in
+      # application-dev.yml; an env var outranks it (Spring relaxed binding).
+      AUTOOPS_AUTH_CORS_ALLOWEDORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000}
   subscription-service:
     image: ${ECR_REGISTRY}/autoops/subscription-service:${IMAGE_TAG}
   job-service:
@@ -25,5 +32,8 @@ services:
     image: ${ECR_REGISTRY}/autoops/voice-agent:${IMAGE_TAG}
   api-gateway:
     image: ${ECR_REGISTRY}/autoops/api-gateway:${IMAGE_TAG}
+    environment:
+      # Base docker-compose.yml hardcodes localhost origins; override on the server.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000}
   frontend:
     image: ${ECR_REGISTRY}/autoops/frontend:${IMAGE_TAG}
