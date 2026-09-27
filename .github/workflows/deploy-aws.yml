@@ -1,0 +1,84 @@
+# Builds the 13 AutoOps images, pushes them to ECR, and uploads the
+# CodeDeploy bundle to S3 (which triggers CodePipeline, from Phase 9).
+name: Build and ship to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # lets the job request a GitHub OIDC token for AWS
+  contents: read
+
+concurrency:
+  group: deploy-aws
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  COMPOSE_ARGS: -f docker-compose.yml -f docker-compose.prod.yml
+  SERVICES: >-
+    auth-service subscription-service job-service core-service
+    workflow-service agent-service agent-runtime plugin-service
+    rundeck rundeck-service voice-agent api-gateway frontend
+
+jobs:
+  build-and-ship:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Check required repository variables
+        run: |
+          test -n "${{ vars.AWS_ROLE_ARN }}"  || { echo "::error::Repository variable AWS_ROLE_ARN is not set"; exit 1; }
+          test -n "${{ vars.DEPLOY_BUCKET }}" || { echo "::error::Repository variable DEPLOY_BUCKET is not set"; exit 1; }
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Show the OIDC subject GitHub sends (for the AWS trust policy)
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          python3 -c "import sys,json,base64; p=sys.argv[1].split('.')[1]; p+='='*(-len(p)%4); print('OIDC sub =', json.loads(base64.urlsafe_b64decode(p))['sub'])" "$TOKEN"
+
+      - name: Log in to AWS (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build images
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          touch .env
+          docker compose $COMPOSE_ARGS build $SERVICES
+
+      - name: Push images to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: docker compose $COMPOSE_ARGS push $SERVICES
+
+      - name: Package and upload the CodeDeploy bundle
+        run: |
+          mkdir bundle
+          cp docker-compose.yml docker-compose.prod.yml appspec.yml bundle/
+          cp -r codedeploy bundle/
+          cp -r --parents backend/auth-service/mysql-init bundle/
+          cp --parents backend/rundeck-runtime/tokens.properties bundle/
+          echo "${{ github.sha }}" > bundle/IMAGE_TAG
+          (cd bundle && zip -qr ../autoops-bundle.zip .)
+          unzip -l autoops-bundle.zip
+          aws s3 cp autoops-bundle.zip "s3://${{ vars.DEPLOY_BUCKET }}/autoops/autoops-bundle.zip"

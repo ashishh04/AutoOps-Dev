@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
     image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
       MYSQL_DATABASE: autoops_auth
       MYSQL_USER: autoops
       MYSQL_PASSWORD: autoops
