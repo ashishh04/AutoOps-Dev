@@ -5,6 +5,12 @@ files:
   - source: /
     destination: /opt/autoops
 file_exists_behavior: OVERWRITE
+permissions:
+  - object: /opt/autoops/codedeploy
+    pattern: "*.sh"
+    mode: 755
+    type:
+      - file
 hooks:
   AfterInstall:
     - location: codedeploy/fetch_env.sh
