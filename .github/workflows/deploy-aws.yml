@@ -4,7 +4,7 @@ name: Build and ship to AWS
 
 on:
   push:
-    branches: [deploy/aws]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
