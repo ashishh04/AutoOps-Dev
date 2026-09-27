@@ -25,7 +25,7 @@ RUN apk add --no-cache \
         python3=3.12.14-r0 \
         py3-pip=25.1.1-r1 \
         openssh-client-default=10.2_p1-r0 \
-        curl=8.20.0-r0 \
+        curl=8.22.0-r0 \
         opentofu=1.10.6-r8 \
         kubectl=1.34.2-r6 \
         su-exec=0.3-r0 \
@@ -37,7 +37,7 @@ RUN apk add --no-cache \
         libintl=0.24.1-r1 \
         libssl3=3.5.7-r0 \
         libstdc++=15.2.0-r2 \
-        tzdata=2026c-r0 \
+        tzdata=2026b-r0 \
         userspace-rcu=0.15.3-r0 \
         zlib=1.3.2-r0 \
         icu-libs=76.1-r1 \
