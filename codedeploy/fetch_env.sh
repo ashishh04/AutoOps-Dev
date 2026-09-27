@@ -3,7 +3,7 @@
 set -euo pipefail
 cd /opt/autoops
 REGION=ap-south-1
-ACCOUNT_ID=557690608274
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 aws secretsmanager get-secret-value --secret-id autoops/dev/env --region "$REGION" \
   --query SecretString --output text > .env

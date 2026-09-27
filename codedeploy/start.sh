@@ -2,7 +2,7 @@
 # Logs in to ECR, pulls the images for this release, starts the stack.
 set -euo pipefail
 cd /opt/autoops
-REGISTRY=557690608274.dkr.ecr.ap-south-1.amazonaws.com
+REGISTRY=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.ap-south-1.amazonaws.com
 
 aws ecr get-login-password --region ap-south-1 \
   | docker login --username AWS --password-stdin "$REGISTRY"
