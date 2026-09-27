@@ -1,0 +1,20 @@
+# CodeDeploy instructions: copy the bundle to /opt/autoops, then run the hooks.
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /opt/autoops
+file_exists_behavior: OVERWRITE
+hooks:
+  AfterInstall:
+    - location: codedeploy/fetch_env.sh
+      timeout: 120
+      runas: root
+  ApplicationStart:
+    - location: codedeploy/start.sh
+      timeout: 1800
+      runas: root
+  ValidateService:
+    - location: codedeploy/validate.sh
+      timeout: 900
+      runas: root

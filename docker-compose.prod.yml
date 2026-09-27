@@ -1,0 +1,29 @@
+# Server overlay: run pre-built images from ECR instead of building on the host.
+# ECR_REGISTRY and IMAGE_TAG are appended to .env by scripts/fetch_env.sh.
+services:
+  auth-service:
+    image: ${ECR_REGISTRY}/autoops/auth-service:${IMAGE_TAG}
+  subscription-service:
+    image: ${ECR_REGISTRY}/autoops/subscription-service:${IMAGE_TAG}
+  job-service:
+    image: ${ECR_REGISTRY}/autoops/job-service:${IMAGE_TAG}
+  core-service:
+    image: ${ECR_REGISTRY}/autoops/core-service:${IMAGE_TAG}
+  workflow-service:
+    image: ${ECR_REGISTRY}/autoops/workflow-service:${IMAGE_TAG}
+  agent-service:
+    image: ${ECR_REGISTRY}/autoops/agent-service:${IMAGE_TAG}
+  agent-runtime:
+    image: ${ECR_REGISTRY}/autoops/agent-runtime:${IMAGE_TAG}
+  plugin-service:
+    image: ${ECR_REGISTRY}/autoops/plugin-service:${IMAGE_TAG}
+  rundeck:
+    image: ${ECR_REGISTRY}/autoops/rundeck:${IMAGE_TAG}
+  rundeck-service:
+    image: ${ECR_REGISTRY}/autoops/rundeck-service:${IMAGE_TAG}
+  voice-agent:
+    image: ${ECR_REGISTRY}/autoops/voice-agent:${IMAGE_TAG}
+  api-gateway:
+    image: ${ECR_REGISTRY}/autoops/api-gateway:${IMAGE_TAG}
+  frontend:
+    image: ${ECR_REGISTRY}/autoops/frontend:${IMAGE_TAG}
